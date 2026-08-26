@@ -1,0 +1,69 @@
+{% set name = "viewinsar" %}
+{% set version = "0.1.0" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  # For a conda-forge submission, point at the PyPI sdist and paste the sha256
+  # printed by:  openssl dgst -sha256 dist/viewinsar-{{ version }}.tar.gz
+  url: https://pypi.org/packages/source/{{ name[0] }}/{{ name }}/{{ name }}-{{ version }}.tar.gz
+  sha256: 0000000000000000000000000000000000000000000000000000000000000000
+  # To build straight from a local checkout instead, comment the two lines above
+  # and uncomment:
+  # path: ..
+
+build:
+  noarch: python
+  number: 0
+  script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+  entry_points:
+    - viewinsar = viewinsar.cli:main
+
+requirements:
+  host:
+    - python >=3.9
+    - pip
+    - setuptools >=64
+    - wheel
+  run:
+    - python >=3.9
+    - mintpy >=1.5
+    - numpy >=1.20
+    - matplotlib-base >=3.5
+
+test:
+  imports:
+    - viewinsar
+    - viewinsar.swath
+  requires:
+    - pytest
+  commands:
+    - viewinsar --version
+    - viewinsar --help
+    - viewinsar swath --help
+    - python -c "from viewinsar import swath_extract, swath_density"
+
+about:
+  home: https://github.com/drwahyudi/viewinsar
+  summary: Interactive swath (buffered) profile viewer for InSAR data, built on MintPy
+  description: |
+    viewinsar draws a swath profile instead of a single-line transect. You pick a
+    line on the map with two clicks; the line is buffered by a given half width
+    (flat caps), every valid pixel inside the corridor is linearly referenced onto
+    the line - the equivalent of QGIS LRS / ArcGIS "Locate Features Along Routes" -
+    and the resulting cloud is shown as a log-scaled 2-D point-density profile with
+    the density-weighted median and quartiles. The map panel comes from MintPy's
+    view.py, the interaction from plot_transection.py, and an optional third panel
+    with the point displacement time series from tsview.py. The located points and
+    the per-bin statistics can be exported to .csv.
+  license: GPL-3.0-or-later
+  license_family: GPL3
+  license_file: ../LICENSE
+  doc_url: https://github.com/drwahyudi/viewinsar#readme
+  dev_url: https://github.com/drwahyudi/viewinsar
+
+extra:
+  recipe-maintainers:
+    - drwahyudi

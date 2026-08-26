@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "viewinsar"
+dynamic = ["version"]
+description = "Interactive swath (buffered) profile viewer for InSAR velocity and time-series products, built on MintPy"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "GPL-3.0-or-later" }
+authors = [
+    { name = "Donny Wahyudi", email = "wahyudi.donny@gmail.com" },
+]
+maintainers = [
+    { name = "Donny Wahyudi", email = "wahyudi.donny@gmail.com" },
+]
+keywords = [
+    "InSAR", "swath profile", "transect", "linear referencing", "MintPy",
+    "velocity", "time-series", "deformation", "tectonics", "geodesy",
+    "remote-sensing",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+dependencies = [
+    "mintpy>=1.5",
+    "numpy>=1.20",
+    "matplotlib>=3.5",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "ruff>=0.4", "build>=1.0", "twine>=5.0"]
+
+[project.urls]
+Homepage = "https://github.com/drwahyudi/viewinsar"
+Repository = "https://github.com/drwahyudi/viewinsar"
+Issues = "https://github.com/drwahyudi/viewinsar/issues"
+
+[project.scripts]
+viewinsar = "viewinsar.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "viewinsar.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP"]
+ignore = [
+    "E501",    # long lines are handled by line-length
+    "N801",    # swathProfileViewer follows the MintPy class naming
+    "BLE001",  # broad excepts are deliberate around the optional panels
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["viewinsar"]
+known-third-party = ["mintpy", "numpy", "matplotlib", "pytest", "h5py"]

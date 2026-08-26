@@ -1,0 +1,84 @@
+name: publish
+
+# Tag a release to publish:  git tag v0.1.0 && git push origin v0.1.0
+# Or run the workflow by hand and target TestPyPI first.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'where to upload'
+        required: true
+        default: testpypi
+        type: choice
+        options: [testpypi, pypi]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install build twine
+      - name: build the sdist and the wheel
+        run: python -m build
+      - name: check the metadata
+        run: twine check dist/*
+      - name: check that the tag matches viewinsar.__version__
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VER=$(python -c "import re,pathlib; \
+            print(re.search(r\"__version__ = '([^']+)'\", \
+            pathlib.Path('src/viewinsar/__init__.py').read_text()).group(1))")
+          TAG=${GITHUB_REF_NAME#v}
+          echo "package $VER, tag $TAG"
+          test "$VER" = "$TAG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+
+  testpypi:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write        # trusted publishing - no API token to store
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: dist, path: dist }
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  pypi:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: dist, path: dist }
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: pypi
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: dist, path: dist }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
