@@ -4,6 +4,88 @@ All notable changes to viewinsar are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.4.1] - 2026-11-13
+
+### Added
+- **`viewinsar model`: slip rate and locking depth from a profile across a
+  fault**, after Hussain et al. (2016, 2018) and Ou et al. (2022). An elastic
+  screw dislocation (Savage & Burford 1973) - optionally with shallow creep
+  (`--creep`: rate C down to d2 <= d1), a free fault position (`--free-x0`)
+  and a fixed rotation term (`--rot`) - fitted to the swath with the
+  affine-invariant ensemble MCMC sampler of Goodman & Weare (2010), under
+  uniform priors (`--s-max`, `--d1-max`, `--c-max`, `--d2-max`, and a Gaussian
+  `--d1-prior`), with an exponential noise covariance fitted to the residuals
+  (or `--noise white` / `SILL LENGTH`). The pixels are binned (`--bin`, 1 km)
+  and drawn as points, not as a density: the binned medians, the GNSS, the MAP
+  model (dashed) with its 95 % range (grey), the parameters with their 95 %
+  ranges - placed where they hide the fewest points - and a second window with
+  the posterior of every parameter and pair. The fault position and strike
+  come from a `--fault` trace (or `--x0`, `--strike`); distances are taken
+  perpendicular to the fault. `--comp los / ve / vn` turn LOS (pixel by pixel,
+  through MintPy's geometry file), east or north velocities into
+  fault-parallel velocity, so that S > 0 is right-lateral and the sense of
+  slip is written out. Several files (tracks, frames) are fitted together,
+  each with its own offset; GNSS within `--gnss-width` with theirs.
+  `--strain` adds the shear strain rate of the model. `e` / `--save` writes
+  the fit, the posterior, `_params.csv` / `.txt` (MAP, median, 95 % range,
+  the strain rate at the fault |S| / (pi d1)), `_samples.csv`, `_bins.csv`,
+  `_points.csv` and `_gnss.csv`. In Python: `fit_profile()`.
+- **Several files in one swath**: `viewinsar swath FILE1 FILE2 ...` - the
+  frames of a track, or tracks side by side, in any CRS - samples the line in
+  every file, pools them into one density and draws a median line per file
+  (`--labels`); the other files are drawn under the first on the map.
+- **GNSS on the swath** (`-gnss FILE`): .csv / .txt / .xlsx tables with any
+  column spelling, GMT psvelo, .shp, .geojson, .gpkg, .kml / .kmz, and
+  anything GDAL reads (`read_gnss()`). `-vel los` (default) projects them into
+  the LOS of the data, through MintPy's geometry file or the data's
+  attributes (`--geom`, `--los-inc`, `--los-az`); `-vel ve / vn / vu` takes a
+  component. On the map every station, on each profile those inside its
+  swath: black triangles (3D) and circles (2D) with 1-sigma error bars and a
+  smoothed black line, shifted onto the InSAR (`--gnss-ref`). `_gnss.csv`.
+- **`viewinsar stat -rate`**: the median of block 1 minus that of block 2 at
+  every point, with error bars (`--rate-err iqr` or `sem`) - the slip or
+  creep rate along the fault (Hussain et al. 2016). `stat` takes several
+  files (e.g. the east and up velocities): a row of violins each, or a rate
+  series each; `_rate.csv`, and `_2_stats.csv` ... for the other files.
+- **Several sections up front** (`swath`, `model`): `--profile LAT0 LON0 LAT1
+  LON1`, repeated, and `--profile-yx`; `--line-file` takes several lines - GMT
+  segments split by `>`, or the lines of a vector file (.geojson .kml .shp
+  .gpkg ..., re-projected from its CRS). They become `A-A'`, `B-B'`, `C-C'`
+  ..., each in its own window and with its own files; `model` fits each on
+  its own (its own fit and posterior figure) and writes
+  `model_sections_ABC.csv`, one row per section: its ends, where it crosses
+  the fault, the strike, the sense of slip and every parameter with its 95 %
+  range - the slip rate along strike.
+- **The posterior figure as Hussain et al. (2016, Fig. 9)**: every pair of
+  parameters (S, d1, the offset, and C, d2, x0 when fitted) a 2D histogram in
+  jet with a frequency colour bar, the marginals as blue histograms along the
+  bottom with the MAP as a red line and the 95 % range dashed and written
+  above, the MAP a red dot on every pair, and the section (`A - A'`) white on
+  black.
+- **`--save [DIR]` for every command**: what is given up front is written at
+  start-up and `e` exports into DIR, made if it does not exist (`--outdir`
+  and `-o` make their folders too).
+- **`viewinsar -h` documents every command** - what swath, stat, model and
+  tseries do, their options in groups, their keys, their output and examples;
+  `viewinsar --help-all` adds every option of every command, `viewinsar help
+  <command>` those of one.
+
+### Changed
+- **MintPy is optional, and the dependencies are what viewinsar imports**:
+  numpy, scipy, matplotlib, h5py, pyproj, pyshp and pillow (shapely is gone:
+  a small WKB reader of its own). Without MintPy, viewinsar reads MintPy HDF5,
+  LiCSBAS HDF5, ROI_PAC .dem/.rsc and - with rasterio - GeoTIFF itself, and
+  draws the map with the common view.py options; with it, everything is as
+  before. Extras: `[mintpy]`, `[raster]` (rasterio), `[vector]` (pyogrio),
+  `[all]`. `VIEWINSAR_NO_MINTPY=1` ignores an installed MintPy.
+- `--line-file` with more than two points per line takes its first and last
+  point (it took the first two).
+
+### Fixed
+- Single-dash options are no longer abbreviated on Python < 3.13 (`-v` was
+  read as `-vel`, `-n` as `-nlook`), so view.py's `-v VMIN VMAX` reaches the
+  map.
+
 ## [0.4.0] - 2026-11-13
 
 ### Added

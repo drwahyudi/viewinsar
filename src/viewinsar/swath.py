@@ -17,7 +17,7 @@ import numpy as np
 EARTH_RADIUS = 6.3781e6      # in meter
 
 __all__ = [
-    'EARTH_RADIUS', 'is_projected', 'get_pixel_size', 'line_geometry',
+    'EARTH_RADIUS', 'is_projected', 'get_pixel_size', 'center_incidence', 'line_geometry',
     'swath_extract', 'bilinear_sample', 'weighted_quantile', 'nice_step',
     'swath_density',
 ]
@@ -80,17 +80,9 @@ def get_pixel_size(atr, lat_c=None):
             x_step *= np.pi / 180. * EARTH_RADIUS * np.cos(np.deg2rad(lat_c))
         return x_step, y_step, 'm'
 
-    # radar coordinates - prefer MintPy's helpers, fall back to the same formulas
+    # radar coordinates - the formulas of MintPy's range / azimuth_ground_resolution
     try:
-        from mintpy.utils import utils as ut
-        x_step = ut.range_ground_resolution(atr)
-        y_step = ut.azimuth_ground_resolution(atr)
-        if x_step and y_step:
-            return float(x_step), float(y_step), 'm'
-    except (ImportError, KeyError, TypeError, ValueError):
-        pass
-    try:
-        inc = np.deg2rad(float(atr.get('CENTER_INCIDENCE_ANGLE', atr['INCIDENCE_ANGLE'])))
+        inc = np.deg2rad(center_incidence(atr))
         x_step = float(atr['RANGE_PIXEL_SIZE']) / np.sin(inc)
         y_step = float(atr['AZIMUTH_PIXEL_SIZE'])
         if atr.get('PROCESSOR', 'isce') in ('roipac', 'isce'):
@@ -99,6 +91,23 @@ def get_pixel_size(atr, lat_c=None):
         return x_step, y_step, 'm'
     except (KeyError, ValueError, ZeroDivisionError):
         return 1., 1., 'pixel'
+
+
+def center_incidence(atr):
+    """The incidence angle at mid-range, degrees: from the metadata, or from the
+    slant range and the orbit height as MintPy's utils0.incidence_angle()."""
+    for key in ('CENTER_INCIDENCE_ANGLE', 'INCIDENCE_ANGLE'):
+        if key in atr:
+            return float(atr[key])
+    near = float(atr['STARTING_RANGE'])
+    far = near + float(atr['RANGE_PIXEL_SIZE']) * int(atr['WIDTH'])
+    radius = float(atr.get('EARTH_RADIUS', EARTH_RADIUS))
+    height = float(atr['HEIGHT'])
+
+    def inc(rng):
+        return 180.0 - np.degrees(np.arccos((radius ** 2 + rng ** 2 - (radius + height) ** 2)
+                                            / (2 * radius * rng)))
+    return float((inc(near) + inc(far)) / 2.0)
 
 
 def line_geometry(atr, start_yx, end_yx, half_width):
@@ -142,6 +151,20 @@ def line_geometry(atr, start_yx, end_yx, half_width):
         dist_scale=1e-3 if unit == 'm' else 1.,
         dist_unit='km' if unit == 'm' else 'pixel',
     )
+
+
+def project_points(geom, rows, cols):
+    """Along- and off-profile distance of points at fractional (row, col).
+
+    The same frame as the samples of swath_extract (see line_geometry), so a
+    GNSS station or a fault crossing lands exactly where a pixel would.
+    Returns: along, perp - 1D arrays in km (or pixel); perp + = left
+    """
+    dx = np.asarray(cols, dtype=np.float64) * geom['x_step'] - geom['p0'][0]
+    dy = -np.asarray(rows, dtype=np.float64) * geom['y_step'] - geom['p0'][1]
+    along = dx * geom['uvec'][0] + dy * geom['uvec'][1]
+    perp = dx * geom['nvec'][0] + dy * geom['nvec'][1]
+    return along * geom['dist_scale'], perp * geom['dist_scale']
 
 
 def bilinear_sample(data, rows, cols, mask=None):

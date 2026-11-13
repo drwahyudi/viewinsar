@@ -9,7 +9,6 @@ from viewinsar.swath import bilinear_sample, swath_density, swath_extract
 
 matplotlib = pytest.importorskip('matplotlib')
 matplotlib.use('Agg')
-pytest.importorskip('mintpy', reason='the viewer needs MintPy')
 
 
 ##############################################################################

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "viewinsar"
 dynamic = ["version"]
-description = "Interactive swath (buffered) profiles and fault block statistics for InSAR velocity and time-series products, built on MintPy"
+description = "Interactive swath (buffered) profiles, fault block statistics, slip-rate models and time series of InSAR velocity and time-series products (MintPy, LiCSBAS)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "GPL-3.0-or-later" }
@@ -18,7 +18,8 @@ maintainers = [
 keywords = [
     "InSAR", "swath profile", "transect", "linear referencing", "MintPy",
     "fault", "violin plot", "block statistics", "LiCSBAS", "time series viewer",
-    "velocity", "time-series", "deformation", "tectonics", "geodesy",
+    "velocity", "time-series", "deformation", "tectonics", "geodesy", "GNSS",
+    "slip rate", "locking depth", "MCMC", "elastic dislocation",
     "remote-sensing",
 ]
 classifiers = [
@@ -36,27 +37,29 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 dependencies = [
-    "mintpy>=1.5",
+    # only what viewinsar itself imports - MintPy is optional (see below)
     "numpy>=1.20",
-    "matplotlib>=3.5",
-    # all of these already come with MintPy / matplotlib; listed because
-    # viewinsar imports them directly
-    "pyproj>=3.0",      # re-projection: --topoxsect, --fault, the DEM download
-    "pyshp>=2.1",       # --fault: shapefiles, without GDAL
-    "shapely>=1.8",     # --fault: GeoPackage / OGR geometries
-    "h5py>=3.0",        # the downloaded DEM, written as a MintPy .h5
-    "pillow>=8.0",      # decoding the Terrain Tiles (PNG)
-    "scipy>=1.5",       # radar-coded data: lon/lat -> radar pixel
+    "scipy>=1.5",       # the slip-rate model, radar lookups, smoothing
+    "matplotlib>=3.5",  # every window and figure
+    "h5py>=3.0",        # MintPy / LiCSBAS HDF5 products, the downloaded DEM
+    "pyproj>=3.0",      # coordinate systems: UTM data, fault traces, DEMs, GNSS
+    "pyshp>=2.1",       # shapefiles (faults, GNSS, lines); pure python
+    "pillow>=8.0",      # the Terrain Tiles (PNG); comes with matplotlib anyway
 ]
 
 [project.optional-dependencies]
-# rasterio is only a fallback: it lets --topoxsect read a GeoTIFF DEM when the
-# GDAL python bindings MintPy would use are not installed.
+# MintPy: the map comes from view.py itself (every view.py option), the swath
+# --timeseries window from tsview.py, and MintPy reads every format it knows.
+# Without it viewinsar reads MintPy HDF5, GeoTIFF (with rasterio) and ROI_PAC
+# .dem/.rsc itself and draws the map with the common view.py options.
+mintpy = ["mintpy>=1.5"]
+# GeoTIFF and every other GDAL raster (DEMs, LiCSBAS .tif), without MintPy
 raster = ["rasterio>=1.2"]
-# --fault reads .shp .geojson .gpkg .kml/.kmz and GMT text on its own; pyogrio
-# adds every other vector format GDAL knows (FileGDB, GML, FlatGeobuf, ...).
+# --fault, -gnss and --line-file read .shp .geojson .gpkg .kml/.kmz and GMT
+# text on their own; pyogrio adds every other vector format GDAL knows
 vector = ["pyogrio>=0.7"]
-test = ["pytest>=7.0", "rasterio>=1.2"]
+all = ["mintpy>=1.5", "rasterio>=1.2", "pyogrio>=0.7"]
+test = ["pytest>=7.0"]
 dev = ["pytest>=7.0", "ruff>=0.4", "build>=1.0", "twine>=5.0"]
 
 [project.urls]

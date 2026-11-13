@@ -40,12 +40,12 @@ def _datasets(fname):
 
 def check_lookup(fname, atr):
     """Why `fname` cannot serve as the lookup for data with metadata `atr`, or None."""
-    from mintpy.utils import readfile
+    from .compat import read_attribute
 
     if not os.path.isfile(fname):
         return f'no such file: {fname}'
     try:
-        latr = readfile.read_attribute(fname)
+        latr = read_attribute(fname)
     except Exception as err:     # noqa: BLE001
         return f'cannot read {fname}: {err}'
     if 'Y_FIRST' in latr:
@@ -100,11 +100,11 @@ class RadarLookup:
     """lon/lat <-> radar pixel, from a MintPy geometryRadar.h5."""
 
     def __init__(self, fname):
-        from mintpy.utils import readfile
+        from .compat import read
 
         self.file = fname
-        self.lat = readfile.read(fname, datasetName='latitude', print_msg=False)[0]
-        self.lon = readfile.read(fname, datasetName='longitude', print_msg=False)[0]
+        self.lat = read(fname, datasetName='latitude', print_msg=False)[0]
+        self.lon = read(fname, datasetName='longitude', print_msg=False)[0]
         self.lat = np.asarray(self.lat, dtype=np.float64)
         self.lon = np.asarray(self.lon, dtype=np.float64)
         # no-data: NaN, or 0 / 0 as some processors write it

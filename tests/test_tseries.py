@@ -280,7 +280,6 @@ def test_circle_pixels(licsbas):
 ##############################################################################
 #                              the viewer                                    #
 ##############################################################################
-pytest.importorskip('mintpy', reason='the colormaps come from MintPy')
 matplotlib = pytest.importorskip('matplotlib')
 matplotlib.use('Agg')
 

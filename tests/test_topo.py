@@ -11,7 +11,6 @@ from viewinsar import cli
 from viewinsar.raster import crs_of, utm_epsg
 from viewinsar.viewer import TOPO_MAX_SAMPLES, topo_sampling, unit_label
 
-pytest.importorskip('mintpy', reason='the viewer needs MintPy')
 matplotlib = pytest.importorskip('matplotlib')
 matplotlib.use('Agg')
 

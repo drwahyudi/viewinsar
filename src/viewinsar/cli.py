@@ -19,13 +19,17 @@ from .terrain import AUTO_DEM, is_auto
 
 PROG = 'viewinsar'
 
-GMT_FILE = """GMT xy file, e.g. transect_lonlat.xy:
-  >
+GMT_FILE = """GMT xy file, e.g. transect_lonlat.xy - one section per segment:
+  >  A-A'
   131.1663    33.1157
-  131.2621    33.0860"""
+  131.2621    33.0860
+  >  B-B'
+  131.2105    33.1630
+  131.3050    33.1342"""
+VECTOR_EXT = ('.geojson', '.json', '.kml', '.kmz', '.shp', '.gpkg', '.gml', '.fgb', '.gpx')
 
 DESCRIPTION = """\
-Interactive SWATH (buffered) profile viewer for InSAR, built on MintPy.
+Interactive SWATH (buffered) profile viewer for InSAR (MintPy, LiCSBAS ...).
 
 Draw a line on the map with two clicks. The line is buffered by +/-WIDTH km
 (flat caps); every valid pixel inside that corridor is projected onto it to get
@@ -35,10 +39,12 @@ density-weighted median (red) and the 25th-75th percentile envelope.
 
 The map, every cross-section and the point time series each open in their OWN
 window. Press "=" to add another section: they are labelled A-A', B-B', C-C' ...
-on the map and on each profile. Optional: an elevation profile under the LOS
-panel (--topoxsect), fault traces from any vector file on the map, marked on
-every section that crosses them (--fault), oversampling for coarse data
-(--nlook), vector output (--svg).
+on the map and on each profile. Several sections can be given up front, too:
+--profile (repeat it) or a --line-file with one line per section.
+
+Optional: an elevation profile under the LOS panel (--topoxsect), fault traces
+from any vector file on the map, marked on every section that crosses them
+(--fault), oversampling for coarse data (--nlook), vector output (--svg).
 
 No DEM at hand? -d and --topoxsect without a file download one for the map
 extent from the Terrain Tiles (the "Mapzen Global Terrain" of QGIS).
@@ -46,6 +52,10 @@ extent from the Terrain Tiles (the "Mapzen Global Terrain" of QGIS).
 Radar-coded data (no geocoding) work too: MintPy's geometryRadar.h5, found
 next to the data or given with --lookup, supplies the DEM (its height) and
 places fault traces and geocoded DEMs on the radar grid.
+
+Several files (the frames of a track, several tracks) make one density, with a
+median line for each. -gnss puts GNSS velocities on the map and, inside each
+swath, on its profile - in the LOS (-vel los) or as one component.
 
 -nlook, -topoxsect, -fault and -svg work with one dash or two.
 """
@@ -61,6 +71,13 @@ examples:
       --end-lalo 30.250 130.116 -w 15 --save --nodisplay
   viewinsar swath velocity.h5 --start-yx 5290 5579 --end-yx 12177 482 -w 20 --save
   viewinsar swath velocity.h5 --line-file transect_lonlat.xy --save
+
+  # several sections up front, A-A', B-B', C-C', each in its own window
+  viewinsar swath geo_velocity.h5 --profile 30.10 129.95 30.30 130.10 \\
+      --profile 30.20 130.05 30.40 130.20 --profile 30.30 130.15 30.50 130.30 \\
+      -w 10 --save sections --nodisplay
+  # ... or one section per line of a file (GMT segments, .geojson, .shp, .kml)
+  viewinsar swath velocity.h5 --line-file profiles.gmt -w 10 --save
 
   # a UTM file takes lat/lon OR northing/easting - these two are the same line
   viewinsar swath geo_velocity_utm.h5 --start-lalo -2.2329 120.4382 \\
@@ -98,6 +115,16 @@ examples:
   viewinsar swath geo_velocity_utm.h5 -fault faults_wgs84.gpkg mapped_2024.kml \\
       --fault-label "Main fault" --fault-color darkred
 
+  # several files at once - frames of a track, or several tracks: one density
+  # for all of them, a median line for each, every file on the map
+  viewinsar swath T160A/geo_velocity.h5 T087A/geo_velocity.h5 --labels T160A T087A
+
+  # GNSS on the profiles (.csv .xlsx .shp .geojson .gpkg .kml, GMT psvelo ...):
+  # the stations on the map, those inside a swath on its profile - black
+  # triangles 3D, circles 2D, 1-sigma error bars - and a smoothed black line
+  viewinsar swath geo_velocity.h5 -gnss gnss.csv -vel los      # into the LOS
+  viewinsar swath geo_vel_east.h5 -gnss gnss.xlsx -vel ve      # the east component
+
   # vector figures (.svg) for publication
   viewinsar swath geo_velocity.h5 --topoxsect dem.tif --svg --save
 
@@ -123,13 +150,16 @@ several cross-sections, step by step:
   5. press "e"                    -> saves the map with every line and label,
                                      plus each section
 
-output (written by "e" or --save, into --outdir):
+output (written by "e" or --save, into the --save folder - made if it does not
+exist - or --outdir, else the current folder):
   swath_map_ABC.png         the map, with every section line + label
   and, for each section X (A, B, C ...), named after its line, e.g.
   swath_A_Y470X150_Y130X700_w15km  (start row/col, end row/col, half width):
     <name>.png              the section figure; .svg with --svg
     <name>_points.csv       one row per sample: dist_km, perp_km, value,
                             row, col, lat, lon, file_idx
+    <name>_gnss.csv         the GNSS in the swath (-gnss): site, lon, lat,
+                            dist_km, perp_km, value, sigma, value_shifted ...
     <name>_stats.csv        per distance bin: count, median, mean, std, q25,
                             q75, the density-weighted median / q25 / q75 the
                             figure draws, and elevation_median_m (--topoxsect)
@@ -172,19 +202,40 @@ radar-coded data:
 """
 
 
+class ViewinsarParser(argparse.ArgumentParser):
+    """No abbreviations, of single-dash options either.
+
+    Python before 3.13 abbreviates single-dash options even with
+    allow_abbrev=False: view.py's -v (colour range) would be taken for -vel,
+    its -n for -nlook. Only an exact option, or a one-letter one glued to its
+    value (-w15), may match here; anything else goes on to view.py.
+    """
+
+    def _get_option_tuples(self, option_string):
+        tuples = super()._get_option_tuples(option_string)
+        if self.allow_abbrev:
+            return tuples
+        return [t for t in tuples if t[1] == option_string
+                or (len(t[1]) == 2 and option_string.startswith(t[1]))]
+
+
 ##############################################################################
 def create_swath_parser(prog=f'{PROG} swath'):
     """The argument parser of the `swath` sub-command."""
     # allow_abbrev=False: an unknown option is forwarded to view.py, so it must
     # never be taken for an abbreviation of ours (view.py's -n is not -nlook)
-    parser = argparse.ArgumentParser(
+    parser = ViewinsarParser(
         prog=prog, description=DESCRIPTION, epilog=EXAMPLE,
         formatter_class=argparse.RawTextHelpFormatter, allow_abbrev=False)
 
     parser.add_argument('file', nargs='+',
                         help='input file(s): velocity.h5, a time-series epoch, a\n'
-                             'GeoTIFF ... With several files the density comes from\n'
-                             'the first and the others are overlaid as median lines.')
+                             'GeoTIFF ... Several files - frames of a track, several\n'
+                             'tracks - make one density, with a median line for each.\n'
+                             'The map is the first file, with the others drawn under it.')
+    parser.add_argument('--labels', dest='labels', nargs='+', metavar='NAME',
+                        help='names of the input files in the legends (default: the\n'
+                             'file names).')
     parser.add_argument('--dset', dest='dset',
                         help='dataset to read, e.g. velocity, timeseries-20200101.\n'
                              'Default: the one matching FILE_TYPE (so "velocity",\n'
@@ -195,7 +246,9 @@ def create_swath_parser(prog=f'{PROG} swath'):
 
     line = parser.add_argument_group(
         'Profile location',
-        'the first section, given up front instead of by clicking')
+        "sections given up front instead of by clicking: A-A' from\n"
+        "--start-* / --end-*, then one per --line-file line, then one per\n"
+        '--profile')
     line.add_argument('--start-yx', '--yx0', dest='start_yx', metavar=('Y0', 'X0'),
                       type=int, nargs=2,
                       help='start point, in pixel number [row, col]')
@@ -211,7 +264,11 @@ def create_swath_parser(prog=f'{PROG} swath'):
                       type=float, nargs=2,
                       help='end   point, same convention as --start-lalo.')
     line.add_argument('--line-file', dest='lola_file', metavar='FILE',
-                      help='start/end point as "lon lat" lines, GMT format.\n' + GMT_FILE)
+                      help='the sections as "lon lat" lines, GMT format, one per\n'
+                           'segment, from its first to its last point - or any\n'
+                           'vector file (.geojson .kml .shp .gpkg), one per line.\n'
+                           + GMT_FILE)
+    add_profile_options(line)
 
     swath = parser.add_argument_group('Swath', 'the buffer and the density grid')
     swath.add_argument('-w', '--width', '--buffer', dest='width', type=float, default=15.0,
@@ -326,6 +383,8 @@ def create_swath_parser(prog=f'{PROG} swath'):
     flt.add_argument('--fault-lw', dest='fault_lw', type=float, default=1.2, metavar='NUM',
                      help='line width of the traces on the map (default: %(default)s).')
 
+    add_gnss_options(parser)
+
     ts = parser.add_argument_group('Time series', 'a point time-series window, via tsview.py')
     ts.add_argument('--timeseries', '--ts', dest='timeseries', nargs='+', metavar='FILE',
                     help='time-series file(s); right-click a pixel on the map to\n'
@@ -337,10 +396,7 @@ def create_swath_parser(prog=f'{PROG} swath'):
     out.add_argument('-o', '--outfile', type=str, nargs='*',
                      help='file name of the saved MAP figure. Sections are named\n'
                           'after their label: swath_A_..., swath_B_...')
-    out.add_argument('--outdir', dest='outdir', default='.',
-                     help='output directory (default: %(default)s).')
-    out.add_argument('--save', dest='save_fig', action='store_true',
-                     help='save the map + every section at start-up, as "e" does.')
+    add_save_options(out, 'the map and every section given up front\n(--start-lalo ...)')
     out.add_argument('--nodisplay', dest='disp_fig', action='store_false',
                      help='save and do not open any window (implies --save).')
     out.add_argument('--svg', '-svg', dest='svg', action='store_true',
@@ -362,14 +418,107 @@ def create_swath_parser(prog=f'{PROG} swath'):
     return parser
 
 
+def read_profile_file(fname):
+    """Every profile of a --line-file: one per GMT segment, or per vector line.
+
+    A GMT text file has "x y" rows - lon lat, or easting northing on a
+    projected data file - with segments split by '>' lines; a vector file
+    (.geojson .kml .shp .gpkg ...) is re-projected to lon/lat when it says
+    its CRS. A line of more than two points runs from its first to its last.
+
+    Returns: list of ([lat0, lon0], [lat1, lon1]), in file order.
+    """
+    import numpy as np
+
+    from .fault import _read_gmt, read_fault_file
+    from .raster import same_crs
+
+    if not os.path.isfile(fname):
+        raise ValueError(f'--line-file: no such file: {fname}')
+    ext = os.path.splitext(fname)[1].lower()
+    layers = read_fault_file(fname) if ext in VECTOR_EXT else _read_gmt(fname)
+    out = []
+    for lines, crs in layers:
+        for line in lines:
+            line = np.asarray(line, dtype=np.float64)[:, :2]
+            line = line[np.isfinite(line).all(axis=1)]
+            if len(line) < 2:
+                continue
+            ends = line[[0, -1]]
+            if crs is not None and not same_crs(crs, 4326):
+                from pyproj import Transformer
+                lon, lat = Transformer.from_crs(crs, 4326, always_xy=True).transform(
+                    ends[:, 0], ends[:, 1])
+                ends = np.c_[lon, lat]
+            out.append(([float(ends[0, 1]), float(ends[0, 0])],
+                        [float(ends[1, 1]), float(ends[1, 0])]))
+    if not out:
+        raise ValueError(f'--line-file: no line of two or more points in {fname}')
+    return out
+
+
 def read_lonlat_file(fname):
-    """Read the start/end lat/lon from a GMT-format lonlat text file."""
-    with open(fname) as fid:
-        lines = [ln for ln in fid.read().splitlines()
-                 if ln.strip() and not ln.lstrip().startswith('>')]
-    lon0, lat0 = (float(i) for i in lines[0].split()[:2])
-    lon1, lat1 = (float(i) for i in lines[1].split()[:2])
-    return [lat0, lon0], [lat1, lon1]
+    """The start / end [lat, lon] of the first line of a --line-file."""
+    return read_profile_file(fname)[0]
+
+
+def add_profile_options(group):
+    """--profile / --profile-yx: more sections up front (swath, model)."""
+    group.add_argument('--profile', '-profile', dest='profile', action='append', nargs=4,
+                       type=float, metavar=('LAT0', 'LON0', 'LAT1', 'LON1'),
+                       help='one more section up front, from [LAT0, LON0] to\n'
+                            '[LAT1, LON1] (northing / easting on a projected file).\n'
+                            "Repeat it: each is the next of A-A', B-B', C-C' ...")
+    group.add_argument('--profile-yx', dest='profile_yx', action='append', nargs=4, type=int,
+                       metavar=('Y0', 'X0', 'Y1', 'X1'),
+                       help='the same, in pixel numbers [row, col].')
+    return group
+
+
+def collect_profiles(inps):
+    """Every section given up front, in order: --start-lalo / --end-lalo (or
+    --start-yx / --end-yx), one per --line-file line, one per --profile and
+    --profile-yx. Sets inps.profiles, a list of dicts (start_yx, end_yx,
+    start_lalo, end_lalo), and inps.start_yx ... to the first of them."""
+    for a, b in (('start_lalo', 'end_lalo'), ('start_yx', 'end_yx')):
+        if bool(getattr(inps, a, None)) != bool(getattr(inps, b, None)):
+            given, missing = (a, b) if getattr(inps, a, None) else (b, a)
+            raise ValueError(f'--{given.replace("_", "-")} needs --{missing.replace("_", "-")}')
+    profs = []
+
+    def add(what, lalo=None, yx=None):
+        if lalo is not None:
+            (y0, y1), (x0, x1) = inps.coord.lalo2yx([lalo[0][0], lalo[1][0]],
+                                                    [lalo[0][1], lalo[1][1]])
+            yx = ([y0, x0], [y1, x1])
+        start, end = list(yx[0]), list(yx[1])
+        if [int(c) for c in start] == [int(c) for c in end]:
+            raise ValueError(f'{what}: both ends fall on the same pixel {start}')
+        profs.append(dict(start_yx=start, end_yx=end,
+                          start_lalo=[float(c) for c in lalo[0]] if lalo else None,
+                          end_lalo=[float(c) for c in lalo[1]] if lalo else None))
+
+    if inps.start_lalo and inps.end_lalo:
+        add('--start-lalo / --end-lalo', lalo=(inps.start_lalo, inps.end_lalo))
+    elif inps.start_yx and inps.end_yx:
+        add('--start-yx / --end-yx', yx=(inps.start_yx, inps.end_yx))
+    if getattr(inps, 'lola_file', None):
+        lines = read_profile_file(inps.lola_file)
+        for k, (start, end) in enumerate(lines):
+            add(f'--line-file line {k + 1}', lalo=(start, end))
+        if len(lines) > 1 and inps.print_msg:
+            print(f'--line-file: {len(lines)} lines -> {len(lines)} sections')
+    for k, p in enumerate(getattr(inps, 'profile', None) or []):
+        add(f'--profile #{k + 1}', lalo=(p[:2], p[2:]))
+    for k, p in enumerate(getattr(inps, 'profile_yx', None) or []):
+        add(f'--profile-yx #{k + 1}', yx=(p[:2], p[2:]))
+
+    inps.profiles = profs
+    if profs:
+        first = profs[0]
+        inps.start_yx, inps.end_yx = first['start_yx'], first['end_yx']
+        inps.start_lalo, inps.end_lalo = first['start_lalo'], first['end_lalo']
+    return profs
 
 
 def default_dset(fname, atr=None, print_msg=True):
@@ -382,10 +531,10 @@ def default_dset(fname, atr=None, print_msg=True):
     For a time-series file the first slice is the all-zero reference date, so
     use the LAST epoch, the cumulative displacement, as tsview.py does.
     """
-    from mintpy.utils import readfile
+    from .compat import get_slice_list, read_attribute
 
-    atr = atr or readfile.read_attribute(fname)
-    slices = readfile.get_slice_list(fname)
+    atr = atr or read_attribute(fname)
+    slices = get_slice_list(fname)
     if not slices:
         raise ValueError(f'no 2D dataset found in {fname}')
     names = [s.split('-')[0] for s in slices]
@@ -417,6 +566,110 @@ def default_dset(fname, atr=None, print_msg=True):
     return slices[0]
 
 
+def add_gnss_options(parser):
+    """-gnss and its companions - for swath and model."""
+    grp = parser.add_argument_group('GNSS', 'GNSS velocities on the map and the profiles')
+    grp.add_argument('-gnss', '--gnss', dest='gnss_file', metavar='FILE',
+                     help='GNSS velocities: .csv .txt .xlsx .shp .geojson .gpkg .kml\n'
+                          '... with columns lon, lat, ve, vn [vu] [se sn su] [site],\n'
+                          'any spelling (Ve(mm/yr), sig_e ...); no header = GMT psvelo\n'
+                          '(lon lat ve vn se sn corr site).')
+    grp.add_argument('-vel', '--gnss-comp', dest='gnss_comp', default='los',
+                     choices=['ve', 'vn', 'vu', 'los'],
+                     help='the GNSS component to compare with the data (default: los,\n'
+                          'projected into the LOS of the first file).')
+    grp.add_argument('--gnss-unit', dest='gnss_unit', default='auto',
+                     choices=['auto', 'mm/yr', 'cm/yr', 'm/yr'],
+                     help='unit of the GNSS file (default: auto - said by the column\n'
+                          'names, else mm/yr). Converted to the data\'s unit.')
+    grp.add_argument('--gnss-ref', dest='gnss_ref', default='insar', choices=['insar', 'none'],
+                     help='insar (default): shift the GNSS onto the InSAR, by the median\n'
+                          'of InSAR - GNSS at the stations in the swath; none: as read.')
+    grp.add_argument('--gnss-radius', dest='gnss_radius', type=float, default=1.0,
+                     metavar='KM', help='the InSAR "at" a station: the pixels within this\n'
+                                        'distance (default: %(default)s km).')
+    grp.add_argument('--gnss-nofit', dest='gnss_fit', action='store_false',
+                     help='no smoothed line through the GNSS on the profiles.')
+    grp.add_argument('--gnss-label', dest='gnss_label', action='store_true',
+                     help='write the site names on the map.')
+    grp.add_argument('--geom', dest='geom_file', metavar='FILE',
+                     help='-vel los: MintPy geometry file with incidenceAngle and\n'
+                          'azimuthAngle (default: found beside the data, else the\n'
+                          'data\'s attributes).')
+    grp.add_argument('--los-inc', dest='los_inc', type=float, metavar='DEG',
+                     help='-vel los: one incidence angle for the scene instead.')
+    grp.add_argument('--los-az', dest='los_az', type=float, metavar='DEG',
+                     help='-vel los: and its azimuth angle (MintPy convention: of the\n'
+                          'ground-to-satellite vector, from north, anti-clockwise).')
+    return grp
+
+
+def add_save_options(group, what):
+    """--save [DIR] and --outdir - the same for every command."""
+    group.add_argument('--save', '-save', dest='save_dir', nargs='?', const='', metavar='DIR',
+                       help='export into DIR: the folder "e" writes to, made if it\n'
+                            'does not exist (default: --outdir, else the current\n'
+                            f'folder). Also saves {what} at start-up.')
+    group.add_argument('--outdir', dest='outdir', default='.', metavar='DIR',
+                       help='the folder to export into, as --save DIR but without the\n'
+                            'save at start-up; made if it does not exist (default:\n'
+                            'the current folder).')
+    return group
+
+
+def _bare_save(argv):
+    """`--save velocity.h5`: a data file after --save is an input, not the folder
+    to export into - keep --save bare then."""
+    if argv is None:
+        argv = sys.argv[1:]
+    argv = list(argv)
+    for i, tok in enumerate(argv[:-1]):
+        if tok in ('--save', '-save') and os.path.isfile(argv[i + 1]):
+            argv[i] = f'{tok}='
+    return argv
+
+
+def check_save_options(inps):
+    """What to save at start-up, and the folder every export goes to.
+
+    --save [DIR], -o and --nodisplay save at start-up. --save DIR (or else
+    --outdir) is the folder of every export - "e" too - and it is made now,
+    if it does not exist. A bare -o file name goes into that folder.
+    """
+    save_dir = getattr(inps, 'save_dir', None)
+    inps.save_fig = save_dir is not None or bool(inps.outfile) or not inps.disp_fig
+    folder = inps.outdir or '.'
+    if save_dir:
+        if folder != '.' and os.path.normpath(folder) != os.path.normpath(save_dir):
+            print(f'NOTE: --save {save_dir} and --outdir {folder}: exporting into {save_dir}')
+        folder = save_dir
+    folder = os.path.normpath(os.path.expandvars(os.path.expanduser(folder)))
+    inps.outdir = make_folder(folder, '--save' if save_dir else '--outdir')
+    if inps.outfile:
+        names = []
+        for name in inps.outfile:
+            name = os.path.expandvars(os.path.expanduser(name))
+            if not os.path.dirname(name):
+                name = os.path.join(inps.outdir, name)
+            make_folder(os.path.dirname(name) or '.', '-o')
+            names.append(name)
+        inps.outfile = names
+    return inps
+
+
+def make_folder(folder, option='--save'):
+    """Make `folder` (and its parents) if it does not exist; return it."""
+    if os.path.exists(folder) and not os.path.isdir(folder):
+        raise ValueError(f'{option}: {folder} is a file, not a folder')
+    if not os.path.isdir(folder):
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError as err:
+            raise ValueError(f'{option}: cannot make the folder {folder}: {err}') from err
+        print(f'made the folder {os.path.abspath(folder)}')
+    return folder
+
+
 def check_map_options(inps):
     """-d, --dem-zoom, --lookup and --fault - the same for swath and stat."""
     # -d FILE stays view.py's background, exactly as before; -d alone = download
@@ -437,19 +690,30 @@ def check_map_options(inps):
             raise ValueError(f'--fault: no such file: {", ".join(missing)}')
     if inps.fault_lw <= 0:
         raise ValueError(f'--fault-lw must be positive, got {inps.fault_lw}')
+    geoms = getattr(inps, 'geom_file', None) or []
+    for opt, path in ([('--gnss', getattr(inps, 'gnss_file', None))]
+                      + [('--geom', g) for g in ([geoms] if isinstance(geoms, str) else geoms)]):
+        if path and not os.path.exists(path):
+            raise ValueError(f'{opt}: no such file: {path}')
+    if (getattr(inps, 'los_inc', None) is None) != (getattr(inps, 'los_az', None) is None):
+        raise ValueError('--los-inc and --los-az go together')
+    if getattr(inps, 'gnss_radius', 1.0) <= 0:
+        raise ValueError(f'--gnss-radius must be positive, got {inps.gnss_radius}')
     return inps
 
 
 def read_file_info(inps):
     """The input file list, its metadata and the dataset to show."""
-    from mintpy.utils import readfile
-    from mintpy.utils import utils as ut
+    from .compat import coordinate, get_file_list, read_attribute
 
-    inps.file = ut.get_file_list(inps.file)
+    inps.file = get_file_list(inps.file)
     if not inps.file:
         raise ValueError('no such input file')
-    inps.atr = readfile.read_attribute(inps.file[0])
-    inps.coord = ut.coordinate(inps.atr)
+    labels = getattr(inps, 'labels', None)
+    if labels and len(labels) != len(inps.file):
+        raise ValueError(f'--labels: {len(labels)} name(s) for {len(inps.file)} file(s)')
+    inps.atr = read_attribute(inps.file[0])
+    inps.coord = coordinate(inps.atr)
     inps.num_file = len(inps.file)
     if not inps.dset:
         inps.dset = default_dset(inps.file[0], inps.atr, print_msg=inps.print_msg)
@@ -459,12 +723,11 @@ def read_file_info(inps):
 def cmd_line_parse(iargs=None):
     """Parse the `swath` arguments; unknown ones are forwarded to view.py."""
     parser = create_swath_parser()
-    inps, view_extra = parser.parse_known_args(args=iargs)
+    inps, view_extra = parser.parse_known_args(args=_bare_save(iargs))
     inps.argv = list(iargs) if iargs is not None else sys.argv[1:]
     inps.view_extra = view_extra
 
-    if inps.outfile or not inps.disp_fig:
-        inps.save_fig = True
+    check_save_options(inps)
     if inps.svg:
         inps.fig_ext = '.svg'
     if inps.width <= 0:
@@ -485,13 +748,7 @@ def cmd_line_parse(iargs=None):
         raise ValueError(f'--topoxsect: no such file: {inps.topoxsect}')
 
     read_file_info(inps)
-
-    if inps.lola_file:
-        inps.start_lalo, inps.end_lalo = read_lonlat_file(inps.lola_file)
-    if inps.start_lalo and inps.end_lalo:
-        (y0, y1), (x0, x1) = inps.coord.lalo2yx([inps.start_lalo[0], inps.end_lalo[0]],
-                                                [inps.start_lalo[1], inps.end_lalo[1]])
-        inps.start_yx, inps.end_yx = [y0, x0], [y1, x1]
+    collect_profiles(inps)
 
     if view_extra and inps.print_msg:
         print(f'options forwarded to view.py: {" ".join(view_extra)}')
@@ -542,6 +799,13 @@ side at every point, each in the colour of its circles on the map - with
 strikes at the median (in the block's colour), the mean (solid) and the mode
 (dotted: the peak of the density, where the violin is widest). The medians of
 each block are joined by a dashed line along the line.
+
+Several files (tracks, frames, or the east and up velocities) get the same
+circles, a row of violins each. With -rate the violins give way to the RATE:
+the median of block 1 minus that of block 2 at every point, with error bars,
+one series per file - the slip (or creep) rate across the fault along its
+trace, as Hussain et al. (2016) measured the creep of the North Anatolian
+Fault.
 """
 
 STAT_EXAMPLE = """\
@@ -561,6 +825,10 @@ examples:
   viewinsar stat velocity.h5 -sp 5 -r 2 --names "West block" "East block" \\
       --colors tab:green tab:purple
 
+  # the rate across the fault (block 1 - block 2) of the east and up velocities
+  viewinsar stat geo_ve.h5 geo_vu.h5 --labels East Up -rate -sp 5 -r 2 \\
+      --line-file fault_trace.geojson
+
 mouse / keyboard (in either window):
   left click       : add a point to the line
   Enter            : finish the line -> points, circles and violins
@@ -568,8 +836,9 @@ mouse / keyboard (in either window):
   "n"              : start a new line (so does a click after Enter)
   "e"              : export (see "output")
 
-output (written by "e" or --save, into --outdir), named after the line's first
-and last point, e.g. stat_Y3670X744_Y2967X696_sp5km_r2km:
+output (written by "e" or --save, into the --save folder - made if it does not
+exist - or --outdir, else the current folder), named after the line's first and
+last point, e.g. stat_Y3670X744_Y2967X696_sp5km_r2km:
   <name>.png          the violins (.svg with --svg)
   <name>_map.png      the map, with the line, the points and the circles
   <name>_stats.csv    one row per point: dist_km along the line, its position,
@@ -578,7 +847,10 @@ and last point, e.g. stat_Y3670X744_Y2967X696_sp5km_r2km:
                       median_b1_minus_b2
   <name>_values.csv   every pixel used: point, block, value, row, col,
                       dist_to_line_km (never below the gap), and lat/lon
+  <name>_rate.csv     -rate: one row per point, rate (block 1 - block 2) and
+                      rate_err of every file (rate_1, rate_err_1, rate_2 ...)
   <name>_info.txt     the line, the parameters, and which side is which block
+  a second file's tables are <name>_2_stats.csv and <name>_2_values.csv, ...
 
 map options: anything not listed above goes to view.py, as for `viewinsar swath`
 (-c/--colormap -v/--vlim -u/--unit -m/--mask --sub-lat --sub-lon ...).
@@ -587,11 +859,25 @@ map options: anything not listed above goes to view.py, as for `viewinsar swath`
 
 def create_stat_parser(prog=f'{PROG} stat'):
     """The argument parser of the `stat` sub-command."""
-    parser = argparse.ArgumentParser(
+    parser = ViewinsarParser(
         prog=prog, description=STAT_DESCRIPTION, epilog=STAT_EXAMPLE,
         formatter_class=argparse.RawTextHelpFormatter, allow_abbrev=False)
-    parser.add_argument('file', help='input file: velocity.h5, a GeoTIFF, a time-series\n'
-                                     'epoch ... geocoded or in radar coordinates.')
+    parser.add_argument('file', nargs='+',
+                        help='input file(s): velocity.h5, a GeoTIFF, a time-series epoch\n'
+                             '... geocoded or in radar coordinates. Several files -\n'
+                             'tracks, frames, or east and up velocities - each get the\n'
+                             'same circles; with -rate one series each.')
+    parser.add_argument('--labels', dest='labels', nargs='+', metavar='NAME',
+                        help='names of the input files in the legends (default: the\n'
+                             'file names).')
+    parser.add_argument('-rate', '--rate', dest='rate', action='store_true',
+                        help='plot the RATE instead of the violins: median of block 1 -\n'
+                             'median of block 2 at every point, with error bars, one\n'
+                             'series per file - the slip (creep) rate across the fault.')
+    parser.add_argument('--rate-err', dest='rate_err', default='iqr', choices=['iqr', 'sem'],
+                        help='-rate error bars: iqr (default) the robust spread of the\n'
+                             'pixels, sqrt(s1^2 + s2^2) with s = IQR / 1.349; sem the\n'
+                             'standard error of the medians (pixels taken as independent).')
     parser.add_argument('--dset', dest='dset',
                         help='dataset to read (default: the one matching FILE_TYPE;\n'
                              'see `viewinsar list FILE`).')
@@ -656,10 +942,7 @@ def create_stat_parser(prog=f'{PROG} stat'):
     out = parser.add_argument_group('Save/Output', 'figures and data - see "output" below')
     out.add_argument('-o', '--outfile', type=str, nargs='*',
                      help='file name of the saved MAP figure.')
-    out.add_argument('--outdir', dest='outdir', default='.',
-                     help='output directory (default: %(default)s).')
-    out.add_argument('--save', dest='save_fig', action='store_true',
-                     help='save everything at start-up (needs a --line-* option).')
+    add_save_options(out, 'everything, when the line is given up front\n(--line-yx / --line-lalo / --line-file)')
     out.add_argument('--nodisplay', dest='disp_fig', action='store_false',
                      help='save and do not open any window (implies --save).')
     out.add_argument('--svg', '-svg', dest='svg', action='store_true',
@@ -691,13 +974,11 @@ def stat_cmd_line_parse(iargs=None):
     from matplotlib.colors import is_color_like
 
     parser = create_stat_parser()
-    inps, view_extra = parser.parse_known_args(args=iargs)
+    inps, view_extra = parser.parse_known_args(args=_bare_save(iargs))
     inps.argv = list(iargs) if iargs is not None else sys.argv[1:]
     inps.view_extra = view_extra
-    inps.file = [inps.file]
 
-    if inps.outfile or not inps.disp_fig:
-        inps.save_fig = True
+    check_save_options(inps)
     if inps.svg:
         inps.fig_ext = '.svg'
     if inps.spacing <= 0:
@@ -747,6 +1028,409 @@ def stat_main(iargs=None):
 
 
 ##############################################################################
+#                                  model                                     #
+##############################################################################
+MODEL_DESCRIPTION = """\
+Fit an elastic dislocation model to a profile across a fault: the slip rate
+S below the locking depth d1 (Savage & Burford 1973) - optionally with
+shallow creep C from the surface down to d2, and a rotation term - as
+Hussain et al. (2016, 2018) did along the North Anatolian Fault:
+
+    v(x) = S/pi atan(x/d1) + C [H(x) - 1/2 - 1/pi atan(x/d2)] + a
+
+Draw the profile ACROSS the fault on the map (two clicks), or give it - or
+several, A-A', B-B', C-C' ... - up front with --start-lalo / --end-lalo,
+--profile (repeat it) or --line-file (one section per line); each section is
+fitted on its own, with windows of its own. Every pixel of the swath
+(+/-WIDTH km) becomes a point: velocity against its distance from the fault. The points are binned
+(--bin km, the median of each bin, as Ou et al. 2022) and the bins fitted
+with the affine-invariant ensemble MCMC sampler of Goodman & Weare (2010) -
+the emcee sampler Hussain et al. used - under uniform priors, with a noise
+covariance that decays with distance (estimated from the residuals, or
+--noise). Several files (tracks, frames) are fitted together, each with an
+offset of its own; GNSS (-gnss) too, with theirs.
+
+One window shows the points (no density: the pixels themselves, red), the
+binned medians, the GNSS (blue), the maximum a posteriori (MAP) model (bold
+dashes) and its 95 % range (grey), with the parameters and their 95 %
+ranges written on it; a second one the posterior distributions, as Hussain
+et al. (2016, Fig. 9): every pair of parameters as a 2D histogram (jet),
+the marginals as blue histograms along the bottom, the MAP in red.
+
+The fault: where the profile crosses a --fault trace, with the strike of the
+trace there - or --x0 and --strike. --comp says what the data are: as-is
+(default - fitted as they are), par (fault-parallel velocity), ve / vn
+(east / north velocity) or los (line-of-sight velocity, through MintPy's
+geometry file), the last three turned into fault-parallel velocity assuming
+purely fault-parallel motion (no vertical, no fault-normal motion). Then S >
+0 is right-lateral, and the sense of slip is written out.
+"""
+
+MODEL_EXAMPLE = """\
+examples:
+  # click a profile across the fault: the trace gives the fault position and
+  # its strike, the LOS velocity becomes fault-parallel velocity
+  viewinsar model geo_velocity.h5 --comp los -fault faults.shp -w 25
+
+  # up front, saved, nothing shown; with shallow creep (C, d2)
+  viewinsar model geo_velocity.h5 --comp los -fault faults.shp --creep \\
+      --start-lalo 40.20 33.10 --end-lalo 41.30 33.40 -w 25 --nodisplay
+
+  # three profiles along the fault, A-A', B-B', C-C', each fitted, saved in fits/
+  viewinsar model geo_velocity.h5 --comp los -fault faults.shp -w 25 \\
+      --profile 40.20 33.10 41.30 33.40 --profile 40.30 33.90 41.40 34.20 \\
+      --profile 40.40 34.70 41.50 35.00 --nodisplay --save fits
+  viewinsar model geo_velocity.h5 --comp los -fault faults.shp \\
+      --line-file profiles.gmt --nodisplay --save fits    # one per segment
+
+  # east velocity (asc + desc decomposed) and GNSS, fitted together
+  viewinsar model geo_ve.h5 --comp ve -gnss gnss.csv -fault faults.shp --strain
+
+  # two tracks at once, each with its own offset
+  viewinsar model T014A/geo_velocity.h5 T123D/geo_velocity.h5 --comp los \\
+      -fault faults.shp --labels T014A T123D
+
+  # as Hussain et al. (2016): rotation of the block south of the fault,
+  # a Gaussian prior on the locking depth, a given noise covariance
+  viewinsar model geo_vpar.h5 --comp par --strike 100 --rot 0.0215 \\
+      --d1-prior 17 5 --noise 6.35 35.8
+
+mouse / keyboard: as `viewinsar swath` - two left clicks draw a section (and
+fit it), "=" starts another, "n" redoes the current one, "e" exports.
+
+output (written by "e" or --save, into the --save folder - made if it does not
+exist - or --outdir, else the current folder), for each section X, named after
+its line, e.g. model_A_Y470X150_Y130X700_w25km:
+  <name>.png             the fit: points, bins, GNSS, MAP model, 95 % range
+  <name>_posterior.png   the posterior distributions, the MAP in red
+  <name>_params.csv      every parameter: MAP, median, the 95 % range (2.5 and
+                         97.5 percentiles: lower_95, upper_95),
+                         and the shear strain rate at the fault |S| / (pi d1)
+  <name>_params.txt      the same, readable, with the fault position, strike,
+                         sense of slip, noise, priors and sampler diagnostics
+  <name>_samples.csv     posterior samples, for plots of your own
+  <name>_bins.csv        the binned medians and the model at each
+  <name>_points.csv      every pixel: distance along the profile and from the
+                         fault, its value and the velocity fitted
+  <name>_gnss.csv        the GNSS in the swath (-gnss)
+  model_map_AB.png       the map, with every section and the fault positions
+  model_sections_AB.csv  two sections or more: one row each - its ends, where
+                         it crosses the fault, the strike, the sense of slip,
+                         S, d1 (C, d2, x0) and the strain with their 95 % ranges
+
+map options: anything not listed above goes to view.py, as for `viewinsar swath`
+(-c/--colormap -v/--vlim -u/--unit -m/--mask --sub-lat --sub-lon ...).
+"""
+
+
+def create_model_parser(prog=f'{PROG} model'):
+    """The argument parser of the `model` sub-command."""
+    parser = ViewinsarParser(
+        prog=prog, description=MODEL_DESCRIPTION, epilog=MODEL_EXAMPLE,
+        formatter_class=argparse.RawTextHelpFormatter, allow_abbrev=False)
+    parser.add_argument('file', nargs='+',
+                        help='input file(s): velocity.h5, a GeoTIFF ... Several files\n'
+                             '(tracks, frames) are fitted together, each with its own\n'
+                             'offset.')
+    parser.add_argument('--labels', dest='labels', nargs='+', metavar='NAME',
+                        help='names of the input files in the legends (default: the\n'
+                             'file names).')
+    parser.add_argument('--dset', dest='dset',
+                        help='dataset to read (default: the one matching FILE_TYPE;\n'
+                             'see `viewinsar list FILE`).')
+    parser.add_argument('--noverbose', dest='print_msg', action='store_false',
+                        help='disable the verbose message printing.')
+
+    line = parser.add_argument_group(
+        'Profile location',
+        "sections given up front, each fitted on its own: A-A' from\n"
+        "--start-* / --end-*, then one per --line-file line, then one per\n"
+        '--profile')
+    line.add_argument('--start-yx', '--yx0', dest='start_yx', metavar=('Y0', 'X0'), type=int,
+                      nargs=2, help='start point, in pixel number [row, col]')
+    line.add_argument('--end-yx', '--yx1', dest='end_yx', metavar=('Y1', 'X1'), type=int,
+                      nargs=2, help='end   point, in pixel number [row, col]')
+    line.add_argument('--start-lalo', '--lalo0', dest='start_lalo', metavar=('LAT0', 'LON0'),
+                      type=float, nargs=2,
+                      help='start point in [lat, lon] (or [northing, easting] on a\n'
+                           'projected file).')
+    line.add_argument('--end-lalo', '--lalo1', dest='end_lalo', metavar=('LAT1', 'LON1'),
+                      type=float, nargs=2, help='end   point, as --start-lalo.')
+    line.add_argument('--line-file', dest='lola_file', metavar='FILE',
+                      help='the sections as "lon lat" lines, GMT format, one per\n'
+                           'segment (split by ">"), from its first to its last point\n'
+                           '- or any vector file (.geojson .kml .shp .gpkg), one\n'
+                           'per line.')
+    add_profile_options(line)
+
+    swath = parser.add_argument_group('Swath', 'the pixels that go into the fit')
+    swath.add_argument('-w', '--width', '--buffer', dest='width', type=float, default=20.0,
+                       metavar='KM',
+                       help='HALF width of the swath, in km (default: %(default)s;\n'
+                            'Hussain et al. took +/-20-25 km).')
+    swath.add_argument('--bin', dest='bin_km', type=float, default=1.0, metavar='KM',
+                       help='bin size along the profile, in km (default: %(default)s):\n'
+                            'the median of each bin is fitted.')
+    swath.add_argument('--keep-zero', dest='keep_zero', action='store_true',
+                       help='keep exactly-zero pixels (dropped by default).')
+    swath.add_argument('--decimate', dest='decimate', type=int, default=1, metavar='NUM',
+                       help='use every NUMth pixel only (default: %(default)s).')
+    swath.add_argument('--nlook', '-nlook', dest='nlook', type=int, default=1, metavar='NUM',
+                       help='oversample a coarse raster NUM times per axis\n'
+                            '(default: %(default)s).')
+
+    flt = parser.add_argument_group('Fault', 'where the fault is, and its strike')
+    flt.add_argument('--fault', '-fault', dest='fault_file', nargs='+', metavar='FILE',
+                     help='fault trace(s), any vector format and CRS (as swath). The\n'
+                          'crossing nearest the middle of the profile is the fault\n'
+                          'position, the trace there gives the strike.')
+    flt.add_argument('--x0', dest='x0_km', type=float, metavar='KM',
+                     help='the fault position: KM along the profile from its start\n'
+                          '(default: the --fault crossing, else the middle).')
+    flt.add_argument('--strike', dest='strike', type=float, metavar='DEG',
+                     help='fault strike, degrees clockwise from north (default:\n'
+                          'from the trace, else perpendicular to the profile). With\n'
+                          '--comp par, the direction the data are positive along.')
+    flt.add_argument('--fault-color', dest='fault_color', default='k', metavar='COLOR',
+                     help='colour of the traces (default: %(default)s).')
+    flt.add_argument('--fault-lw', dest='fault_lw', type=float, default=1.2, metavar='NUM',
+                     help='line width of the traces on the map (default: %(default)s).')
+
+    data = parser.add_argument_group('Data', 'what the data are')
+    data.add_argument('--comp', dest='comp', default='as-is',
+                      choices=['as-is', 'par', 've', 'vn', 'los'],
+                      help='as-is (default): fitted as they are; par: fault-parallel\n'
+                           'velocity; ve / vn: east / north velocity, divided by\n'
+                           'sin / cos(strike); los: LOS velocity, divided by the\n'
+                           'LOS . strike direction, pixel by pixel (MintPy geometry\n'
+                           'file). ve, vn and los assume fault-parallel motion only.')
+    data.add_argument('--geom', dest='geom_file', nargs='+', metavar='FILE',
+                      help='--comp los: MintPy geometry file(s) with incidenceAngle\n'
+                           'and azimuthAngle, one per input file in order (default:\n'
+                           'found beside each file, else its attributes).')
+    data.add_argument('--los-inc', dest='los_inc', type=float, metavar='DEG',
+                      help='--comp los: one incidence angle for every pixel instead.')
+    data.add_argument('--los-az', dest='los_az', type=float, metavar='DEG',
+                      help='--comp los: and the azimuth angle (MintPy convention).')
+
+    mod = parser.add_argument_group('Model', 'the parameters and their uniform priors')
+    mod.add_argument('--creep', dest='creep', action='store_true',
+                     help='add shallow creep: C (rate) from the surface down to d2\n'
+                          '(depth), d2 <= d1, in the same sense as S.')
+    mod.add_argument('--free-x0', dest='free_x0', type=float, nargs='?', const=5.0,
+                     metavar='KM',
+                     help='fit the fault position too, within +/-KM of it\n'
+                          '(KM default: 5).')
+    mod.add_argument('--rot', dest='rot', type=float, default=0.0, metavar='RATE',
+                     help='a fixed linear term, RATE x, on one side of the fault, in\n'
+                          'mm/yr per km - the rotation of a block about a nearby\n'
+                          'pole (Hussain et al. 2016: 0.0215). Default: none.')
+    mod.add_argument('--rot-side', dest='rot_side', default='end', choices=['end', 'start'],
+                     help="the side of --rot: end (default, towards A', x > 0) or\n"
+                          'start (towards A, x < 0).')
+    mod.add_argument('--s-max', dest='s_max', type=float, metavar='NUM',
+                     help='|S| <= NUM (default: 60 mm/yr).')
+    mod.add_argument('--d1-max', dest='d1_max', type=float, default=60.0, metavar='KM',
+                     help='0.1 <= d1 <= KM (default: %(default)s).')
+    mod.add_argument('--c-max', dest='c_max', type=float, default=30.0, metavar='NUM',
+                     help='0 <= C <= NUM (default: %(default)s mm/yr).')
+    mod.add_argument('--d2-max', dest='d2_max', type=float, default=40.0, metavar='KM',
+                     help='0 < d2 <= KM, and d2 <= d1 (default: %(default)s).')
+    mod.add_argument('--d1-prior', dest='d1_prior', type=float, nargs=2,
+                     metavar=('MEAN', 'SIGMA'),
+                     help='a Gaussian prior on d1, in km, on top of its bounds\n'
+                          '(Hussain et al. 2016, Izmit: 17 5).')
+    mod.add_argument('--noise', dest='noise', nargs='+', default=['auto'], metavar='NOISE',
+                     help='auto (default): an exponential covariance, sill and\n'
+                          'length fitted to the residuals of a least-squares fit,\n'
+                          'for each file; white: the scatter of each bin, no\n'
+                          'correlation; SILL LENGTH: a given exponential covariance,\n'
+                          '(mm/yr)^2 and km (e.g. from a far-field area).')
+
+    mc = parser.add_argument_group('Sampler', 'the ensemble MCMC')
+    mc.add_argument('--walkers', dest='walkers', type=int, default=64, metavar='NUM',
+                    help='number of walkers (default: %(default)s).')
+    mc.add_argument('--steps', dest='steps', type=int, default=5000, metavar='NUM',
+                    help='steps of every walker (default: %(default)s).')
+    mc.add_argument('--burn', dest='burn', type=int, metavar='NUM',
+                    help='steps dropped as burn-in (default: a third).')
+    mc.add_argument('--seed', dest='seed', type=int, default=0, metavar='NUM',
+                    help='random seed, for repeatable runs (default: %(default)s).')
+
+    gns = parser.add_argument_group('GNSS', 'GNSS velocities, fitted with the InSAR')
+    gns.add_argument('-gnss', '--gnss', dest='gnss_file', metavar='FILE',
+                     help='GNSS velocities, any format swath reads (.csv .xlsx .shp\n'
+                          '.geojson .gpkg .kml, GMT psvelo ...). Those within\n'
+                          '--gnss-width of the line are fitted with an offset of\n'
+                          'their own, and drawn in blue with their 1-sigma.')
+    gns.add_argument('-vel', '--gnss-comp', dest='gnss_comp',
+                     choices=['par', 've', 'vn', 'vu', 'los'],
+                     help='the GNSS component that matches the data (default: par,\n'
+                          'fault-parallel, from ve and vn). --comp as-is needs it.')
+    gns.add_argument('--gnss-unit', dest='gnss_unit', default='auto',
+                     choices=['auto', 'mm/yr', 'cm/yr', 'm/yr'],
+                     help='unit of the GNSS file (default: auto).')
+    gns.add_argument('--gnss-width', dest='gnss_width', type=float, metavar='KM',
+                     help='take the GNSS within KM of the line (default: -w).')
+    gns.add_argument('--gnss-nofit', dest='gnss_fit', action='store_false',
+                     help='show the GNSS, but leave them out of the fit.')
+    gns.add_argument('--gnss-label', dest='gnss_label', action='store_true',
+                     help='write the site names on the map.')
+
+    look = parser.add_argument_group('Plot', 'the fit window')
+    look.add_argument('--ylim', dest='model_ylim', type=float, nargs=2,
+                      metavar=('YMIN', 'YMAX'), help='velocity range of the plot.')
+    look.add_argument('--strain', dest='show_strain', action='store_true',
+                      help='a panel with the shear strain rate dv/dx of the model.')
+    look.add_argument('--max-points', dest='max_points', type=int, default=200000,
+                      metavar='NUM',
+                      help='draw at most NUM pixels, a random subset (default:\n'
+                           '%(default)s); all of them are fitted.')
+
+    topo = parser.add_argument_group('Topography', 'the map background, an elevation panel')
+    topo.add_argument('-d', '--dem', dest='dem_file', nargs='?', const=AUTO_DEM, metavar='DEM',
+                      help='DEM for the shaded-relief map, as in view.py; without a\n'
+                           'file it is downloaded (Terrain Tiles), as in swath.')
+    topo.add_argument('--topoxsect', '-topoxsect', '--topo', dest='topoxsect', nargs='?',
+                      const=AUTO_DEM, metavar='DEM',
+                      help='an elevation panel under the fit (as in swath).')
+    topo.add_argument('--dem-zoom', dest='dem_zoom', type=int, metavar='Z',
+                      help='zoom of the downloaded tiles, 0-15 (default: auto).')
+    topo.add_argument('--lookup', dest='lookup_file', metavar='FILE',
+                      help='radar-coded data: MintPy geometryRadar.h5 (default:\n'
+                           'found in inputs/, ./ or ../inputs/ as MintPy does).')
+
+    out = parser.add_argument_group('Save/Output', 'figures and data - see "output" below')
+    out.add_argument('-o', '--outfile', type=str, nargs='*',
+                     help='file name of the saved MAP figure.')
+    add_save_options(out, 'every section given up front (--start-lalo ...)')
+    out.add_argument('--nodisplay', dest='disp_fig', action='store_false',
+                     help='save and do not open any window (implies --save).')
+    out.add_argument('--svg', '-svg', dest='svg', action='store_true',
+                     help='write the figures as vector .svg instead of .png.')
+    out.add_argument('--figext', dest='fig_ext', default='.png', metavar='EXT',
+                     choices=['.png', '.pdf', '.svg', '.eps', '.jpg'],
+                     help='figure format: .png .pdf .svg .eps .jpg (default: %(default)s).')
+    out.add_argument('--dpi', dest='fig_dpi', type=int, default=300, metavar='NUM',
+                     help='resolution of raster figures (default: %(default)s).')
+    out.add_argument('--figsize', dest='fig_size', metavar=('WID', 'LEN'), type=float, nargs=2,
+                     help='size of each fit window, in inches (default: 7.6 4.8,\n'
+                          'taller with --strain / --topoxsect).')
+    out.add_argument('--figsize-map', dest='fig_size_map', metavar=('WID', 'LEN'),
+                     type=float, nargs=2, help='size of the map window, in inches.')
+    return parser
+
+
+def _parse_noise(values):
+    """--noise: 'auto', 'white' or (sill, length)."""
+    if len(values) == 1 and values[0].lower() in ('auto', 'white'):
+        return values[0].lower()
+    if len(values) == 2:
+        try:
+            sill, length = (float(v) for v in values)
+        except ValueError:
+            sill = length = None
+        if sill is not None and sill >= 0 and length > 0:
+            return (sill, length)
+    raise ValueError(f'--noise: auto, white, or SILL LENGTH (two positive numbers); '
+                     f'got {" ".join(values)}')
+
+
+def model_cmd_line_parse(iargs=None):
+    """Parse the `model` arguments; unknown ones are forwarded to view.py."""
+    parser = create_model_parser()
+    inps, view_extra = parser.parse_known_args(args=_bare_save(iargs))
+    inps.argv = list(iargs) if iargs is not None else sys.argv[1:]
+    inps.view_extra = view_extra
+
+    check_save_options(inps)
+    if inps.svg:
+        inps.fig_ext = '.svg'
+    positive = dict(width=('-w/--width', inps.width), bin_km=('--bin', inps.bin_km),
+                    d1_max=('--d1-max', inps.d1_max), c_max=('--c-max', inps.c_max),
+                    d2_max=('--d2-max', inps.d2_max))
+    for opt, value in positive.values():
+        if value <= 0:
+            raise ValueError(f'{opt} must be positive, got {value}')
+    if inps.d1_max <= 0.1:
+        raise ValueError(f'--d1-max must exceed 0.1 km, got {inps.d1_max}')
+    for opt, value in (('--s-max', inps.s_max), ('--free-x0', inps.free_x0),
+                       ('--gnss-width', inps.gnss_width)):
+        if value is not None and value <= 0:
+            raise ValueError(f'{opt} must be positive, got {value}')
+    if inps.d1_prior is not None and inps.d1_prior[1] <= 0:
+        raise ValueError(f'--d1-prior: SIGMA must be positive, got {inps.d1_prior[1]}')
+    if inps.nlook < 1:
+        raise ValueError(f'--nlook must be >= 1, got {inps.nlook}')
+    if inps.nlook > 1 and inps.decimate > 1:
+        raise ValueError('--nlook and --decimate are opposites; use one or the other.')
+    if inps.walkers < 2:
+        raise ValueError(f'--walkers must be at least 2, got {inps.walkers}')
+    if inps.steps < 20:
+        raise ValueError(f'--steps must be at least 20, got {inps.steps}')
+    if inps.burn is not None and not 0 <= inps.burn < inps.steps:
+        raise ValueError(f'--burn must be 0 or more and below --steps ({inps.steps}), '
+                         f'got {inps.burn}')
+    if inps.max_points is not None and inps.max_points < 1:
+        raise ValueError(f'--max-points must be positive, got {inps.max_points}')
+    inps.noise = _parse_noise(inps.noise)
+
+    # the GNSS component must match the data
+    if inps.gnss_comp is None:
+        if inps.gnss_file and inps.comp == 'as-is':
+            raise ValueError('--comp as-is: say which GNSS component matches the data with '
+                             '-vel (par, ve, vn, vu or los) - or give --comp')
+        inps.gnss_comp = 'par'
+    if (inps.gnss_file and inps.gnss_comp == 'par' and inps.comp in ('as-is', 'par')
+            and inps.strike is None):
+        raise ValueError(f'--comp {inps.comp} with fault-parallel GNSS: give --strike, the '
+                         'azimuth the data are positive along')
+    if inps.comp in ('par', 've', 'vn', 'los') and inps.gnss_comp != 'par':
+        print(f'NOTE: --comp {inps.comp} fits fault-parallel velocity; the GNSS are taken as '
+              f'-vel {inps.gnss_comp} all the same')
+
+    # what the shared machinery of the swath viewer expects to find
+    for key, value in dict(bin_x=inps.bin_km, bin_y=None, ylim=None, x_offset=0.0, cmin=1.0,
+                           cmax=None, pcmap='viridis', timeseries=None, yx=None,
+                           gnss_ref='none', gnss_radius=1.0, fault_label='Fault').items():
+        setattr(inps, key, value)
+    check_map_options(inps)
+    if is_auto(inps.topoxsect):
+        inps.topoxsect = inps.dem_file if inps.dem_file else AUTO_DEM
+    elif inps.topoxsect and not os.path.isfile(inps.topoxsect):
+        raise ValueError(f'--topoxsect: no such file: {inps.topoxsect}')
+
+    read_file_info(inps)
+    if inps.geom_file and len(inps.geom_file) > len(inps.file):
+        raise ValueError(f'--geom: {len(inps.geom_file)} file(s) for {len(inps.file)} '
+                         'input file(s)')
+
+    collect_profiles(inps)
+    if not inps.disp_fig and not inps.profiles:
+        raise ValueError('--nodisplay needs the profiles up front (--start-lalo / --end-lalo, '
+                         '--start-yx / --end-yx, --line-file or --profile)')
+
+    if view_extra and inps.print_msg:
+        print(f'options forwarded to view.py: {" ".join(view_extra)}')
+    return inps
+
+
+def model_main(iargs=None):
+    """Entry point of `viewinsar model`."""
+    from .modelview import ModelViewer
+
+    inps = model_cmd_line_parse(iargs)
+    obj = ModelViewer(inps, get_view_cmd(inps))
+    obj.open()
+    obj.plot()
+    if obj.fig_map is not None and getattr(obj, 'cid', None) is not None:
+        obj.fig_map.canvas.mpl_disconnect(obj.cid)
+    if not obj.disp_fig:
+        obj.close()
+    return obj
+
+
+##############################################################################
 #                                tseries                                     #
 ##############################################################################
 TSERIES_DESCRIPTION = """\
@@ -786,7 +1470,8 @@ mouse / keyboard:
   slider            : the cumulative displacement at that date
   "e"               : export, see below
 
-output (written by "e", --save or --nodisplay, into --outdir), named after the
+output (written by "e", --save or --nodisplay, into the --save folder - made if
+it does not exist - or --outdir, else the current folder), named after the
 point, e.g. tseries_Y156X144_r2km:
   <name>.csv        date, year, then per file: median_mm, q25_mm, q75_mm,
                     n_px (with -r), or disp_mm (one pixel)
@@ -826,7 +1511,7 @@ def _pair(text, cast, what):
 
 def create_tseries_parser(prog=f'{PROG} tseries'):
     """The argument parser of the `tseries` sub-command."""
-    parser = argparse.ArgumentParser(
+    parser = ViewinsarParser(
         prog=prog, description=TSERIES_DESCRIPTION, epilog=TSERIES_EXAMPLE,
         formatter_class=argparse.RawTextHelpFormatter, allow_abbrev=False)
     parser.add_argument('file', nargs='?',
@@ -912,10 +1597,7 @@ def create_tseries_parser(prog=f'{PROG} tseries'):
     out = parser.add_argument_group('Save/Output', 'see "output" below')
     out.add_argument('-o', '--outfile', type=str, nargs='*',
                      help='file name of the saved time-series figure.')
-    out.add_argument('--outdir', dest='outdir', default='.',
-                     help='output directory (default: %(default)s).')
-    out.add_argument('--save', dest='save_fig', action='store_true',
-                     help='save the first time series at start-up.')
+    add_save_options(out, 'the first time series')
     out.add_argument('--nodisplay', dest='disp_fig', action='store_false',
                      help='save and do not open any window (implies --save).')
     out.add_argument('--svg', '-svg', dest='svg', action='store_true',
@@ -933,7 +1615,7 @@ def tseries_cmd_line_parse(iargs=None):
     from .tsdata import find_time_series
 
     parser = create_tseries_parser()
-    inps = parser.parse_args(args=iargs)
+    inps = parser.parse_args(args=_bare_save(iargs))
     inps.argv = list(iargs) if iargs is not None else sys.argv[1:]
 
     if not inps.file:
@@ -974,8 +1656,7 @@ def tseries_cmd_line_parse(iargs=None):
     if not 50 < inps.auto_crange <= 100:
         raise ValueError(f'--auto-crange must be within (50, 100], got {inps.auto_crange}')
 
-    if inps.outfile or not inps.disp_fig:
-        inps.save_fig = True
+    check_save_options(inps)
     if inps.svg:
         inps.fig_ext = '.svg'
     return inps
@@ -994,12 +1675,10 @@ def tseries_main(iargs=None):
     return obj
 
 
-def list_main(iargs=None):
-    """Entry point of `viewinsar list` - print the datasets of a file."""
-    from mintpy.utils import readfile
-
+def create_list_parser(prog=f'{PROG} list'):
+    """The argument parser of the `list` sub-command."""
     parser = argparse.ArgumentParser(
-        prog=f'{PROG} list',
+        prog=prog,
         description='List the datasets available in a file - the names that\n'
                     '`viewinsar swath --dset` accepts. The one swath uses by\n'
                     'default is marked with "<- default".',
@@ -1007,9 +1686,16 @@ def list_main(iargs=None):
     parser.add_argument('file', help='input file')
     parser.add_argument('-n', '--num', type=int, default=0, metavar='NUM',
                         help='print the first NUM names only (default: all).')
-    inps = parser.parse_args(args=iargs)
+    return parser
 
-    names = readfile.get_slice_list(inps.file)
+
+def list_main(iargs=None):
+    """Entry point of `viewinsar list` - print the datasets of a file."""
+    from .compat import get_slice_list
+
+    inps = create_list_parser().parse_args(args=iargs)
+
+    names = get_slice_list(inps.file)
     try:
         default = default_dset(inps.file, print_msg=False)
     except Exception:            # noqa: BLE001 - the marker is a nicety
@@ -1024,62 +1710,205 @@ def list_main(iargs=None):
 SUBCOMMANDS = {
     'swath': (swath_main, 'interactive swath (buffered) profile viewer'),
     'stat': (stat_main, 'block statistics on both sides of a line (violins)'),
+    'model': (model_main, 'fit slip rate and locking depth to a profile (MCMC)'),
     'tseries': (tseries_main, 'time series of a pixel or a circle (LiCSBAS / MintPy)'),
     'list': (list_main, 'list the datasets available in a file'),
 }
 
 
-def top_level_help():
-    """What `viewinsar` / `viewinsar -h` prints."""
-    width = max(len(k) for k in SUBCOMMANDS)
-    cmds = '\n'.join(f'  {name:<{width}}  {helptxt}'
-                     for name, (_, helptxt) in SUBCOMMANDS.items())
-    return f"""\
-viewinsar {__version__} - interactive swath (buffered) profiles of InSAR data,
-built on MintPy.
+RULE = '-' * 88
 
-usage: {PROG} <command> [options]
-       {PROG} FILE [options]          shortcut for `{PROG} swath FILE ...`
-       {PROG} --version
+TOP_HELP = """\
+viewinsar {version} - swath profiles, fault-block statistics, slip-rate models and
+time series of InSAR data (MintPy, LiCSBAS); MintPy itself is optional.
+
+usage: {prog} <command> [options]
+       {prog} FILE [options]          shortcut for `{prog} swath FILE ...`
+       {prog} <command> -h            every option of one command
+       {prog} help <command>          the same
+       {prog} --help-all              this, then every option of every command
+       {prog} --version
 
 commands:
 {cmds}
 
-swath at a glance:
-  {PROG} swath velocity.h5 -w 15                 draw sections with the mouse
-  {PROG} swath vel_looked10.h5 --nlook 10        fill in a coarse raster
-  {PROG} swath velocity.h5 --topoxsect dem.tif   add an elevation profile
-  {PROG} swath velocity.h5 -d --topoxsect        ... from a DEM downloaded for you
-  {PROG} swath velocity.h5 -fault faults.shp     faults: map + dashed on profiles
-  {PROG} swath velocity.h5 --timeseries ts.h5    right-click: point history
-  {PROG} swath velocity.h5 --svg --save          vector figures
+data: MintPy HDF5 (velocity.h5, timeseries.h5, geo_*.h5, .he5), LiCSBAS cum*.h5,
+GeoTIFF (with MintPy or rasterio) and ROI_PAC .dem/.rsc - geocoded (lat/lon or UTM)
+or radar-coded (lat/lon from MintPy's geometryRadar.h5). Several files at once:
+frames, tracks, components.
 
-  every window:  "="  new section (A-A', B-B', C-C' ...)
-                 "n"  redo the current section
-                 "e"  export the map + every section
-                 right click on the map: the time series of that pixel
+{rule}
+swath - swath (buffered) profiles
+{rule}
+  Two clicks on the map draw a section: every pixel within +/-WIDTH km of the line
+  is projected onto it and drawn as a point-density profile with the median and the
+  25th-75th percentiles. Each section opens in its own window: A-A', B-B', C-C' ...
+  the line      two left clicks; or up front --start-lalo / --end-lalo (--start-yx /
+                --end-yx), --profile LAT0 LON0 LAT1 LON1 (repeat it: B-B', C-C' ...),
+                --line-file (GMT segments or a vector file: one section per line)
+  the swath     -w half width in km, --bin-x / --bin-y density cells, --ylim,
+                --cmin / --cmax / --pcmap, --x-offset, --keep-zero, --decimate,
+                --nlook N (oversample a coarse raster so the swath fills in)
+  elevation     --topoxsect [DEM] a profile under the data, -d [DEM] shaded relief
+                on the map - either without a file downloads Terrain Tiles
+                (--dem-zoom); radar-coded data take the height of geometryRadar.h5
+  faults        -fault FILE ... (.shp .geojson .gpkg .kml .gmt, any CRS): on the map,
+                and a dashed line where a section crosses one (--fault-label,
+                --fault-color, --fault-lw)
+  GNSS          -gnss FILE (.csv .xlsx .shp .geojson .gpkg .kml, GMT psvelo): on the
+                map and on every profile; -vel los|ve|vn|vu, --gnss-ref,
+                --gnss-radius, --gnss-nofit, --gnss-label, --geom / --los-inc
+  several files f1.h5 f2.h5 ... --labels: one density, a median line for each file
+  time series   --timeseries ts.h5: right-click a pixel for its history (MintPy)
+  keys          left click x2: draw | "=" new section | "n" redo the current one |
+                "e" export the map + every section | right click: time series
+  output        swath_<A>_..._points.csv (every pixel: distance along / off the
+                line, value, row, col, lat, lon), _stats.csv (the bins), _info.txt,
+                the figure; swath_map_ABC.png
+  examples      {prog} swath velocity.h5 -w 15
+                {prog} swath velocity.h5 -fault faults.shp -d --topoxsect --nlook 4
+                {prog} swath f1.h5 f2.h5 -gnss gnss.csv -vel los --svg --save
+                {prog} swath velocity.h5 --timeseries timeseries.h5
+                {prog} swath velocity.h5 --line-file profiles.gmt --nodisplay --save
 
-stat at a glance:
-  {PROG} stat velocity.h5 -sp 5 -r 2 -fault faults.shp
-        click a line along the fault, Enter: every 5 km a pair of circles
-        (2 km radius, 1 km clear of the line), block 1 left / block 2 right,
-        a violin per circle (median, mean and mode strikes), and the block
-        medians joined by dashed lines
-  {PROG} stat velocity.h5 -sp 5 -r 2 --line-file trace.geojson --save
+{rule}
+stat - the two sides of a fault: block 1 against block 2
+{rule}
+  Click points along the fault (Enter to finish), or give the line with --line-lalo,
+  --line-yx or --line-file. Every -sp km along it two circles of -r km, one on each
+  side and --gap km clear of the line: block 1 on the LEFT (walking from the first
+  point to the last), block 2 on the RIGHT. Each pair is drawn as two violins (the
+  median, mean and mode marked), the medians of each block joined along the line.
+  -rate         the rate across the fault instead: median of block 1 - median of
+                block 2 at every point, one series per file (e.g. ve.h5 vu.h5),
+                with error bars (--rate-err iqr|sem)
+  several files the same circles on each: a row of violins per file
+  options       --names / --colors of the blocks, --ylim, --keep-zero, -d [DEM]
+                relief, --fault FILE on the map, --lookup (radar-coded data)
+  keys          left click: add a point | Enter: finish | "u" / Backspace: undo |
+                "n": new line | "e": export
+  output        stat_..._stats.csv (each point: count, median, mean, mode, std,
+                quartiles of each block), _values.csv (every pixel), _rate.csv
+                (-rate), _info.txt, the figure and the map
+  examples      {prog} stat velocity.h5 -sp 5 -r 2 -fault faults.shp
+                {prog} stat velocity.h5 -sp 5 -r 2 --line-file trace.geojson --save
+                {prog} stat ve.h5 vu.h5 --labels East Up -rate -sp 5 -r 2
 
-tseries at a glance:
-  {PROG} tseries cum_filt.h5 -r 2       LiCSBAS_plot_ts.py, with circles: double-click
-                                        -> the median of a 2 km circle at every date,
-                                        25th-75th percentiles as error bars
-  {PROG} tseries timeseries.h5 -r 2     the same for a MintPy time series
+{rule}
+model - slip rate and locking depth from profiles across a fault
+{rule}
+  The pixels of a swath against their distance from the fault, binned (--bin km),
+  and an elastic dislocation fitted by MCMC (the Goodman & Weare sampler), as
+  Hussain et al. (2016, 2018):  v(x) = S/pi atan(x/d1) + a  (+ creep, rotation)
+  profiles      as swath: two clicks, or up front --start-lalo / --end-lalo,
+                --profile (repeat it: A-A', B-B' ... each fitted on its own) and
+                --line-file (one per line)
+  the fault     where the profile crosses -fault FILE, with its strike there; or
+                --x0 KM / --strike DEG
+  the data      --comp as-is|par|ve|vn|los: LOS becomes fault-parallel pixel by
+                pixel (geometry file, --geom, or --los-inc / --los-az); several
+                files fitted together, each with an offset of its own
+  the model     S and d1; --creep (C, d2), --free-x0 [KM], --rot / --rot-side,
+                --d1-prior MEAN SIGMA, --s-max --d1-max --c-max --d2-max,
+                --noise auto|white|SILL LENGTH
+  the sampler   --walkers, --steps, --burn, --seed
+  keys          as swath: left click x2 draws a profile and fits it | "=" another |
+                "n" redo the current one | "e" export
+  GNSS          -gnss FILE -vel par|ve|vn|vu|los, fitted with an offset of their own
+                (--gnss-nofit: shown only), --gnss-width
+  figures       the fit: the pixels as points, binned medians, GNSS, the MAP model
+                and its 95 % range, the parameters written on it (--strain: the
+                strain rate, --topoxsect: elevation); the posteriors as Hussain et
+                al. (2016, Fig. 9): every pair a jet 2D histogram, the marginals in
+                blue, the MAP in red - one of each per section
+  output        model_<A>_...: .png, _posterior.png, _params.csv / .txt, _samples.csv,
+                _bins.csv, _points.csv, _gnss.csv; model_map_ABC.png, and
+                model_sections_ABC.csv (two sections or more: one row each)
+  examples      {prog} model velocity.h5 --comp los -fault faults.shp -w 25
+                {prog} model asc.h5 desc.h5 --comp los -fault faults.shp -gnss gnss.csv
+                {prog} model velocity.h5 --comp los -fault faults.shp --creep \\
+                    --profile 40.2 33.1 41.3 33.4 --profile 40.3 33.9 41.4 34.2 \\
+                    --nodisplay --save fits
 
-Run `{PROG} <command> -h` for every option of a command."""
+{rule}
+tseries - time series, after LiCSBAS_plot_ts.py
+{rule}
+  The velocity map (or a noise index, or the displacement at a date on the slider);
+  double-click a pixel for its time series with LiCSBAS's fits (Linear, Annual+L,
+  Quad, Annual+Q); right-drag a new reference area.
+  -r KM         a circle instead of one pixel: the median of its pixels at every
+                date, the 25th-75th percentiles as error bars
+  the data      LiCSBAS cum_filt.h5 / cum.h5 (results/: mask, noise indices; --i2 a
+                second series), MintPy timeseries*.h5 / .he5 (its mask and velocity
+                found beside it); --mask, --nomask, --vel, --results, --lookup
+  reference     --ref X1:X2/Y1:Y2, --ref-geo, --ref-yx, --ref-lalo; -m YYYYMMDD
+  the point     --yx, --lalo, -p X/Y, --p-geo LON/LAT (as LiCSBAS)
+  display       -c CMAP, -u mm|cm|m, --vlim, --dlim, --auto-crange, --ylim, --noflip
+  keys          double click: the time series | right drag: reference | "e": export
+  output        tseries_..._r2km.csv (date, median, q25, q75, n_px per file), the
+                figure, _map.png, _info.txt
+  examples      {prog} tseries cum_filt.h5 -r 2
+                {prog} tseries timeseries_ERA5_demErr.h5 -r 2 -u cm --lalo -2.51 121.68
+
+{rule}
+common options (swath, stat, model, tseries)
+{rule}
+  --save [DIR]  write what is given up front at start-up, and make "e" export into
+                DIR (made if it does not exist)
+  --outdir DIR, -o FILE, --nodisplay, --svg / --figext EXT, --dpi, --figsize,
+  --figsize-map, --noverbose; --dset for swath, stat and model (`{prog} list FILE`
+  shows the datasets of a file)
+  map           swath, stat, model: other options go to the map - all of view.py with
+                MintPy (-c, -v, -u, -m, --sub-lat, --sub-lon ...), the common ones
+                without it
+
+install:
+  pip install viewinsar              numpy scipy matplotlib h5py pyproj pyshp pillow
+  pip install "viewinsar[mintpy]"    + MintPy: the full view.py map, swath --timeseries
+  pip install "viewinsar[raster]"    + rasterio: GeoTIFF / GDAL rasters without MintPy
+  pip install "viewinsar[vector]"    + pyogrio: every GDAL vector format
+  pip install "viewinsar[all]"       all of them
+
+Run `{prog} <command> -h` for every option of a command."""
+
+
+def top_level_help():
+    """What `viewinsar` / `viewinsar -h` prints: every command, what it does,
+    its options in groups, its keys, its output and examples."""
+    width = max(len(k) for k in SUBCOMMANDS)
+    cmds = '\n'.join(f'  {name:<{width}}  {helptxt}'
+                     for name, (_, helptxt) in SUBCOMMANDS.items())
+    return TOP_HELP.format(version=__version__, prog=PROG, cmds=cmds, rule=RULE)
+
+
+def command_help(name):
+    """The full -h of one command."""
+    makers = {'swath': create_swath_parser, 'stat': create_stat_parser,
+              'model': create_model_parser, 'tseries': create_tseries_parser}
+    if name == 'list':
+        return create_list_parser().format_help()
+    return makers[name]().format_help()
+
+
+def full_help():
+    """`viewinsar --help-all`: the overview, then every option of every command."""
+    parts = [top_level_help()]
+    for name in SUBCOMMANDS:
+        parts.append('\n'.join(['', '#' * 88, f'#  {PROG} {name} -h', '#' * 88, '',
+                                command_help(name)]))
+    return '\n'.join(parts)
 
 
 def main(argv=None):
     """Top-level `viewinsar` entry point."""
     argv = list(sys.argv[1:] if argv is None else argv)
 
+    if argv and argv[0] in ('--help-all', '-H') or argv[:2] == ['help', 'all']:
+        print(full_help())
+        return 0
+    if argv[:1] == ['help'] and len(argv) > 1 and argv[1] in SUBCOMMANDS:
+        print(command_help(argv[1]))
+        return 0
     if not argv or argv[0] in ('-h', '--help', 'help'):
         print(top_level_help())
         return 0

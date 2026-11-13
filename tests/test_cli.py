@@ -9,7 +9,6 @@ import pytest
 import viewinsar
 from viewinsar import cli
 
-pytest.importorskip('mintpy', reason='the viewer needs MintPy')
 matplotlib = pytest.importorskip('matplotlib')
 matplotlib.use('Agg')
 
@@ -64,6 +63,68 @@ def test_line_file(velocity_file, tmp_path):
     assert inps.end_lalo == [30.4, 130.75]
 
 
+def test_several_profiles_up_front(velocity_file, tmp_path):
+    """A-A' from --start-lalo, then one per --line-file segment, then --profile
+    and --profile-yx, in that order."""
+    path = tmp_path / 'lines.xy'
+    path.write_text("# two sections\n>  B-B'\n130.20 30.50\n130.30 30.10\n"
+                    ">  C-C'\n130.40 30.50\n130.45 30.30\n130.50 30.10\n")
+    inps = cli.cmd_line_parse([velocity_file, '--start-lalo', '30.30', '130.15',
+                               '--end-lalo', '30.30', '130.75', '--line-file', str(path),
+                               '--profile', '30.45', '130.60', '30.15', '130.70',
+                               '-profile', '30.40', '130.20', '30.20', '130.20',
+                               '--profile-yx', '10', '20', '60', '80', '--noverbose'])
+    profs = inps.profiles
+    assert len(profs) == 6
+    assert profs[0]['start_yx'] == inps.start_yx and inps.start_lalo == [30.30, 130.15]
+    # a segment of three points runs from its first to its last
+    assert profs[1]['start_lalo'] == [30.5, 130.2] and profs[1]['end_lalo'] == [30.1, 130.3]
+    assert profs[2]['start_lalo'] == [30.5, 130.4] and profs[2]['end_lalo'] == [30.1, 130.5]
+    assert profs[3]['start_lalo'] == [30.45, 130.60]
+    assert profs[5] == dict(start_yx=[10, 20], end_yx=[60, 80], start_lalo=None,
+                            end_lalo=None)
+    # the conversion: same longitude -> same column, north -> a smaller row
+    assert profs[4]['start_yx'][1] == profs[4]['end_yx'][1]
+    assert profs[4]['start_yx'][0] < profs[4]['end_yx'][0]
+
+
+def test_line_file_vector_and_errors(velocity_file, tmp_path):
+    """A GeoJSON of two lines (one in UTM) is two sections; bad input is caught."""
+    import json
+
+    from pyproj import Transformer
+
+    tfm = Transformer.from_crs(4326, 32652, always_xy=True)
+    e0, n0 = tfm.transform(130.20, 30.50)
+    e1, n1 = tfm.transform(130.30, 30.10)
+    utm = tmp_path / 'utm.geojson'
+    utm.write_text(json.dumps({
+        'type': 'FeatureCollection',
+        'crs': {'type': 'name', 'properties': {'name': 'urn:ogc:def:crs:EPSG::32652'}},
+        'features': [{'type': 'Feature', 'properties': {}, 'geometry': {
+            'type': 'MultiLineString', 'coordinates': [[[e0, n0], [e1, n1]],
+                                                       [[e1, n1], [e0, n0]]]}}]}))
+    lines = cli.read_profile_file(str(utm))
+    assert len(lines) == 2
+    assert lines[0][0] == pytest.approx([30.50, 130.20], abs=1e-6)
+    assert lines[1][1] == pytest.approx([30.50, 130.20], abs=1e-6)
+    inps = cli.cmd_line_parse([velocity_file, '--line-file', str(utm), '--noverbose'])
+    assert len(inps.profiles) == 2 and inps.start_lalo == pytest.approx([30.50, 130.20])
+
+    with pytest.raises(ValueError, match='needs --end-lalo'):
+        cli.cmd_line_parse([velocity_file, '--start-lalo', '30.3', '130.2', '--noverbose'])
+    with pytest.raises(ValueError, match='same pixel'):
+        cli.cmd_line_parse([velocity_file, '--profile', '30.3', '130.2', '30.3', '130.2',
+                            '--noverbose'])
+    with pytest.raises(ValueError, match='no such file'):
+        cli.cmd_line_parse([velocity_file, '--line-file', str(tmp_path / 'none.xy'),
+                            '--noverbose'])
+    empty = tmp_path / 'empty.xy'
+    empty.write_text('>\n130.2 30.5\n')
+    with pytest.raises(ValueError, match='no line of two or more points'):
+        cli.cmd_line_parse([velocity_file, '--line-file', str(empty), '--noverbose'])
+
+
 @pytest.mark.parametrize('bad', [['-w', '0'], ['--bin-x', '-1']])
 def test_bad_arguments_raise(velocity_file, bad):
     with pytest.raises(ValueError):
@@ -103,6 +164,32 @@ def test_headless_run_writes_everything(velocity_file, tmp_path):
     # the arctan step must cross zero near the fault, ~ 28.8 km along this line
     crossing = stats['dist_km'][np.nanargmin(np.abs(stats['median']))]
     assert crossing == pytest.approx(28.8, abs=2.0)
+
+
+def test_headless_several_profiles(velocity_file, tmp_path):
+    """Three sections up front: three windows, three sets of files, one map."""
+    out = tmp_path / 'multi'
+    obj = _run([velocity_file, '--start-lalo', '30.30', '130.15', '--end-lalo', '30.30',
+                '130.75', '--profile', '30.45', '130.20', '30.45', '130.70',
+                '--profile', '30.15', '130.20', '30.15', '130.70', '-w', '5',
+                '--save', '--nodisplay', '--outdir', str(out), '--noverbose'])
+    assert [s.name for s in obj.sections] == ["A-A'", "B-B'", "C-C'"]
+    assert all(s.has_data for s in obj.sections)
+    assert len({id(s.fig) for s in obj.sections}) == 3          # a window each
+    files = sorted(p.name for p in out.iterdir())
+    for label in 'ABC':
+        assert any(f.startswith(f'swath_{label}_') and f.endswith('_points.csv')
+                   for f in files), label
+        assert any(f.startswith(f'swath_{label}_') and f.endswith('.png') for f in files)
+    assert 'swath_map_ABC.png' in files
+    # each section is its own line: 0.6 deg, 0.5 deg and 0.5 deg of longitude
+    for sec, deg, lat in zip(obj.sections, (0.6, 0.5, 0.5), (30.30, 30.45, 30.15)):
+        want = deg * 111.32 * np.cos(np.deg2rad(lat))
+        assert sec.swath_list[0]['length'] == pytest.approx(want, rel=0.01), sec.name
+    texts = [t.get_text() for t in obj.ax_img.texts]
+    for label in ('A', "A'", 'B', "B'", 'C', "C'"):
+        assert label in texts, label
+    obj.close()
 
 
 def test_profile_length_is_physical(velocity_file, tmp_path):

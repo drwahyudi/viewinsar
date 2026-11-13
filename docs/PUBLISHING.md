@@ -46,7 +46,7 @@ pip install --index-url https://test.pypi.org/simple/ \
             --extra-index-url https://pypi.org/simple/ viewinsar
 ```
 
-The extra index is needed because MintPy and friends are not on TestPyPI.
+The extra index is needed because numpy, scipy and friends are not on TestPyPI.
 
 ### 2b. Upload to the real PyPI
 
@@ -98,7 +98,8 @@ conda-forge builds **from the PyPI sdist**, so PyPI has to come first.
    `license_file` must be a file **inside** the recipe directory, so copy
    `LICENSE` next to `meta.yaml` and change the line to `license_file: LICENSE`.
 
-4. `mintpy` is already on conda-forge, so the dependency resolves. Keep
+4. Every run requirement is on conda-forge already. MintPy is optional (a
+   `run_constrained` entry), as are rasterio and pyogrio. Keep
    `matplotlib-base` rather than `matplotlib` — conda-forge policy, it avoids
    pulling in Qt.
 
@@ -138,11 +139,14 @@ To build from the working tree instead, comment out `url`/`sha256` in
 - **Version in one place.** `pyproject.toml` reads
   `viewinsar.__version__` via `[tool.setuptools.dynamic]`. Do not add a second
   version string anywhere.
-- **License.** The package imports MintPy, which is GPL-3.0-or-later, so
-  viewinsar is distributed under the same licence. `LICENSE` is the unmodified
+- **License.** The package uses MintPy where it is installed, and follows its
+  licence, GPL-3.0-or-later. `LICENSE` is the unmodified
   GPLv3 text; add your own copyright line at the top of the source files if you
   want one.
-- **MintPy is not pinned tightly.** `mintpy>=1.5` is deliberate — the APIs used
-  (`view.prep_slice`, `view.plot_slice`, `tsview.timeseriesViewer`,
-  `readfile.read`, `utils.coordinate`) have been stable for a long time. If a
-  future MintPy breaks one, pin an upper bound then.
+- **MintPy is optional.** The required dependencies are only what viewinsar
+  imports (numpy, scipy, matplotlib, h5py, pyproj, pyshp, pillow);
+  `pip install "viewinsar[mintpy]"` adds MintPy, and then the map comes from
+  view.py (`view.prep_slice`, `view.plot_slice`), `--timeseries` from
+  `tsview.timeseriesViewer`, the readers from `readfile` and `utils.coordinate`
+  - APIs that have been stable for a long time. Without it `compat.py` and
+  `mapview.py` stand in. The `lean` CI job runs the whole suite without MintPy.

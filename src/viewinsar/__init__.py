@@ -6,21 +6,26 @@ from ``mintpy.tsview``. What it adds is the swath itself - a flat-capped buffer
 around the drawn line, linear referencing of every pixel inside it, and a 2-D
 point-density profile with the density-weighted median and quartiles. And
 ``viewinsar stat``: block statistics in pairs of circles on both sides of a
-line drawn along a fault; ``viewinsar tseries``: LiCSBAS_plot_ts.py for
-LiCSBAS and MintPy time series, with the median of a circle at every date.
+line drawn along a fault, or their difference (-rate); ``viewinsar tseries``:
+LiCSBAS_plot_ts.py for LiCSBAS and MintPy time series, with the median of a
+circle at every date; ``viewinsar model``: the slip rate and locking depth of
+an elastic dislocation (and shallow creep) fitted to a profile across a fault
+by ensemble MCMC, after Hussain et al. (2016, 2018).
 
-    >>> from viewinsar import swath_extract, swath_density, stat_line
+    >>> from viewinsar import swath_extract, swath_density, stat_line, fit_profile
 
 The heavy imports (mintpy, matplotlib) live in ``viewinsar.viewer`` and are only
 pulled in when the viewer is used, so ``viewinsar.swath`` stays importable with
 numpy alone.
 """
 
-__version__ = '0.4.0'
+__version__ = '0.4.1'
 __author__ = 'Donny Wahyudi'
 __license__ = 'GPL-3.0-or-later'
 
 from .fault import load_faults, profile_crossings, read_fault_file
+from .gnss import read_gnss
+from .model import fit_profile
 from .radar import RadarLookup, find_lookup
 from .stat import stat_line
 from .swath import (
@@ -42,6 +47,7 @@ __all__ = [
     'RadarLookup',
     'bilinear_sample',
     'find_lookup',
+    'fit_profile',
     'get_pixel_size',
     'is_projected',
     'line_geometry',
@@ -49,6 +55,7 @@ __all__ = [
     'nice_step',
     'profile_crossings',
     'read_fault_file',
+    'read_gnss',
     'stat_line',
     'swath_density',
     'swath_extract',
@@ -57,6 +64,7 @@ __all__ = [
     'swathProfileViewer',
     'StatViewer',
     'TimeSeriesViewer',
+    'ModelViewer',
 ]
 
 
@@ -71,4 +79,7 @@ def __getattr__(name):
     if name == 'TimeSeriesViewer':
         from .tsviewer import TimeSeriesViewer
         return TimeSeriesViewer
+    if name == 'ModelViewer':
+        from .modelview import ModelViewer
+        return ModelViewer
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

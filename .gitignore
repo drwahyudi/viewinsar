@@ -26,3 +26,9 @@ tseries_*.csv
 tseries_*_info.txt
 tseries_*.png
 tseries_*.svg
+stat_*_rate.csv
+swath_*_gnss.csv
+model_*.csv
+model_*_params.txt
+model_*.png
+model_*.svg

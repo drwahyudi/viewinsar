@@ -26,6 +26,7 @@ import numpy as np
 
 from .raster import crs_of, same_crs
 from .swath import is_projected
+from .wkb import as_geojson, wkb_to_geojson
 
 __all__ = ['read_fault_file', 'load_faults', 'load_faults_radar', 'profile_crossings',
            'to_display']
@@ -207,8 +208,6 @@ def _read_gpkg(fname):
     import pathlib
     import sqlite3
 
-    import shapely
-
     uri = pathlib.Path(fname).resolve().as_uri() + '?mode=ro'
     try:
         con = sqlite3.connect(uri, uri=True)
@@ -238,7 +237,7 @@ def _read_gpkg(fname):
                 if wkb is None:
                     continue
                 try:
-                    _shapely_lines(shapely.from_wkb(wkb), lines)
+                    _geojson_lines(wkb_to_geojson(wkb), lines)
                 except Exception:        # noqa: BLE001 - skip an odd geometry
                     continue
             layers.append((lines, crs))
@@ -247,26 +246,8 @@ def _read_gpkg(fname):
         con.close()
 
 
-def _shapely_lines(geom, out):
-    if geom is None or geom.is_empty:
-        return
-    kind = geom.geom_type
-    if kind in ('LineString', 'LinearRing'):
-        line = _as_line(geom.coords)
-        if line is not None:
-            out.append(line)
-    elif kind == 'Polygon':
-        for ring in [geom.exterior, *geom.interiors]:
-            _shapely_lines(ring, out)
-    elif kind.startswith('Multi') or kind == 'GeometryCollection':
-        for sub in geom.geoms:
-            _shapely_lines(sub, out)
-
-
 def _read_ogr(fname):
     """Any OGR-readable format, through whichever binding is installed."""
-    import shapely
-
     try:
         import pyogrio
         from pyogrio import raw
@@ -281,13 +262,12 @@ def _read_ogr(fname):
             lines = []
             for wkb in wkbs:
                 if wkb is not None:
-                    _shapely_lines(shapely.from_wkb(wkb), lines)
+                    _geojson_lines(wkb_to_geojson(wkb), lines)
             layers.append((lines, meta.get('crs')))
         return layers
 
     try:
         import fiona
-        from shapely.geometry import shape
     except ImportError:
         pass
     else:
@@ -298,7 +278,7 @@ def _read_ogr(fname):
                 crs = src.crs_wkt or None
                 for feat in src:
                     if feat['geometry'] is not None:
-                        _shapely_lines(shape(feat['geometry']), lines)
+                        _geojson_lines(as_geojson(feat['geometry']), lines)
             layers.append((lines, crs))
         return layers
 
@@ -320,7 +300,7 @@ def _read_ogr(fname):
         for feat in layer:
             geo = feat.GetGeometryRef()
             if geo is not None:
-                _shapely_lines(shapely.from_wkb(bytes(geo.ExportToWkb())), lines)
+                _geojson_lines(wkb_to_geojson(bytes(geo.ExportToWkb())), lines)
         layers.append((lines, srs.ExportToWkt() if srs is not None else None))
     return layers
 

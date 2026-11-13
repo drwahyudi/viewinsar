@@ -1,6 +1,5 @@
 """--fault: vector readers, re-projection, crossings, and what gets drawn."""
 
-import importlib.util
 import json
 import sqlite3
 import struct
@@ -134,9 +133,16 @@ def kmz_file(tmp_path):
     return str(path)
 
 
+def _wkb_linestring(line, big_endian=False, z=False):
+    """WKB of a LineString - as shapely would write it, without shapely."""
+    order = '>' if big_endian else '<'
+    pts = np.c_[line, np.zeros(len(line))] if z else np.asarray(line, dtype=float)
+    return (struct.pack(order + 'BII', 0 if big_endian else 1, 1002 if z else 2, len(pts))
+            + np.asarray(pts, dtype=np.dtype(order + 'f8')).tobytes())
+
+
 def _write_gpkg(path, lines, epsg):
     """A minimal GeoPackage, the way GDAL lays one out."""
-    shapely = pytest.importorskip('shapely')
     con = sqlite3.connect(path)
     con.executescript("""
         CREATE TABLE gpkg_spatial_ref_sys (srs_name TEXT, srs_id INTEGER PRIMARY KEY,
@@ -158,7 +164,7 @@ def _write_gpkg(path, lines, epsg):
         header = b'GP' + bytes([0, 0b0000_0011]) + struct.pack('<i', epsg)
         envelope = struct.pack('<4d', line[:, 0].min(), line[:, 0].max(),
                                line[:, 1].min(), line[:, 1].max())
-        blob = header + envelope + shapely.to_wkb(shapely.LineString(line))
+        blob = header + envelope + _wkb_linestring(line)
         con.execute('INSERT INTO "fault lines" VALUES (?, ?, ?)', (i, blob, f'f{i}'))
     con.commit()
     con.close()
@@ -318,8 +324,6 @@ def test_to_display_in_pixels(velocity_attrs):
 ##############################################################################
 #                          end to end                                        #
 ##############################################################################
-needs_mintpy = pytest.mark.skipif(importlib.util.find_spec('mintpy') is None,
-                                  reason='the viewer needs MintPy')
 matplotlib = pytest.importorskip('matplotlib')
 matplotlib.use('Agg')
 
@@ -335,7 +339,6 @@ def _fault_texts(ax, text='Fault line'):
     return [t for t in ax.texts if t.get_text() == text]
 
 
-@needs_mintpy
 def test_fault_on_the_map_and_the_profile(velocity_file, geojson_file, tmp_path):
     out = tmp_path / 'out'
     obj = cli.swath_main([velocity_file, *LINE, '-w', '6', '-fault', geojson_file,
@@ -366,7 +369,6 @@ def test_fault_on_the_map_and_the_profile(velocity_file, geojson_file, tmp_path)
     assert 'faults.geojson' in info
 
 
-@needs_mintpy
 def test_fault_with_topography(velocity_file, shp_utm_file, dem_file, tmp_path):
     """A UTM shapefile + a UTM DEM on lat/lon data: the line is on both panels."""
     obj = cli.swath_main([velocity_file, *LINE, '-w', '6', '-fault', shp_utm_file,
@@ -383,7 +385,6 @@ def test_fault_with_topography(velocity_file, shp_utm_file, dem_file, tmp_path):
     assert peak == pytest.approx(sec.crossings[0], abs=2.0)
 
 
-@needs_mintpy
 def test_label_colour_and_x_offset(velocity_file, geojson_file, tmp_path):
     out = tmp_path / 'off'
     obj = cli.swath_main([velocity_file, *LINE, '-w', '6', '--fault', geojson_file,
@@ -400,7 +401,6 @@ def test_label_colour_and_x_offset(velocity_file, geojson_file, tmp_path):
     assert f'fault crossing : {sec.crossings[0] - 10:.4f} km' in info
 
 
-@needs_mintpy
 def test_empty_label_keeps_the_line(velocity_file, geojson_file, tmp_path):
     obj = cli.swath_main([velocity_file, *LINE, '-w', '6', '-fault', geojson_file,
                           '--fault-label', '', '--nodisplay', '--outdir', str(tmp_path),
@@ -410,7 +410,6 @@ def test_empty_label_keeps_the_line(velocity_file, geojson_file, tmp_path):
     assert [t.get_text() for t in sec.ax_swath.texts] == ['A', "A'"]     # no fault label
 
 
-@needs_mintpy
 def test_crossing_over_no_data_widens_the_axis(velocity_file, tmp_path):
     """A fault in the NaN strip at the top of the scene, past the last data: still shown."""
     path = tmp_path / 'ew.gmt'
@@ -425,7 +424,6 @@ def test_crossing_over_no_data_widens_the_axis(velocity_file, tmp_path):
     assert lo < sec.crossings[0] < hi
 
 
-@needs_mintpy
 def test_pixel_coordinate_map(velocity_file, geojson_file, tmp_path):
     obj = cli.swath_main([velocity_file, *LINE, '-w', '6', '-fault', geojson_file,
                           '--coord', 'yx', '--nodisplay', '--outdir', str(tmp_path),
@@ -434,7 +432,6 @@ def test_pixel_coordinate_map(velocity_file, geojson_file, tmp_path):
     assert obj.sections[0].crossings.size == 1
 
 
-@needs_mintpy
 def test_unreadable_file_does_not_stop_the_viewer(velocity_file, tmp_path, capsys):
     path = tmp_path / 'broken.geojson'
     path.write_text('{ not json')
@@ -444,7 +441,6 @@ def test_unreadable_file_does_not_stop_the_viewer(velocity_file, tmp_path, capsy
     assert obj.sections[0].has_data and obj.sections[0].crossings.size == 0
 
 
-@needs_mintpy
 def test_new_section_finds_its_own_crossings(velocity_file, geojson_file, tmp_path):
     """Sections B, C ... each get their own crossings; "n" clears them."""
     from matplotlib.backend_bases import KeyEvent, MouseButton, MouseEvent
@@ -483,7 +479,6 @@ def test_new_section_finds_its_own_crossings(velocity_file, geojson_file, tmp_pa
 ##############################################################################
 #                               the CLI                                      #
 ##############################################################################
-@needs_mintpy
 def test_single_dash_spellings(velocity_file, geojson_file):
     inps = cli.cmd_line_parse([velocity_file, '-nlook', '3', '-svg', '-fault', geojson_file,
                                '-topoxsect', velocity_file, '--noverbose'])
@@ -492,7 +487,6 @@ def test_single_dash_spellings(velocity_file, geojson_file):
     assert inps.view_extra == []
 
 
-@needs_mintpy
 def test_view_options_are_not_taken_for_ours(velocity_file):
     """No abbreviations: view.py's -n / --faultline must reach view.py untouched."""
     inps = cli.cmd_line_parse([velocity_file, '-n', '0', '--faultline', 'f.shp',
@@ -501,7 +495,6 @@ def test_view_options_are_not_taken_for_ours(velocity_file):
     assert inps.view_extra == ['-n', '0', '--faultline', 'f.shp']
 
 
-@needs_mintpy
 def test_several_fault_files_then_more_options(velocity_file, geojson_file, kml_file):
     inps = cli.cmd_line_parse([velocity_file, '-fault', geojson_file, kml_file, '-w', '4',
                                '-c', 'RdBu', '--noverbose'])
@@ -509,7 +502,6 @@ def test_several_fault_files_then_more_options(velocity_file, geojson_file, kml_
     assert inps.width == 4.0 and inps.view_extra == ['-c', 'RdBu']
 
 
-@needs_mintpy
 @pytest.mark.parametrize('bad', [['-fault', 'no_such_file.shp'], ['--fault-lw', '0']])
 def test_bad_fault_options(velocity_file, geojson_file, bad):
     args = [velocity_file, *bad, '--noverbose']
@@ -517,3 +509,27 @@ def test_bad_fault_options(velocity_file, geojson_file, bad):
         args += ['-fault', geojson_file]
     with pytest.raises(ValueError):
         cli.cmd_line_parse(args)
+
+
+def test_wkb_reader():
+    """ISO and extended WKB, both byte orders, Z, multi-part and polygons."""
+    import struct as st
+
+    from viewinsar.wkb import wkb_to_geojson
+
+    line = [[130.0, 30.0], [130.5, 30.5], [131.0, 30.2]]
+    for big in (False, True):
+        for z in (False, True):
+            geom = wkb_to_geojson(_wkb_linestring(line, big_endian=big, z=z))
+            assert geom['type'] == 'LineString' and geom['coordinates'] == line
+    two = st.pack('<BII', 1, 5, 2) + _wkb_linestring(line) + _wkb_linestring(line[:2])
+    geom = wkb_to_geojson(two)
+    assert geom['type'] == 'MultiLineString' and len(geom['coordinates'][1]) == 2
+    ring = line + [line[0]]
+    poly = st.pack('<BIII', 1, 3, 1, len(ring)) + np.asarray(ring, '<f8').tobytes()
+    assert wkb_to_geojson(poly)['coordinates'][0][-1] == line[0]
+    ewkb = st.pack('<BII', 1, 0x20000002, 4326) + st.pack('<I', 2) + np.asarray(
+        line[:2], '<f8').tobytes()                     # PostGIS: with an SRID
+    assert wkb_to_geojson(ewkb)['coordinates'] == line[:2]
+    point = st.pack('<BI', 1, 1) + np.asarray([1.5, 2.5], '<f8').tobytes()
+    assert wkb_to_geojson(point) == {'type': 'Point', 'coordinates': [1.5, 2.5]}

@@ -301,7 +301,6 @@ def test_stat_line_recovers_the_block_velocities():
 ##############################################################################
 #                           the command line                                 #
 ##############################################################################
-mintpy = pytest.importorskip('mintpy', reason='the viewer needs MintPy')
 matplotlib = pytest.importorskip('matplotlib')
 matplotlib.use('Agg')
 
@@ -495,3 +494,74 @@ def test_help_mentions_stat(capsys):
     for needle in ('-sp', '--radius', '--gap', 'LEFT side of the line', '--line-file',
                    '_values.csv', 'median_b1_minus_b2', 'Backspace'):
         assert needle in out, needle
+
+
+##############################################################################
+#                       several files, and the rate                          #
+##############################################################################
+@pytest.fixture(scope='module')
+def east_up(tmp_path_factory):
+    """The fixture velocity as an east velocity, and a flat up velocity."""
+    h5py = pytest.importorskip('h5py')
+    folder = tmp_path_factory.mktemp('east_up')
+    rng = np.random.default_rng(9)
+    vel = make_velocity()
+    files = []
+    for name, data in (('ve.h5', vel), ('vu.h5', rng.normal(0, 0.02, vel.shape))):
+        with h5py.File(folder / name, 'w') as fid:
+            fid.create_dataset('velocity', data=np.asarray(data, dtype=np.float32))
+            for key, val in _base_attrs().items():
+                fid.attrs[key] = val
+        files.append(str(folder / name))
+    return files
+
+
+def test_stat_rate_of_two_files(east_up, tmp_path):
+    obj = cli.stat_main([*east_up, '--labels', 'East', 'Up', '-rate', '-sp', '10', '-r', '2',
+                         *UP_THE_FAULT, '--nodisplay', '--noverbose', '--outdir', str(tmp_path)])
+    base = os.path.basename(obj.outfile_base)
+    names = set(os.listdir(tmp_path))
+    for tail in ('_rate.csv', '_stats.csv', '_2_stats.csv', '_values.csv', '_2_values.csv',
+                 '.png', '_map.png', '_info.txt'):
+        assert f'{base}{tail}' in names, tail
+
+    rate = _read_csv(tmp_path / f'{base}_rate.csv')
+    assert rate.dtype.names[:4] == ('point', 'dist_km', 'row', 'col')
+    for col in ('rate_1', 'rate_err_1', 'rate_2', 'rate_err_2'):
+        assert col in rate.dtype.names
+    st1 = _read_csv(tmp_path / f'{base}_stats.csv')
+    st2 = _read_csv(tmp_path / f'{base}_2_stats.csv')
+    # the rate is block 1 - block 2, the slip across the fault
+    assert rate['rate_1'] == pytest.approx(st1['median_b1'] - st1['median_b2'], abs=1e-5)
+    assert rate['rate_2'] == pytest.approx(st2['median_b1'] - st2['median_b2'], abs=1e-5)
+    assert np.median(rate['rate_1']) == pytest.approx(-2 * expected_median(3.0), abs=1.5)
+    assert np.all(np.abs(rate['rate_2']) < 0.5)
+    # iqr errors: the robust spread of the two circles
+    s1 = (st1['q75_b1'] - st1['q25_b1']) / 1.349
+    s2 = (st1['q75_b2'] - st1['q25_b2']) / 1.349
+    assert rate['rate_err_1'] == pytest.approx(np.hypot(s1, s2), rel=1e-4)
+
+    # one panel, a series per file, a line at zero
+    ax = obj.ax_stat
+    assert len(obj.axes_stat) == 1
+    labels = [t.get_text() for t in ax.get_legend().get_texts()]
+    assert labels == ['East', 'Up']
+    assert 'rate = Block 1' in ax.get_title()
+
+    # the standard error of the medians is much smaller
+    sem = cli.stat_main([*east_up, '-rate', '--rate-err', 'sem', '-sp', '10', '-r', '2',
+                         *UP_THE_FAULT, '--nodisplay', '--noverbose',
+                         '--outdir', str(tmp_path / 'sem')])
+    rate_sem = _read_csv(next((tmp_path / 'sem').glob('*_rate.csv')))
+    assert np.all(rate_sem['rate_err_1'] < rate['rate_err_1'] / 5)
+    assert sem.rate_err == 'sem'
+
+
+def test_stat_violins_of_two_files(east_up, tmp_path):
+    obj = cli.stat_main([*east_up, '-sp', '10', '-r', '2', *UP_THE_FAULT, '--nodisplay',
+                         '--noverbose', '--outdir', str(tmp_path)])
+    assert len(obj.axes_stat) == 2 and obj.labels == ['ve', 'vu']
+    assert not any(p.name.endswith('_rate.csv') for p in tmp_path.iterdir())
+    for ax in obj.axes_stat:
+        assert len([c for c in ax.collections if not c.get_gid()]) == 12   # 6 points x 2
+    assert 'labels         :' in next(tmp_path.glob('*_info.txt')).read_text()

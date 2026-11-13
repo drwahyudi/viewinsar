@@ -46,18 +46,41 @@ GAP_SHARE = 0.5                              # a circle's gap: half its pixels o
 HELP_TEXT = 'Left-doubleclick:\n Plot time series\nRight-drag:\n Change ref area'
 
 
+# the Scientific Colour Maps of LiCSBAS, when neither MintPy nor cmcrameri has them
+SCM_STANDIN = {'roma': 'RdYlBu', 'vik': 'RdBu_r', 'broc': 'BrBG', 'cork': 'PiYG',
+               'berlin': 'RdBu_r', 'batlow': 'viridis', 'lajolla': 'YlOrRd',
+               'bamako': 'YlGn', 'oslo': 'bone', 'devon': 'PuBu', 'tokyo': 'magma'}
+
+
 def get_cmap(name):
-    """A colormap by name: MintPy's (roma, vik, ... as in LiCSBAS), else matplotlib's."""
+    """A colormap by name: the Scientific Colour Maps of LiCSBAS (roma, vik ...)
+    from MintPy or cmcrameri where installed, else matplotlib's - a close one
+    for a Scientific Colour Map."""
+    from .compat import have_mintpy
+
+    if have_mintpy():
+        try:
+            from mintpy.objects.colors import ColormapExt
+            return ColormapExt(name).colormap
+        except Exception:        # noqa: BLE001 - a name MintPy lacks
+            pass
+    base, rev = (name[:-2], True) if str(name).endswith('_r') else (name, False)
     try:
-        from mintpy.objects.colors import ColormapExt
-        return ColormapExt(name).colormap
-    except Exception:            # noqa: BLE001 - MintPy missing, or a name it lacks
+        import cmcrameri.cm as scm
+        cmap = getattr(scm, base)
+        return cmap.reversed() if rev else cmap
+    except (ImportError, AttributeError):
         pass
     try:
         return plt.get_cmap(name)
     except ValueError:
-        print(f'WARNING: unknown colormap {name!r} --> RdBu_r')
-        return plt.get_cmap('RdBu_r')
+        pass
+    if base in SCM_STANDIN:
+        alt = SCM_STANDIN[base]
+        alt = (alt[:-2] if alt.endswith('_r') else alt + '_r') if rev else alt
+        return plt.get_cmap(alt)
+    print(f'WARNING: unknown colormap {name!r} --> RdBu_r')
+    return plt.get_cmap('RdBu_r')
 
 
 def _fmt(value, integer=False):
@@ -292,7 +315,8 @@ class TimeSeriesViewer:
             msg += f' - the median of a circle of {self.radius:g} km, with its 25-75 % range'
         msg += '\n  right drag        : a new reference area'
         msg += '\n  slider            : the cumulative displacement at that date'
-        msg += f'\n  key "e"           : export the time series (.csv) and the figures ({self.fig_ext})'
+        msg += f'\n  key "e"           : export the time series (.csv) and the figures ({self.fig_ext}),'
+        msg += f'\n                      into {os.path.abspath(self.outdir or ".")}'
         msg += '\n' + '-' * 74
         return msg
 
@@ -709,6 +733,7 @@ class TimeSeriesViewer:
 
         # 3. the figures
         out = self.outfile[0] if self.outfile else f'{base}{self.fig_ext}'
+        os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
         self.fig_ts.savefig(out, bbox_inches='tight', dpi=self.fig_dpi)
         written.append(out)
         out = f'{base}_map{self.fig_ext}'

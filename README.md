@@ -39,6 +39,20 @@ with circles: `-r 2` and a double click gives, at every date, the median of
 all pixels within 2 km, with the 25th-75th percentiles as error bars (see
 [Time series](#time-series-viewinsar-tseries)).
 
+Several files at once - the frames of a track, or several tracks - make one
+density with a median line for each, and are drawn together on the map; GNSS
+velocities (`-gnss`, any table or point format) appear on the map and, inside
+a swath, on its profile with their error bars (see
+[Several files and GNSS](#several-files-and-gnss)). `viewinsar stat -rate`
+turns the two sides of a fault into the rate across it.
+
+`viewinsar model` fits the **slip rate and locking depth** of an elastic
+dislocation - and shallow creep - to a profile across a fault, by ensemble
+MCMC, as Hussain et al. (2016, 2018) did for the North Anatolian Fault: the
+pixels of the swath as points, the maximum a posteriori model with its 95 %
+range, and the posterior distributions (see
+[Fault slip models](#fault-slip-models-viewinsar-model)).
+
 ---
 
 ## Install
@@ -62,14 +76,24 @@ pip install -e ".[test]"
 pytest
 ```
 
-MintPy itself is easiest to get from conda-forge; if you already have a MintPy
-environment, install `viewinsar` into it.
+**Requirements:** Python ≥ 3.9 and only what viewinsar imports itself:
+`numpy` ≥ 1.20, `scipy`, `matplotlib` ≥ 3.5, `h5py`, `pyproj`, `pyshp` and
+`pillow`. **MintPy is optional.** Without it viewinsar reads MintPy's HDF5
+products, LiCSBAS `cum*.h5`, ROI_PAC `.dem/.rsc` and (with `rasterio`)
+GeoTIFF itself, and draws the map with the common `view.py` options
+(`-c -v -u -m --sub-lat --sub-lon -d --ref-lalo --fontsize --title
+--flip-lr --flip-ud --coord ...`). The extras add the rest:
 
-**Requirements:** Python ≥ 3.9, `mintpy` ≥ 1.5, `numpy` ≥ 1.20, `matplotlib` ≥ 3.5,
-`pyproj`, `pyshp`, `shapely`, `h5py`, `pillow` and `scipy` (all already come with MintPy
-and matplotlib).
-Optional: `pip install "viewinsar[vector]"` adds `pyogrio`, so `--fault` reads
-every vector format GDAL knows, not only the common ones it reads by itself.
+| install | adds |
+|---|---|
+| `pip install viewinsar` | the core, above |
+| `pip install "viewinsar[mintpy]"` | MintPy: the map from `view.py` itself (every option), `swath --timeseries`, every format MintPy reads |
+| `pip install "viewinsar[raster]"` | `rasterio`: GeoTIFF and every GDAL raster (DEMs, LiCSBAS `.tif`) without MintPy |
+| `pip install "viewinsar[vector]"` | `pyogrio`: `--fault`, `-gnss` and `--line-file` read every GDAL vector format, not only the common ones viewinsar reads by itself |
+| `pip install "viewinsar[all]"` | all three |
+
+If you already have a MintPy environment, install viewinsar into it and it
+uses MintPy. `VIEWINSAR_NO_MINTPY=1` makes it ignore an installed MintPy.
 
 ---
 
@@ -83,6 +107,12 @@ viewinsar swath geo_velocity_msk.h5 -w 15 --bin-x 0.5 --bin-y 1.5 --ylim -40 40
 viewinsar swath geo_velocity.h5 \
     --start-lalo 30.125 129.988 --end-lalo 30.250 130.116 \
     -w 15 --save --nodisplay
+
+# several sections up front - A-A', B-B', C-C' - saved into sections/
+viewinsar swath geo_velocity.h5 -w 10 --nodisplay --save sections \
+    --profile 30.10 129.95 30.30 130.10 --profile 30.20 130.05 30.40 130.20 \
+    --profile 30.30 130.15 30.50 130.30
+viewinsar swath geo_velocity.h5 --line-file profiles.gmt --save   # one per segment
 
 # a coarse / multilooked raster: oversample the corridor so the profile fills in
 viewinsar swath geo_velocity_ml10.h5 --nlook 10
@@ -103,8 +133,17 @@ viewinsar swath geo_velocity.h5 --timeseries geo_timeseries_ERA5_demErr.h5
 # vector output
 viewinsar swath geo_velocity.h5 --topoxsect dem.tif --svg --save
 
+# several frames or tracks in one swath, and GNSS on the profiles
+viewinsar swath T014A/geo_velocity.h5 T123D/geo_velocity.h5 --labels T014A T123D
+viewinsar swath geo_velocity.h5 -gnss gnss.csv -vel los
+
 # block statistics on both sides of a fault: circles every 5 km, 2 km radius
 viewinsar stat geo_velocity.h5 -sp 5 -r 2 -fault faults.shp
+# ... or the rate across it (block 1 - block 2), of the east and up velocities
+viewinsar stat geo_ve.h5 geo_vu.h5 -rate -sp 5 -r 2 --line-file fault_trace.geojson
+
+# slip rate and locking depth of a fault, by MCMC, from a profile across it
+viewinsar model geo_velocity.h5 --comp los -fault faults.shp -w 25
 
 # time series, LiCSBAS-style: the median of a 2 km circle at every date
 viewinsar tseries cum_filt.h5 -r 2
@@ -115,6 +154,10 @@ viewinsar list timeseries.h5
 ```
 
 `viewinsar FILE ...` is a shortcut for `viewinsar swath FILE ...`.
+`viewinsar -h` prints what every command does - its options in groups, its
+keys, its output and examples; `viewinsar --help-all` adds every option of
+every command, and `viewinsar help model` (or `viewinsar model -h`) those of
+one.
 
 ### Mouse and keyboard
 
@@ -166,8 +209,10 @@ The swath-specific options:
 | `--timeseries` | — | time-series file(s) for the 3rd panel |
 | `--start-yx` / `--end-yx` | — | line end points in pixel numbers |
 | `--start-lalo` / `--end-lalo` | — | line end points in lat/lon |
-| `--line-file` | — | GMT-format `lon lat` file with the two end points |
-| `--save` / `--nodisplay` / `-o` / `--outdir` | — | output control |
+| `--profile LAT0 LON0 LAT1 LON1` | — | **one more section** up front; repeat it for `B-B'`, `C-C'` … (`--profile-yx` in pixels) |
+| `--line-file` | — | sections from a file: GMT `lon lat` text, one section per segment (split by `>`), or a vector file (`.geojson .kml .shp .gpkg` …), one per line - each from its first to its last point |
+| `--save [DIR]` | — | write the sections given up front at start-up, and make <kbd>e</kbd> export into `DIR` (made if it does not exist) |
+| `--nodisplay` / `-o` / `--outdir` | — | output control |
 
 `-nlook`, `-topoxsect`, `-fault` and `-svg` work with one dash or two. Run
 `viewinsar swath -h` for the full list.
@@ -241,6 +286,38 @@ along the profile, and its coordinates, are written to `_info.txt`. Every
 crossing gets its dashed line; when two are so close that their labels would
 overlap, only the first is labelled.
 
+### Several files and GNSS
+
+**Several files.** `viewinsar swath FILE1 FILE2 ...` - the frames of a track,
+or tracks side by side - samples the same line in every file, each on its own
+grid and in its own CRS, and pools the samples into **one density**, with a
+median line per file (`--labels` names them). The map is the first file, with
+the others drawn under it in the same colours. Geocoded files may be in any
+CRS; radar-coded files must share one grid. `_points.csv` says which file
+each sample came from (`file_idx`).
+
+**GNSS.** `-gnss FILE` reads GNSS velocities from a table (`.csv`, `.txt`,
+`.xlsx`) or a point file (`.shp`, `.geojson`, `.gpkg`, `.kml`/`.kmz`, and
+anything GDAL reads). The columns are found by name, in any spelling - `lon`,
+`Longitude`, `Ve(mm/yr)`, `sig_e`, `Station` ...; a table without a header is
+read as GMT `psvelo` (`lon lat ve vn se sn corr site`). The unit comes from the
+headers (mm/yr, cm/yr, m/yr) or `--gnss-unit`, and is converted to the data's.
+
+| `-vel` | the GNSS value compared with the data |
+|--------|----------------------------------------|
+| `los` (default) | projected into the line of sight of the first file, `ve·uₑ + vn·uₙ + vu·uᵤ`: the LOS unit vector from MintPy's geometry file (`geometryGeo.h5` / `geometryRadar.h5` beside the data, or `--geom`), else the data's `CENTER_INCIDENCE_ANGLE` and `HEADING`, or `--los-inc` / `--los-az`. A station without `vu` counts `vu = 0` |
+| `ve`, `vn`, `vu` | that component, for decomposed velocity maps |
+
+Every station is drawn on the map - a **triangle** for a 3D station (one with
+`vu`), a **circle** for a 2D one, in black. The stations inside a swath (the
+same flat-capped buffer as the pixels) are drawn on its profile, in black with
+their 1-σ as error bars, and a **smoothed black line** goes through them (a
+smoothing spline weighted by 1/σ²), as a comparison with the InSAR. By default
+they are shifted onto the InSAR (`--gnss-ref insar`): by the median, over the
+stations, of the InSAR within `--gnss-radius` km of a station minus the
+station; `--gnss-ref none` leaves them as read. `--gnss-label` writes the site
+names on the map, `--gnss-nofit` leaves the line out.
+
 ---
 
 ## Output
@@ -265,6 +342,10 @@ named after its label (`swath_A_...`, `swath_B_...`), plus one
 figure draws, and `elevation_median_m` (the exact median) when `--topoxsect` is used. The plain statistics are exact and un-clipped; the
 density-weighted ones are clipped to the plotted Y range, exactly like the
 histogram.
+
+**`swath_..._gnss.csv`** — with `-gnss`, the stations in the swath: `site`,
+`lon`, `lat`, `dist_km`, `perp_km`, `value`, `sigma`, `value_shifted` (as
+drawn), `insar_near` and `is3d`.
 
 **`swath_..._info.txt`** — everything needed to reproduce the profile, and with
 `--fault` one `fault crossing : <km> km (dist_km), <lat/lon or N/E>` line per
@@ -383,6 +464,175 @@ e.g. `stat_Y3670X744_Y2967X696_sp5km_r2km`:
 
 When `-sp` is smaller than `2r` neighbouring circles overlap and share pixels;
 the run notes it.
+
+### Several files, and the rate across the fault
+
+Several files - tracks, frames, or the east and up velocities of a
+decomposition - get the same circles, and a row of violins each.
+
+With **`-rate`** the violins give way to the **rate** across the fault: at
+every point, the median of block 1 minus the median of block 2, one series per
+file, with error bars - the slip (or creep) rate along the fault, as Hussain
+et al. (2016) measured the creep along the North Anatolian Fault. The east and
+up velocities together give the horizontal and the vertical rate:
+
+```bash
+viewinsar stat geo_ve.h5 geo_vu.h5 --labels East Up -rate -sp 5 -r 2 \
+    --line-file fault_trace.geojson
+```
+
+| `--rate-err` | the error bar |
+|---|---|
+| `iqr` (default) | `sqrt(s₁² + s₂²)`, with `s` = IQR / 1.349 of each circle: the robust spread of the pixels - conservative, since the pixels of a circle are correlated |
+| `sem` | the standard error of the two medians, `1.2533 sqrt(s₁²/n₁ + s₂²/n₂)`, as if the pixels were independent |
+
+`…_rate.csv` has one row per point: `dist_km`, its position, and `rate_k`,
+`rate_err_k` of every file. A second file's statistics go to `…_2_stats.csv`
+and `…_2_values.csv`.
+
+---
+
+## Fault slip models: `viewinsar model`
+
+The interseismic velocity across a strike-slip fault, after Savage & Burford
+(1973) and Hussain et al. (2016, 2018):
+
+```
+v(x) = S/π · atan(x/d₁) + a
+     + C · [H(x) − ½ − atan(x/d₂)/π]     shallow creep (--creep), d₂ ≤ d₁
+     + θ · x, on one side of the fault    rotation (--rot), fixed
+```
+
+*x* is the distance from the fault, perpendicular to it; *S* the slip rate
+below the locking depth *d₁*; *C* the creep rate from the surface down to *d₂*,
+in the same sense as *S*; *a* an offset.
+
+Draw a profile **across** the fault (two clicks), or give it - or several,
+`A-A'`, `B-B'`, `C-C'` … - up front with `--start-lalo` / `--end-lalo`,
+`--profile` (repeat it) or `--line-file` (one per line); each section is
+fitted on its own, with its own windows and files, and
+`model_sections_ABC.csv` gathers them. Every pixel of the swath becomes a point:
+velocity against distance from the fault. The points are binned (`--bin`,
+1 km: the median of each bin, as Ou et al. 2022) and the bins fitted with the
+affine-invariant ensemble MCMC sampler of Goodman & Weare (2010) - the
+sampler of `emcee`, which Hussain et al. used - under uniform priors, with a
+noise covariance that decays exponentially with distance, `σ² exp(−r/λ)`. The
+result: the **maximum a posteriori (MAP)** model and the **95 % range** of
+every parameter and of the curve.
+
+```bash
+# click a profile across the fault: the trace gives the fault position and its
+# strike, and the LOS velocity becomes fault-parallel velocity, pixel by pixel
+viewinsar model geo_velocity.h5 --comp los -fault faults.shp -w 25
+
+# up front, saved, nothing shown; with shallow creep
+viewinsar model geo_velocity.h5 --comp los -fault faults.shp --creep \
+    --start-lalo 40.20 33.10 --end-lalo 41.30 33.40 -w 25 --nodisplay
+
+# three profiles along the fault, each fitted: the slip rate along strike
+viewinsar model geo_velocity.h5 --comp los -fault faults.shp -w 25 \
+    --profile 40.20 33.10 41.30 33.40 --profile 40.30 33.90 41.40 34.20 \
+    --profile 40.40 34.70 41.50 35.00 --nodisplay --save fits
+
+# ascending and descending together (each with its own offset), and GNSS
+viewinsar model T014A/geo_velocity.h5 T123D/geo_velocity.h5 --comp los \
+    -fault faults.shp -gnss gnss.csv --labels T014A T123D --strain
+
+# as Hussain et al. (2016): the rotation south of the fault, a prior on d1,
+# the noise covariance of a far-field area
+viewinsar model geo_vpar.h5 --comp par --strike 100 --rot 0.0215 \
+    --d1-prior 17 5 --noise 6.35 35.8
+```
+
+**The fault and the data.** The fault is where the profile crosses a `--fault`
+trace (the crossing nearest the middle of the profile), with the strike of the
+trace there - or `--x0` (km from the start of the profile) and `--strike`.
+Distances are taken perpendicular to the fault, so a profile drawn at an angle
+to it still gives the right locking depth. `--comp` says what the data are:
+
+| `--comp` | the velocity fitted |
+|---|---|
+| `as-is` (default) | the data as they are - e.g. the LOS itself; *S* is then the rate seen in the LOS |
+| `par` | fault-parallel velocity, positive along `--strike` |
+| `ve`, `vn` | east / north velocity, divided by sin / cos of the strike |
+| `los` | LOS velocity, divided by (LOS unit vector · strike direction), pixel by pixel - the incidence and azimuth angles of MintPy's geometry file, found beside each file, or `--geom` (one per file) |
+
+`ve`, `vn` and `los` assume the motion is purely fault-parallel (no vertical,
+no fault-normal motion), as Hussain et al. did; a LOS nearly perpendicular to
+the fault sees little of that motion, and the run warns when it sees less than
+a quarter. With them the strike's direction is chosen so that **S > 0 is
+right-lateral**, and the sense of slip is written out.
+
+**Several files** (tracks, frames) are fitted together, each with **an offset
+of its own** (`a`, `a2`, `a3` ...), so each may be referenced its own way.
+**GNSS** (`-gnss`) within `--gnss-width` km of the line are fitted with them,
+with their 1-σ and an offset of their own (`ag`): their fault-parallel
+component, from `ve` and `vn` (`-vel` picks another one, to match
+`--comp as-is`). `--gnss-nofit` shows them without fitting them.
+
+**The figures**, after Hussain et al.: the pixels as points (red; a colour per
+file), the median of each bin with ±1σ (its robust spread), the GNSS in blue
+with their error bars, the MAP model as a bold dashed line and its 95 % range
+in grey, the fault dotted, and the parameters with their 95 % ranges in
+brackets - placed where they hide the fewest points. Every file is shifted
+onto the offset of the first, the GNSS onto the InSAR. `--strain` adds the
+shear strain rate of the model, `dv/dx`, below; `--topoxsect` the topography.
+A second window holds the **posterior**, drawn as Hussain et al. (2016,
+Fig. 9): every pair of parameters (*S*, *d₁*, the offset *a*, and *C*, *d₂*,
+*x₀* when fitted) as a 2D histogram in `jet`, each scaled to its own peak, the
+MAP as a red dot; along the bottom the histogram of each parameter in blue,
+the MAP as a red line, the 95 % range dashed and written above it; the
+section, `A - A'`, white on black in the corner. The trade-off between *S* and
+*d₁* shows there.
+
+| option | default | meaning |
+|---|---|---|
+| `-w` | `20` | half width of the swath, km |
+| `--bin` | `1` | bin size along the profile, km |
+| `--comp` | `as-is` | what the data are (above) |
+| `--x0`, `--strike` | from the trace | the fault position (km along the profile) and its strike |
+| `--creep` | off | fit *C* and *d₂* too |
+| `--free-x0 [KM]` | off | fit the fault position within ±KM (default 5) |
+| `--rot RATE`, `--rot-side` | none, `end` | a fixed linear term on one side, mm/yr per km |
+| `--s-max`, `--d1-max`, `--c-max`, `--d2-max` | 60, 60, 30, 40 | the uniform priors: \|S\| ≤, 0.1 ≤ d₁ ≤, 0 ≤ C ≤, d₂ ≤ |
+| `--d1-prior MEAN SIGMA` | none | a Gaussian prior on *d₁* (Hussain et al. 2016, Izmit: 17 5) |
+| `--noise` | `auto` | `auto`: exponential, fitted to the residuals of a least-squares fit, for each file; `white`: each bin's own scatter; `SILL LENGTH`: given, in (mm/yr)² and km |
+| `--walkers`, `--steps`, `--burn`, `--seed` | 64, 5000, a third, 0 | the sampler |
+| `-gnss`, `-vel`, `--gnss-width`, `--gnss-nofit` | - | GNSS |
+| `--strain`, `--ylim`, `--max-points` | off, auto, 200000 | the figure |
+
+The export (<kbd>e</kbd> or `--save [DIR]`, into `DIR` - made if it does not
+exist), named after the line, e.g. `model_A_Y470X150_Y130X700_w25km`:
+
+| file | contents |
+|---|---|
+| `….png` | the fit |
+| `…_posterior.png` | the posterior distributions |
+| `…_params.csv` | every parameter: `map`, `median`, `lower_95`, `upper_95`; and the strain rate at the fault |
+| `…_params.txt` | the same, readable, with the sense of slip, the fault position and strike, the noise, the priors, and the sampler and its diagnostics |
+| `…_samples.csv` | posterior samples (up to 20 000), for plots of your own |
+| `…_bins.csv` | the bins: `x_km`, `median`, `std`, quartiles, `count`, the MAP model at each and the residual |
+| `…_points.csv` | every pixel: `dist_km` along the profile, `x_km` from the fault, `perp_km`, `value` as read, `v_model` (the velocity fitted), `v_shifted` (as drawn), row / col, lon / lat, `file_idx` |
+| `…_gnss.csv` | the GNSS in the swath, and whether they were fitted |
+| `model_map_AB.png` | the map with every section, the fault position of each marked ◇ |
+| `model_sections_AB.csv` | two sections or more: one row each - its ends (`start_lat` … `end_lon`), where it crosses the fault (`fault_km`, `fault_lat`, `fault_lon`), `strike_deg`, `sense`, `pixels`, and `S`, `d1` (`C`, `d2`, `x0`) and `strain` as `_map`, `_lower_95`, `_upper_95` |
+
+**Reading the results.**
+
+- The **strain rate at the fault** is the velocity gradient `dv/dx` at *x* = 0,
+  `|S| / (π d₁)` - the engineering shear strain rate; the tensor component
+  ε̇ₓᵧ is half of it. For *S* = 26 mm/yr and *d₁* = 16 km it is 0.52 µstrain/yr,
+  the ~0.5 µstrain/yr that Hussain et al. (2018) report along the North
+  Anatolian Fault.
+- *S* and *d₁* trade off: a deeper locking depth with a faster slip rate fits
+  a profile almost as well, the more so the shorter the profile. Profiles a few
+  times *d₁* long on either side, GNSS in the far field, or a prior on *d₁*
+  narrow it - the posterior window shows by how much.
+- The bins set the resolution: a creep step, or the fault position with
+  `--free-x0`, is resolved to about one bin.
+- The run reports the acceptance fraction and the autocorrelation time of the
+  chains, and suggests more `--steps` when they are shorter than 50
+  autocorrelation times.
 
 ---
 
@@ -509,9 +759,27 @@ rel = relative_series(ts.pixels(rows, cols), ref, ix_ref=0)
 stats = series_stats(rel)                        # median, q25, q75, count per date
 ```
 
-`viewinsar.swathProfileViewer`, `viewinsar.StatViewer` and
-`viewinsar.TimeSeriesViewer` are the interactive figures; they are imported
-lazily, so `import viewinsar` stays cheap.
+The dislocation model and its sampler, and the GNSS readers:
+
+```python
+import numpy as np
+from viewinsar import fit_profile, read_gnss
+from viewinsar.model import forward, model_band
+
+x = np.random.uniform(-80, 80, 50000)                       # km from the fault
+v = forward(x, 20.0, 12.0, 3.0) + np.random.normal(0, 2, x.size)   # mm/yr
+res = fit_profile((x, v), bin_km=1.0, walkers=64, steps=5000)      # creep=True ...
+res['summary']['S']          # {'map', 'median', 'lo', 'hi'}: the MAP and the 95 % range
+res['samples']               # the posterior, columns res['names'] ('S', 'd1', 'a')
+best, lo, hi = model_band(res, np.linspace(-80, 80, 401))
+
+gnss = read_gnss('gnss.xlsx')                               # any table or point file
+value, sigma = gnss.component('ve')
+```
+
+`viewinsar.swathProfileViewer`, `viewinsar.StatViewer`,
+`viewinsar.TimeSeriesViewer` and `viewinsar.ModelViewer` are the interactive
+figures; they are imported lazily, so `import viewinsar` stays cheap.
 
 ---
 
@@ -535,6 +803,11 @@ lazily, so `import viewinsar` stays cheap.
   the median readable again, but scatter that multilooking averaged away is
   gone for good. The median it produces is unbiased with respect to the
   full-resolution one.
+- **The model is two-dimensional.** An infinitely long, straight, vertical
+  strike-slip fault in an elastic half-space: the profile should cross a
+  straight stretch of the fault, away from its ends and bends. Vertical
+  motion, fault-normal motion and other faults in the swath all end up in the
+  residuals - or in the parameters.
 - **Fault crossings follow the centre line.** A trace that ends inside the
   corridor without reaching the centre line, or runs along it, is drawn on the
   map but not marked on the profile. Traces are re-projected vertex by vertex,

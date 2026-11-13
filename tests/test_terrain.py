@@ -176,7 +176,6 @@ def test_no_network_says_so(monkeypatch, tmp_path):
 ##############################################################################
 #                               the CLI                                      #
 ##############################################################################
-mintpy = pytest.importorskip('mintpy', reason='the viewer needs MintPy')
 matplotlib = pytest.importorskip('matplotlib')
 matplotlib.use('Agg')
 

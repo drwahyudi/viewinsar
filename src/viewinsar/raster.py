@@ -36,18 +36,18 @@ def _rasterio_attrs(src):
 
 
 def read_attr_any(fname):
-    """Metadata of a raster, via MintPy first and rasterio as a fallback."""
+    """Metadata of a raster - MintPy's reader (or its stand-in), rasterio failing that."""
+    from .compat import read_attribute
     try:
-        from mintpy.utils import readfile
-        return dict(readfile.read_attribute(fname))
+        return dict(read_attribute(fname))
     except Exception:            # noqa: BLE001 - any reader failure falls through
         pass
     try:
         import rasterio
     except ImportError as err:
         raise ValueError(
-            f'cannot read {fname}: MintPy could not open it and rasterio is not '
-            'installed. `pip install rasterio` adds GeoTIFF / GDAL support.') from err
+            f'cannot read {fname}: it is not a MintPy / ROI_PAC file and rasterio is '
+            'not installed. `pip install rasterio` adds GeoTIFF / GDAL support.') from err
     with rasterio.open(fname) as src:
         return _rasterio_attrs(src)
 
@@ -61,15 +61,15 @@ def read_any(fname, box=None, dset=None):
     Returns:    data  - 2D np.ndarray of float32, no-data as NaN
                 atr   - dict, metadata
     """
+    from .compat import read, read_attribute
     try:
-        from mintpy.utils import readfile
         if dset is None and str(fname).lower().endswith(('.h5', '.he5')):
             # a MintPy geometry file holds azimuthAngle, height, incidenceAngle ...:
             # its DEM is `height` (as in MintPy's own pp.read_dem), never the
             # first dataset, which would be the azimuth angle
-            if readfile.read_attribute(fname).get('FILE_TYPE') == 'geometry':
+            if read_attribute(fname).get('FILE_TYPE') == 'geometry':
                 dset = 'height'
-        data, atr = readfile.read(fname, datasetName=dset, box=box, print_msg=False)
+        data, atr = read(fname, datasetName=dset, box=box, print_msg=False)
         return np.array(data, dtype=np.float32), dict(atr)
     except Exception:            # noqa: BLE001
         pass

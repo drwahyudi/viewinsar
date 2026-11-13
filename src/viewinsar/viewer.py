@@ -8,6 +8,7 @@ time-series window reuses tsview.py.
 """
 
 import os
+import re
 import string
 import textwrap
 
@@ -15,11 +16,17 @@ import numpy as np
 from matplotlib import colors as mcolors
 from matplotlib import patches, patheffects
 from matplotlib import pyplot as plt
-from mintpy import view
-from mintpy.utils import plot as pp
-from mintpy.utils import readfile
-from mintpy.utils import utils as ut
 
+from .compat import (
+    MINTPY_HINT,
+    auto_figure_size,
+    coordinate,
+    have_mintpy,
+    read,
+    read_attribute,
+    read_mask,
+    scale_data2disp_unit,
+)
 from .fault import load_faults, load_faults_radar, profile_crossings, to_display
 from .radar import PIXEL_ATR, RadarLookup, find_lookup, has_height
 from .raster import (
@@ -31,12 +38,14 @@ from .raster import (
     read_attr_any,
     same_crs,
 )
-from .swath import is_projected, line_geometry, swath_density, swath_extract
+from .swath import is_projected, line_geometry, project_points, swath_density, swath_extract
 from .terrain import ATTRIBUTION, is_auto, terrain_dem, terrain_dem_radar
 
 __all__ = ['swathProfileViewer', 'Section', 'topo_sampling']
 
 SECTION_LABELS = string.ascii_uppercase      # A, B, C, ...
+FILE_COLORS = ('#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd', '#8c564b', '#e377c2',
+               '#17becf', '#bcbd22', '#7f7f7f', '#d62728')     # per-file lines (red = all)
 DEM_VALID = (-1000.0, 10000.0)               # plausible elevations, in meter
 TOPO_MAX_SAMPLES = 4_000_000                 # DEM samples per section: plenty for a median
 NO_LOOKUP = ("the data are in radar coordinates, and that needs MintPy's geometryRadar.h5 "
@@ -85,6 +94,36 @@ def unit_label(unit):
 
 
 ##############################################################################
+def file_labels(files):
+    """Short, distinct names for the input files: the base names, with the
+    parent folder where two of them share one."""
+    names = [os.path.splitext(os.path.basename(f))[0] for f in files]
+    if len(set(names)) < len(names):
+        names = [os.path.join(os.path.basename(os.path.dirname(os.path.abspath(f))), n)
+                 for f, n in zip(files, names)]
+    return names
+
+
+def velocity_factor(from_unit, to_unit):
+    """The factor from one velocity unit to another (mm/yr, cm/year, m/yr ...),
+    or None when `to_unit` is not a velocity."""
+    def scale(unit):                                           # noqa: E306
+        text = str(unit).lower().replace(' ', '')
+        if not re.search(r'/(yr|year|a|y)$', text):
+            return None
+        head = text.split('/')[0]
+        return {'mm': 1.0, 'cm': 10.0, 'm': 1000.0, 'dm': 100.0, 'km': 1e6}.get(head)
+    src, dst = scale(from_unit), scale(to_unit)
+    if src is None or dst is None:
+        return None
+    return src / dst
+
+
+def export_dir(folder):
+    """The export folder, written out in full for the messages."""
+    return os.path.abspath(folder or '.')
+
+
 def _new_figure(name, figsize):
     """A FRESH figure with a window title.
 
@@ -122,6 +161,13 @@ class Section:
         self.topo_den = None
         self.topo_error = None       # why there is no topography, shown in its panel
         self.topo_note = ''          # how the DEM was sampled
+        self.gnss_in = None          # the GNSS stations inside the swath
+        self.clear_crossings()
+
+    def clear_data(self):
+        """Forget the profile (key "n")."""
+        self.swath_list = self.den = self.topo_swath = self.topo_den = None
+        self.gnss_in = None
         self.clear_crossings()
 
     def clear_crossings(self):
@@ -236,14 +282,8 @@ class Section:
         self.swath_list = []
         for i, fname in enumerate(v.file):
             atr_i = v.atr_list[i]
-            if self.start_lalo is not None and 'Y_FIRST' in atr_i:
-                coord_i = ut.coordinate(atr_i)
-                (y0, y1), (x0, x1) = coord_i.lalo2yx(
-                    [self.start_lalo[0], self.end_lalo[0]],
-                    [self.start_lalo[1], self.end_lalo[1]])
-                syx, eyx = [y0, x0], [y1, x1]
-            else:
-                syx, eyx = list(self.start_yx), list(self.end_yx)
+            # the same line on this file's grid, through the map (any CRS)
+            syx, eyx = v.line_on_file(i, self.start_yx, self.end_yx)
             try:
                 swath = swath_extract(v.data_list[i], atr_i, v.box_list[i], syx, eyx,
                                       v.width, mask=v.msk_list[i],
@@ -252,7 +292,7 @@ class Section:
             except ValueError as err:
                 print(f'WARNING: {os.path.basename(fname)}: {err}')
                 continue
-            swath['file'] = fname
+            swath['file'], swath['file_idx'] = fname, i
             swath['start_yx'], swath['end_yx'] = syx, eyx
             self.swath_list.append(swath)
 
@@ -263,12 +303,16 @@ class Section:
             return False
 
         swath = self.swath_list[0]
-        if swath['clipped']:
+        if swath['clipped'] and len(v.file) == 1:
             print(f'WARNING: section {self.name}: the corridor reaches beyond the data'
                   ' coverage (or the displayed subset) and was clipped there.')
 
-        self.den = swath_density(swath['dist'], swath['value'], bin_x=v.bin_x,
-                                 bin_y=v.bin_y, ylim=v.ylim, x_offset=v.x_offset)
+        # one density for every file: frames along a track, or tracks side by side
+        dist = np.concatenate([sw['dist'] for sw in self.swath_list])
+        value = np.concatenate([sw['value'] for sw in self.swath_list])
+        self.den = swath_density(dist, value, bin_x=v.bin_x, bin_y=v.bin_y, ylim=v.ylim,
+                                 x_offset=v.x_offset)
+        self.extract_gnss()
 
         # where the centre line crosses the fault traces, in km from the start
         self.clear_crossings()
@@ -279,6 +323,46 @@ class Section:
         if v.topoxsect and v.topo_atr is not None:
             self.extract_topo(swath['length'])
         return True
+
+    def extract_gnss(self):
+        """The GNSS stations inside this swath (flat caps, as the pixels), placed
+        on the profile, and shifted onto the InSAR (--gnss-ref insar)."""
+        v = self.v
+        self.gnss_in = None
+        if v.gnss is None:
+            return
+        geom = line_geometry(v.atr, self.start_yx, self.end_yx, v.width)
+        along, perp = project_points(geom, v.gnss_rows, v.gnss_cols)
+        length = geom['length'] * geom['dist_scale']
+        inside = (np.isfinite(v.gnss_value) & np.isfinite(along)
+                  & (np.abs(perp) <= v.width) & (along >= 0) & (along <= length))
+        idx = np.flatnonzero(inside)
+        gin = dict(index=idx, dist=along[idx], perp=perp[idx], value=v.gnss_value[idx],
+                   sigma=v.gnss_sigma[idx], is3d=v.gnss.has_vu[idx],
+                   site=[v.gnss.site[i] for i in idx], offset=0.0, n_ref=0, insar=None)
+        if idx.size and v.gnss_ref == 'insar':
+            # the InSAR right at each station: the pixels within --gnss-radius
+            dist = np.concatenate([sw['dist'] for sw in self.swath_list]).astype(np.float64)
+            perp_all = np.concatenate([sw['perp'] for sw in self.swath_list]).astype(np.float64)
+            value = np.concatenate([sw['value'] for sw in self.swath_list]).astype(np.float64)
+            near = np.full(idx.size, np.nan)
+            for k in range(idx.size):
+                for radius in (v.gnss_radius, 2 * v.gnss_radius, 5 * v.gnss_radius):
+                    sel = np.hypot(dist - gin['dist'][k], perp_all - gin['perp'][k]) <= radius
+                    if sel.sum() >= 3:
+                        near[k] = np.median(value[sel])
+                        break
+            gin['insar'] = near
+            diff = near - gin['value']
+            good = np.isfinite(diff)
+            if good.any():
+                gin['offset'], gin['n_ref'] = float(np.median(diff[good])), int(good.sum())
+        self.gnss_in = gin
+        if idx.size:
+            v.vprint(f'   GNSS: {idx.size} station(s) in the swath'
+                     + (f', shifted by {gin["offset"]:+.3g} {v.disp_unit} onto the InSAR '
+                        f'(median over {gin["n_ref"]})' if gin['n_ref'] else ''))
+        return
 
     def extract_topo(self, main_length):
         """The same corridor, sampled from the DEM on its own grid."""
@@ -389,19 +473,21 @@ class Section:
                 label='25th-75th percentile')
         ax.plot(den['x_centers'], den['q75_dw'], color='0.55', ls='--', lw=0.8)
 
-        for i, sw in enumerate(self.swath_list[1:], start=1):
-            den_i = swath_density(sw['dist'], sw['value'], bin_x=v.bin_x,
-                                  bin_y=den['bin_y'], ylim=den['ylim'],
-                                  x_offset=v.x_offset)
-            ax.plot(den_i['x_centers'], den_i['median_dw'], color=f'C{i}', lw=1.2,
-                    label=f"Median - {os.path.basename(sw['file'])}")
+        if len(self.swath_list) > 1:
+            for k, sw in enumerate(self.swath_list):
+                den_i = swath_density(sw['dist'], sw['value'], bin_x=v.bin_x,
+                                      bin_y=den['bin_y'], ylim=den['ylim'],
+                                      x_offset=v.x_offset)
+                ax.plot(den_i['x_centers'], den_i['median_dw'], color=FILE_COLORS[k % 10],
+                        lw=1.1, label=f"Median - {v.labels[sw['file_idx']]}")
+        self.draw_gnss()
 
         ax.axhline(0, color='k', ls='-', lw=0.4)
         if v.x_offset != 0:
             ax.axvline(0, color='blue', ls='--', lw=1.0)
         ax.set_xlim(den['x_edges'][0], den['x_edges'][-1])
         ax.set_ylim(den['ylim'])
-        ax.legend(loc='lower right', fontsize=max(v.font_size - 3, 6))
+        ax.legend(loc='best', fontsize=max(v.font_size - 3, 6), framealpha=0.8)
 
         # the A / A' end labels, echoed inside the panel corners
         lbl_kw = dict(xycoords='axes fraction', fontsize=v.font_size + 3,
@@ -412,8 +498,10 @@ class Section:
         ax.annotate(f"{self.label}'", xy=(0.985, 0.975), ha='right', **lbl_kw)
 
         swath = self.swath_list[0]
+        n_all = sum(sw['value'].size for sw in self.swath_list)
         msg = (f"swath +/-{v.width:g} km | length {swath['length']:.2f} km"
-               f" | N = {swath['value'].size:,}")
+               f" | N = {n_all:,}" + (f' ({len(self.swath_list)} files)'
+                                      if len(self.swath_list) > 1 else ''))
         if v.nlook > 1:
             msg += f" (nlook {v.nlook})"
         if self.start_lalo is not None:
@@ -454,7 +542,7 @@ class Section:
 
         self.draw_fault_marks()
 
-        v.vprint(f"section {self.name}: {swath['value'].size:,} samples, "
+        v.vprint(f"section {self.name}: {n_all:,} samples, "
                  f"length {swath['length']:.2f} km, half width {swath['half_width']:.2f} km")
         if self.crossings.size:
             v.vprint(f"   crosses a fault trace at "
@@ -465,6 +553,34 @@ class Section:
 
         self.fig.canvas.draw_idle()
         self.fig.canvas.flush_events()
+        return
+
+    def draw_gnss(self):
+        """The GNSS in the swath: black triangles (3D stations) and circles (2D),
+        their 1-sigma as error bars, and a smoothed black line through them."""
+        from .gnss import smooth_curve
+
+        v, ax, gin = self.v, self.ax_swath, self.gnss_in
+        if gin is None or not gin['index'].size:
+            return
+        x = gin['dist'] - v.x_offset
+        y = gin['value'] + gin['offset']
+        for is3d, marker, label in ((True, '^', 'GNSS (3D)'), (False, 'o', 'GNSS (2D)')):
+            sel = gin['is3d'] == is3d
+            if sel.any():
+                ax.errorbar(x[sel], y[sel], yerr=gin['sigma'][sel], fmt=marker, ms=8,
+                            color='k', mfc='k', mec='w', mew=0.8, ecolor='k', elinewidth=1.4,
+                            capsize=4, capthick=1.4, zorder=9, label=label)
+        if v.gnss_fit and x.size >= 2:
+            curve = smooth_curve(x, y, gin['sigma'], x_range=ax.get_xlim())
+            if curve is not None:
+                ax.plot(*curve, color='k', lw=1.8, zorder=8, label='GNSS (smoothed)')
+        if not v.ylim:                               # keep every station in view
+            lo, hi = ax.get_ylim()
+            ylo = float(np.nanmin(y - gin['sigma']))
+            yhi = float(np.nanmax(y + gin['sigma']))
+            pad = 0.05 * (max(hi, yhi) - min(lo, ylo))
+            ax.set_ylim(min(lo, ylo - pad), max(hi, yhi + pad))
         return
 
     def draw_fault_marks(self):
@@ -535,12 +651,11 @@ class Section:
     ##---------- output
     @property
     def outfile_base(self):
-        sw = self.swath_list[0]
-        y0, x0 = sw['start_yx']
-        y1, x1 = sw['end_yx']
+        y0, x0 = (int(round(c)) for c in self.start_yx)
+        y1, x1 = (int(round(c)) for c in self.end_yx)
         return os.path.join(
             self.v.outdir,
-            f"swath_{self.label}_Y{y0}X{x0}_Y{y1}X{x1}_w{self.v.width:g}km")
+            f"{self.v.COMMAND}_{self.label}_Y{y0}X{x0}_Y{y1}X{x1}_w{self.v.width:g}km")
 
     def save(self):
         """Write this section's points, statistics, metadata and figure."""
@@ -566,7 +681,7 @@ class Section:
             if has_lalo:
                 nan = np.full(sw['value'].size, np.nan)
                 arrs += [sw.get('lat', nan), sw.get('lon', nan)]
-            arrs += [np.full(sw['value'].size, i)]
+            arrs += [np.full(sw['value'].size, sw.get('file_idx', i))]
             blocks.append(np.column_stack([np.asarray(a, dtype=np.float64) for a in arrs]))
         table = np.vstack(blocks)
         rc_fmt = '%.4f' if v.nlook > 1 else '%d'
@@ -597,12 +712,33 @@ class Section:
         print(f'saved the binned statistics to: {out}')
         written.append(out)
 
-        # 3. everything needed to reproduce the profile
+        # 3. the GNSS in the swath
+        gin = self.gnss_in
+        if gin is not None and gin['index'].size:
+            out = f'{base}_gnss.csv'
+            lon, lat = v.gnss.lon[gin['index']], v.gnss.lat[gin['index']]
+            with open(out, 'w') as fid:
+                fid.write('site,lon,lat,dist_km,perp_km,value,sigma,value_shifted,'
+                          'insar_near,is3d\n')
+                for k in range(gin['index'].size):
+                    fid.write(f"{gin['site'][k]},{lon[k]:.6f},{lat[k]:.6f},"
+                              f"{gin['dist'][k] - v.x_offset:.4f},{gin['perp'][k]:.4f},"
+                              f"{gin['value'][k]:.6g},{gin['sigma'][k]:.6g},"
+                              f"{gin['value'][k] + gin['offset']:.6g},"
+                              f"{(gin['insar'][k] if gin['insar'] is not None else np.nan):.6g},"
+                              f"{int(gin['is3d'][k])}\n")
+            print(f'saved the GNSS in the swath to: {out}')
+            written.append(out)
+
+        # 4. everything needed to reproduce the profile
         sw = self.swath_list[0]
         out = f'{base}_info.txt'
         with open(out, 'w') as fid:
             fid.write(f'section        : {self.name}\n')
             fid.write(f'file           : {[os.path.abspath(f) for f in v.file]}\n')
+            if len(v.file) > 1:
+                fid.write(f'file labels    : {v.labels}  (file_idx 0, 1, ... in '
+                          '_points.csv)\n')
             fid.write(f'dataset        : {v.dset}\n')
             fid.write(f'unit           : {v.disp_unit}\n')
             if v.data_crs is not None:
@@ -614,7 +750,7 @@ class Section:
                 fid.write(f'end   lat/lon  : {self.end_lalo}\n')
             fid.write(f'swath halfwidth: {v.width} km  (flat-capped buffer)\n')
             fid.write(f"profile length : {sw['length']:.4f} km\n")
-            fid.write(f"num of samples : {sw['value'].size}\n")
+            fid.write(f"num of samples : {sum(s['value'].size for s in self.swath_list)}\n")
             fid.write(f'nlook          : {v.nlook}  '
                       f'({"native pixels" if v.nlook == 1 else f"{v.nlook}x oversampled"})\n')
             fid.write(f"bin size       : {den['bin_x']:g} km x {den['bin_y']:.6g} {v.disp_unit}\n")
@@ -642,6 +778,18 @@ class Section:
                               f'{where}\n')
                 if not self.crossings.size:
                     fid.write('fault crossing : none - the centre line crosses no trace\n')
+            if v.gnss is not None:
+                gin = self.gnss_in or {}
+                fid.write(f'GNSS           : {os.path.abspath(v.gnss_file)}, -vel {v.gnss_comp}'
+                          f' [{v.disp_unit}]' + (f', {v.gnss_note}' if v.gnss_note else '')
+                          + '\n')
+                n_in = len(gin.get('site', []))
+                fid.write(f'GNSS in swath  : {n_in} station(s)')
+                if gin.get('n_ref'):
+                    fid.write(f", shifted by {gin['offset']:+.6g} {v.disp_unit} = median of "
+                              f"(InSAR within {v.gnss_radius:g} km - GNSS) over "
+                              f"{gin['n_ref']} station(s)")
+                fid.write('\n')
             fid.write('\ndist_km = distance along the profile from the start point,'
                       ' minus the x offset\n')
             fid.write('perp_km = distance from the centre line,'
@@ -649,7 +797,7 @@ class Section:
         print(f'saved the profile metadata to: {out}')
         written.append(out)
 
-        # 4. the figure
+        # 5. the figure
         out = f'{base}{v.fig_ext}'
         self.fig.savefig(out, bbox_inches='tight', dpi=v.fig_dpi)
         print(f'saved section {self.name} to: {out}')
@@ -671,7 +819,8 @@ class swathProfileViewer:
         obj.plot()
     """
 
-    COMMAND = 'swath'                # the sub-command, for the echoed command line
+    COMMAND = 'swath'                # the sub-command: echoed command line, file names
+    SECTION_CLASS = Section          # what a cross-section is (and draws)
 
     def __init__(self, inps, view_cmd):
         self.fig_map = self.ax_img = None
@@ -690,6 +839,14 @@ class swathProfileViewer:
         self.fault_obj = None
         self.fault_file = None
         self.fault_label, self.fault_color, self.fault_lw = 'Fault line', 'k', 1.2
+        self.labels = None                       # names of the input files, for legends
+        self.crs_list = []                       # the CRS of every input file
+        self.gnss_file = self.geom_file = self.los_inc = self.los_az = None
+        self.gnss_comp, self.gnss_unit, self.gnss_ref = 'los', 'auto', 'insar'
+        self.gnss_radius, self.gnss_fit, self.gnss_label = 1.0, True, False
+        self.gnss = self.gnss_value = self.gnss_sigma = None
+        self.gnss_rows = self.gnss_cols = None
+        self.gnss_note, self.gnss_obj = '', []
 
         self.view_cmd = view_cmd
         # view.py owns names like inps.width / inps.length (the file dimensions),
@@ -714,39 +871,69 @@ class swathProfileViewer:
         if not self.disp_fig:
             plt.switch_backend('Agg')
 
-        # the map: let view.py do all of the work
-        self.vprint(f'run: {self.view_cmd}')
-        self.data_img, self.atr, view_inps = view.prep_slice(self.view_cmd)
+        # the map: view.py does all of the work - or, without MintPy, mapview.py
+        if have_mintpy():
+            from mintpy import view
+            self.vprint(f'run: {self.view_cmd}')
+            self.data_img, self.atr, view_inps = view.prep_slice(self.view_cmd)
+        else:
+            from .mapview import prep_slice
+            self.data_img, self.atr, view_inps = prep_slice(
+                [self.file[0]] + ([self.dset] if self.dset else []) + list(self.view_extra),
+                print_msg=self.print_msg)
         for key, value in view_inps.__dict__.items():
             if key not in self._own_keys:
                 setattr(self, key, value)
 
         # read the data of every input file, within the displayed window
         self.data_list, self.atr_list, self.box_list, self.msk_list = [], [], [], []
-        kept = []
+        self.crs_list, kept, labels = [], [], []
         base_geo = 'Y_FIRST' in self.atr
-        for fname in self.file:
-            atr_i = readfile.read_attribute(fname)
+        crs_1 = crs_of(self.atr, self.file[0])
+        subset = any(getattr(self, k, None) for k in ('subset_lat', 'subset_lon',
+                                                      'subset_y', 'subset_x'))
+        given = list(self.labels) if self.labels else None
+        for i, fname in enumerate(self.file):
+            atr_i = read_attribute(fname)
             if ('Y_FIRST' in atr_i) != base_geo:
                 print(f'WARNING: {os.path.basename(fname)} is in '
                       f'{"geo" if "Y_FIRST" in atr_i else "radar"} coordinates while '
                       f'{os.path.basename(self.file[0])} is not --> skipped.')
                 continue
+            if i and not base_geo and (atr_i['LENGTH'], atr_i['WIDTH']) != (
+                    self.atr['LENGTH'], self.atr['WIDTH']):
+                print(f'WARNING: {os.path.basename(fname)} is radar-coded on another grid '
+                      f'than {os.path.basename(self.file[0])} --> skipped (several '
+                      'radar-coded files must share one grid; geocode them for frames '
+                      'or tracks).')
+                continue
             kept.append(fname)
+            crs_i = crs_of(atr_i, fname) if 'Y_FIRST' in atr_i else None
+            self.crs_list.append(crs_i)
+            if given:
+                labels.append(given[i] if i < len(given) else os.path.basename(fname))
 
-            coord_i = ut.coordinate(atr_i)
-            if self.geo_box and 'Y_FIRST' in atr_i:
+            coord_i = coordinate(atr_i)
+            if i == 0:
+                box_i = tuple(self.pix_box)
+                if self.geo_box and 'Y_FIRST' in atr_i:
+                    box_i = coord_i.check_box_within_data_coverage(
+                        coord_i.box_geo2pixel(self.geo_box), print_msg=False)
+            elif subset and self.geo_box and 'Y_FIRST' in atr_i and same_crs(crs_i, crs_1):
+                # the displayed subset, for every file
                 box_i = coord_i.check_box_within_data_coverage(
                     coord_i.box_geo2pixel(self.geo_box), print_msg=False)
             else:
-                box_i = tuple(self.pix_box)
+                # another frame or track: all of it, not only where file 1 is
+                box_i = (0, 0, int(atr_i['WIDTH']), int(atr_i['LENGTH']))
+                if not base_geo:
+                    box_i = tuple(self.pix_box)
 
-            data_i = readfile.read(fname, datasetName=self.dset, box=box_i,
-                                   print_msg=False)[0]
-            data_i = pp.scale_data2disp_unit(data_i, metadata=atr_i,
-                                             disp_unit=self.disp_unit)[0]
-            msk_i = pp.read_mask(fname, mask_file=self.mask_file, datasetName=self.dset,
-                                 box=box_i, print_msg=False)[0]
+            data_i = read(fname, datasetName=self.dset, box=box_i, print_msg=False)[0]
+            data_i = scale_data2disp_unit(np.array(data_i, dtype=np.float32), metadata=atr_i,
+                                          disp_unit=self.disp_unit)[0]
+            msk_i = read_mask(fname, mask_file=self.mask_file, datasetName=self.dset,
+                              box=box_i, print_msg=False)[0]
 
             self.data_list.append(data_i)
             self.atr_list.append(atr_i)
@@ -758,6 +945,10 @@ class swathProfileViewer:
         if not kept:
             raise ValueError('no usable input file left.')
         self.file = kept
+        self.labels = labels if given else file_labels(self.file)
+        if len(self.file) > 1:
+            self.vprint(f'{len(self.file)} input files: {", ".join(self.labels)} - one '
+                        'density for all of them, a median line for each')
 
         # the data's CRS, from the file itself where it carries one (GeoTIFF):
         # MintPy's attributes alone can misreport a projected GeoTIFF as EPSG:4326
@@ -765,7 +956,7 @@ class swathProfileViewer:
 
         # radar-coded data: MintPy's geometry file is the way to lon/lat
         if 'Y_FIRST' not in self.atr and (self.fault_file or self.topoxsect or self.dem_file
-                                          or self.lookup_file):
+                                          or self.lookup_file or self.gnss_file):
             self.init_lookup()
 
         # -d / --topoxsect without a file: one download, for the map extent
@@ -781,6 +972,8 @@ class swathProfileViewer:
             self.init_topo()
         if self.fault_file:
             self.init_faults()
+        if self.gnss_file:
+            self.init_gnss()
         if self.timeseries:
             self.init_timeseries()
 
@@ -788,7 +981,7 @@ class swathProfileViewer:
         length = self.pix_box[3] - self.pix_box[1]
         width = self.pix_box[2] - self.pix_box[0]
         if not self.fig_size_map:
-            self.fig_size_map = pp.auto_figure_size((length, width), disp_cbar=True)
+            self.fig_size_map = auto_figure_size((length, width), disp_cbar=True)
         if not self.fig_size:
             self.fig_size = [7.6, 4.8]
         return
@@ -925,8 +1118,163 @@ class swathProfileViewer:
                   'Does the file cover this area, with the right CRS (.prj)?')
         return
 
+    def init_gnss(self):
+        """Read --gnss, take the component of --vel, in the data's unit, and
+        place every station on the grid of the first file."""
+        from .gnss import LOSGeometry, read_gnss
+
+        try:
+            gnss = read_gnss(self.gnss_file, unit=self.gnss_unit, verbose=self.print_msg)
+            factor = velocity_factor(gnss.unit, self.disp_unit)
+            if factor is None:
+                print(f'WARNING: --gnss: the data are in {self.disp_unit!r}, not a velocity; '
+                      f'the GNSS stay in {gnss.unit}')
+                factor = 1.0
+            gnss = gnss.scaled(factor, self.disp_unit)
+            uvec = None
+            if self.gnss_comp == 'los':
+                geom_file = self.geom_file
+                if isinstance(geom_file, (list, tuple)):        # one per file: the first
+                    geom_file = geom_file[0] if geom_file else None
+                geom = LOSGeometry.for_file(self.file[0], self.atr, geom_file=geom_file,
+                                            inc=self.los_inc, az=self.los_az,
+                                            verbose=self.print_msg)
+                uvec = geom.unit_vector_at(gnss.lon, gnss.lat)
+                self.gnss_note = f'LOS of {os.path.basename(self.file[0])} ({geom.source})'
+            value, sigma = gnss.component(self.gnss_comp, uvec)
+            if self.gnss_comp == 'vu' and not gnss.has_vu.any():
+                raise ValueError('-vel vu, but no station has a vertical velocity')
+            self.gnss, self.gnss_value, self.gnss_sigma = gnss, value, sigma
+            self.gnss_rows, self.gnss_cols = self.lonlat_to_rowcol(gnss.lon, gnss.lat)
+            usable = np.isfinite(value) & np.isfinite(self.gnss_rows)
+            self.vprint(f'GNSS: {int(usable.sum())} of {len(gnss)} station(s) usable for '
+                        f'-vel {self.gnss_comp} [{self.disp_unit}]')
+        except Exception as err:      # noqa: BLE001 - the GNSS are a nicety
+            print(f'WARNING: cannot use --gnss: {err}')
+            print('         --> continuing without GNSS.')
+            self.gnss = None
+        return
+
+    def lonlat_to_rowcol(self, lon, lat):
+        """Fractional (row, col) of lon/lat points on the grid of the first file."""
+        lon, lat = np.asarray(lon, dtype=np.float64), np.asarray(lat, dtype=np.float64)
+        if 'Y_FIRST' not in self.atr:
+            if self.lookup is None:
+                raise ValueError(NO_LOOKUP)
+            return self.lookup.to_rowcol(lon, lat)
+        x, y = lon, lat
+        if self.data_crs is not None and not same_crs(self.data_crs, 4326):
+            from pyproj import Transformer
+            x, y = Transformer.from_crs(4326, self.data_crs, always_xy=True).transform(lon, lat)
+        rows = (np.asarray(y) - float(self.atr['Y_FIRST'])) / float(self.atr['Y_STEP']) - 0.5
+        cols = (np.asarray(x) - float(self.atr['X_FIRST'])) / float(self.atr['X_STEP']) - 0.5
+        return rows, cols
+
+    def line_on_file(self, index, start_yx, end_yx):
+        """A line of the first file's grid on the grid of file `index`
+        ([row, col] floats) - through the map coordinates, in any CRS."""
+        if index == 0 or 'Y_FIRST' not in self.atr:
+            return list(start_yx), list(end_yx)
+        rows, cols = self.rowcol_on_file(index, [start_yx[0], end_yx[0]],
+                                         [start_yx[1], end_yx[1]])
+        return [float(rows[0]), float(cols[0])], [float(rows[1]), float(cols[1])]
+
+    def rowcol_on_file(self, index, rows, cols):
+        """(row, col) of the first file's grid -> the grid of file `index`."""
+        rows = np.asarray(rows, dtype=np.float64)
+        cols = np.asarray(cols, dtype=np.float64)
+        if index == 0 or 'Y_FIRST' not in self.atr:
+            return rows, cols
+        atr_i = self.atr_list[index]
+        xs = float(self.atr['X_FIRST']) + (cols + 0.5) * float(self.atr['X_STEP'])
+        ys = float(self.atr['Y_FIRST']) + (rows + 0.5) * float(self.atr['Y_STEP'])
+        crs_i = self.crs_list[index]
+        if (self.data_crs is not None and crs_i is not None
+                and not same_crs(self.data_crs, crs_i)):
+            from pyproj import Transformer
+            xs, ys = Transformer.from_crs(self.data_crs, crs_i, always_xy=True).transform(xs, ys)
+        rows_i = (np.asarray(ys) - float(atr_i['Y_FIRST'])) / float(atr_i['Y_STEP']) - 0.5
+        cols_i = (np.asarray(xs) - float(atr_i['X_FIRST'])) / float(atr_i['X_STEP']) - 0.5
+        return rows_i, cols_i
+
+    def draw_other_files(self):
+        """Every other geocoded file on the map too, in view.py's colours, under
+        the first one - a mosaic of frames, or the tracks side by side."""
+        if len(self.file) < 2 or 'Y_FIRST' not in self.atr:
+            return
+        ax = self.ax_img
+        images = ax.get_images()
+        if not images:
+            return
+        main = images[-1]
+        xlim, ylim = ax.get_xlim(), ax.get_ylim()
+        xs, ys = list(xlim), list(ylim)
+        geo = self.fig_coord == 'geo'
+        for i in range(1, len(self.file)):
+            if not same_crs(self.crs_list[i], self.data_crs):
+                self.vprint(f'map: {self.labels[i]} is in another CRS - in the profiles, '
+                            'not drawn on the map')
+                continue
+            atr_i, box = self.atr_list[i], self.box_list[i]
+            data = np.array(self.data_list[i], dtype=np.float64)
+            if self.msk_list[i] is not None:
+                data[~np.asarray(self.msk_list[i], dtype=bool)] = np.nan
+            step = max(1, int(np.ceil(max(data.shape) / 1500)))
+            data = data[::step, ::step]
+            x0 = float(atr_i['X_FIRST']) + box[0] * float(atr_i['X_STEP'])
+            x1 = float(atr_i['X_FIRST']) + box[2] * float(atr_i['X_STEP'])
+            y0 = float(atr_i['Y_FIRST']) + box[1] * float(atr_i['Y_STEP'])
+            y1 = float(atr_i['Y_FIRST']) + box[3] * float(atr_i['Y_STEP'])
+            if not geo:                       # the first file's pixel numbers
+                x0, x1 = [(x - float(self.atr['X_FIRST'])) / float(self.atr['X_STEP']) - 0.5
+                          for x in (x0, x1)]
+                y0, y1 = [(y - float(self.atr['Y_FIRST'])) / float(self.atr['Y_STEP']) - 0.5
+                          for y in (y0, y1)]
+            ax.imshow(data, cmap=main.get_cmap(), norm=main.norm, alpha=main.get_alpha(),
+                      extent=[x0, x1, y1, y0], origin='upper', interpolation='nearest',
+                      zorder=main.get_zorder())
+            xs += [x0, x1]
+            ys += [y0, y1]
+        main.set_zorder(main.get_zorder() + 0.01)            # the first file on top
+        if not any(getattr(self, k, None) for k in ('subset_lat', 'subset_lon',
+                                                     'subset_y', 'subset_x')):
+            lo_x, hi_x, lo_y, hi_y = min(xs), max(xs), min(ys), max(ys)
+            ax.set_xlim((hi_x, lo_x) if xlim[0] > xlim[1] else (lo_x, hi_x))
+            ax.set_ylim((hi_y, lo_y) if ylim[0] > ylim[1] else (lo_y, hi_y))
+        return
+
+    def draw_gnss_on_map(self):
+        """Every GNSS station on the map: triangles 3D, circles 2D, in black."""
+        if self.gnss is None:
+            return
+        ax = self.ax_img
+        xlim, ylim = ax.get_xlim(), ax.get_ylim()
+        xs, ys = self._yx2disp(self.gnss_rows, self.gnss_cols)
+        xs, ys = np.asarray(xs), np.asarray(ys)
+        for is3d, marker in ((True, '^'), (False, 'o')):
+            sel = (self.gnss.has_vu == is3d) & np.isfinite(xs) & np.isfinite(ys)
+            if sel.any():
+                self.gnss_obj.append(ax.scatter(xs[sel], ys[sel], s=36, marker=marker,
+                                                c='k', edgecolors='w', linewidths=0.7,
+                                                zorder=11))
+        if self.gnss_label:
+            for x, y, site in zip(xs, ys, self.gnss.site):
+                if np.isfinite(x) and np.isfinite(y):
+                    self.gnss_obj.append(ax.annotate(
+                        site, (x, y), xytext=(3, 3), textcoords='offset points',
+                        fontsize=max(self.font_size - 4, 6), zorder=11,
+                        path_effects=[patheffects.withStroke(linewidth=2, foreground='w')]))
+        ax.set_xlim(xlim)
+        ax.set_ylim(ylim)
+        return
+
     def init_timeseries(self):
         """Set up tsview.py to serve the time-series window."""
+        if not have_mintpy():
+            print(f'WARNING: --timeseries uses MintPy\'s tsview.py ({MINTPY_HINT}) --> no '
+                  'time-series window. `viewinsar tseries` needs no MintPy.')
+            self.timeseries = None
+            return
         try:
             from mintpy import tsview
             from mintpy.cli.tsview import cmd_line_parse as ts_cmd_line_parse
@@ -963,8 +1311,15 @@ class swathProfileViewer:
         subplot_kw = dict(projection=self.map_proj_obj) if self.map_proj_obj is not None else {}
         self.fig_map = _new_figure('Map', self.fig_size_map)
         self.ax_img = self.fig_map.add_subplot(1, 1, 1, **subplot_kw)
-        self.ax_img = view.plot_slice(self.ax_img, self.data_img, self.atr, self)[0]
+        if have_mintpy():
+            from mintpy import view
+            self.ax_img = view.plot_slice(self.ax_img, self.data_img, self.atr, self)[0]
+        else:
+            from .mapview import plot_slice
+            self.ax_img = plot_slice(self.ax_img, self.data_img, self.atr, self)[0]
+        self.draw_other_files()
         self.draw_faults_on_map()
+        self.draw_gnss_on_map()
         self.fig_map.tight_layout()
         self.cid = self.fig_map.canvas.mpl_connect('button_release_event', self.select_point)
         self.fig_map.canvas.mpl_connect('key_press_event', self.on_key)
@@ -981,7 +1336,7 @@ class swathProfileViewer:
         self.make_map()
 
         # window 2 - section A
-        self.sections.append(Section(self, 0))
+        self.sections.append(self.SECTION_CLASS(self, 0))
         self.section.create_figure()
 
         # window 3 - the point time series
@@ -997,18 +1352,38 @@ class swathProfileViewer:
             self.ax_ts.set_yticks([])
             self.fig_ts.canvas.mpl_connect('key_press_event', self.on_key)
 
-        # an initial line given on the command line
-        if self.start_yx and self.end_yx:
+        # the sections given on the command line: A-A', B-B', ... each in its window
+        profiles = list(getattr(self, 'profiles', None) or [])
+        if not profiles and self.start_yx and self.end_yx:
+            profiles = [dict(start_yx=self.start_yx, end_yx=self.end_yx,
+                             start_lalo=self.start_lalo, end_lalo=self.end_lalo)]
+        for k, prof in enumerate(profiles):
+            if k:
+                self.sections.append(self.SECTION_CLASS(self, len(self.sections)))
+                self.section.create_figure()
             sec = self.section
-            sec.start_yx, sec.end_yx = list(self.start_yx), list(self.end_yx)
-            sec.start_lalo, sec.end_lalo = self.start_lalo, self.end_lalo
+            sec.start_yx, sec.end_yx = list(prof['start_yx']), list(prof['end_yx'])
+            sec.start_lalo, sec.end_lalo = prof.get('start_lalo'), prof.get('end_lalo')
             sec.draw_on_map()
-            sec.draw()
+            if len(profiles) == 1:
+                sec.draw()
+                continue
+            self.vprint(f'\n----- section {sec.name} ({k + 1} of {len(profiles)})')
+            try:
+                sec.draw()
+            except (ValueError, IndexError) as err:     # one bad line: go on with the rest
+                print(f'WARNING: section {sec.name}: {err}')
+                sec.clear_data()
+        if len(profiles) > 1 and not any(s.has_data for s in self.sections):
+            raise ValueError(f'none of the {len(profiles)} sections has data on it')
         if self.ts_obj is not None and self.yx:
             self.draw_timeseries(self.yx)
 
         if self.save_fig:
-            self.save_outputs()
+            if any(s.has_data for s in self.sections):
+                self.save_outputs()
+            elif self.disp_fig:
+                print(f'--save: nothing drawn yet - "e" exports into {export_dir(self.outdir)}')
         if self.disp_fig:
             print(self.help_msg())
             plt.show()
@@ -1022,7 +1397,8 @@ class swathProfileViewer:
         msg += '\n  key "="  or  "+" : start ANOTHER section in a new window'
         msg += "\n                     (the current line stays on the map as A-A', B-B', ...)"
         msg += '\n  key "n"       : redraw the CURRENT section from scratch'
-        msg += '\n  key "e"       : export the map and every section'
+        msg += '\n  key "e"       : export the map and every section, into'
+        msg += f'\n                  {export_dir(self.outdir)}'
         msg += f'  (figures as {self.fig_ext})'
         msg += '\n' + '-' * 74
         return msg
@@ -1068,7 +1444,7 @@ class swathProfileViewer:
                 print(f'section {sec.name} has no profile yet - '
                       'draw it first (2 left clicks on the map).')
                 return
-            new = Section(self, len(self.sections))
+            new = self.SECTION_CLASS(self, len(self.sections))
             self.sections.append(new)
             self.pts_idx = 0
             new.create_figure()
@@ -1084,8 +1460,7 @@ class swathProfileViewer:
                 return
             sec.clear_map_artists()
             sec.start_yx = sec.end_yx = sec.start_lalo = sec.end_lalo = None
-            sec.swath_list = sec.den = sec.topo_swath = sec.topo_den = None
-            sec.clear_crossings()
+            sec.clear_data()
             self.pts_idx = 0
             sec.reset_axes()
             sec.fig.canvas.draw_idle()
@@ -1151,13 +1526,14 @@ class swathProfileViewer:
             print('nothing to save yet - draw a section first (2 left clicks).')
             return []
 
-        os.makedirs(self.outdir or '.', exist_ok=True)
+        os.makedirs(self.outdir or '.', exist_ok=True)       # made, if it went missing
         written = []
         for sec in drawn:
             written += sec.save()
 
         out = self.outfile[0] if self.outfile else os.path.join(
-            self.outdir, f'swath_map_{"".join(s.label for s in drawn)}{self.fig_ext}')
+            self.outdir, f'{self.COMMAND}_map_{"".join(s.label for s in drawn)}{self.fig_ext}')
+        os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
         self.fig_map.savefig(out, bbox_inches='tight', dpi=self.fig_dpi)
         print(f'saved the map with {len(drawn)} section line(s) to: {out}')
         written.append(out)

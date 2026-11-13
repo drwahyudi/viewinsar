@@ -1,12 +1,11 @@
 """The help text must document every feature, and every example must parse."""
 
+import re
 import shlex
 
 import pytest
 
 from viewinsar import cli
-
-pytest.importorskip('mintpy', reason='the examples forward options to view.py')
 
 
 def _swath_help():
@@ -14,8 +13,9 @@ def _swath_help():
 
 
 def _flat(text):
-    """Collapse whitespace, so a phrase wrapped over two lines still matches."""
-    return ' '.join(text.split())
+    """Collapse whitespace, so a phrase wrapped over two lines still matches -
+    and write `-d [DEM], --dem [DEM]` (Python < 3.13) as `-d, --dem [DEM]`."""
+    return re.sub(r' \[DEM\],', ',', ' '.join(text.split()))
 
 
 @pytest.mark.parametrize('needle', [
@@ -93,7 +93,8 @@ def test_there_are_examples():
 @pytest.mark.parametrize('cmd', _example_commands())
 def test_every_example_parses(cmd):
     """No example may use an option that neither viewinsar nor view.py knows."""
-    from mintpy.cli.view import create_parser as view_parser
+    view_cli = pytest.importorskip('mintpy.cli.view', reason='checked against view.py')
+    view_parser = view_cli.create_parser
 
     args = shlex.split(cmd)[2:]                       # drop "viewinsar swath"
     _, unknown = cli.create_swath_parser().parse_known_args(args)
@@ -108,3 +109,53 @@ def test_help_lines_fit_a_terminal():
     for name, text in (('swath -h', _swath_help()), ('-h', cli.top_level_help())):
         long = [ln for ln in text.splitlines() if len(ln) > 92]
         assert not long, f'`viewinsar {name}` has lines over 92 columns:\n' + '\n'.join(long)
+
+
+def _sections_of_top_help():
+    """{command: the text of its section} of `viewinsar -h`."""
+    text = cli.top_level_help()
+    out, name = {}, None
+    for line in text.splitlines():
+        head = re.match(r'^(swath|stat|model|tseries) - ', line)
+        if head:
+            name = head.group(1)
+            out[name] = []
+        elif line.startswith('common options') or line.startswith('install'):
+            name = None
+        elif name:
+            out[name].append(line)
+    return {k: '\n'.join(v) for k, v in out.items()}
+
+
+def test_top_level_help_covers_every_command():
+    """`viewinsar -h` has a section on each command, with what it does, its keys,
+    its output and examples - and every option it names really exists."""
+    parsers = {'swath': cli.create_swath_parser, 'stat': cli.create_stat_parser,
+               'model': cli.create_model_parser, 'tseries': cli.create_tseries_parser}
+    sections = _sections_of_top_help()
+    assert set(sections) == set(parsers)
+    for name, text in sections.items():
+        for needle in ('keys', 'output', 'examples'):
+            assert needle in text, (name, needle)
+        known = set(parsers[name]()._option_string_actions)
+        named = set(re.findall(r'(?<![\w/+])(--?[a-zA-Z][\w-]*)', text))
+        assert named, name
+        assert not named - known, f'{name}: unknown option(s) {sorted(named - known)}'
+    top = cli.top_level_help()
+    for needle in ('--profile', '--line-file', '-rate', '--creep', 'posteriors',
+                   'model_sections_ABC.csv', '--save [DIR]', '-r KM', 'LiCSBAS',
+                   'pip install "viewinsar[mintpy]"', '--help-all'):
+        assert needle in top, needle
+
+
+def test_help_all_and_help_command(capsys):
+    assert cli.main(['--help-all']) == 0
+    out = capsys.readouterr().out
+    for name in ('swath', 'stat', 'model', 'tseries', 'list'):
+        assert f'usage: viewinsar {name}' in out, name
+    assert out.startswith(cli.top_level_help()[:40])
+    assert cli.main(['help', 'model']) == 0
+    out = capsys.readouterr().out
+    assert out.startswith('usage: viewinsar model') and '--profile' in out
+    assert cli.main(['help', 'all']) == 0
+    assert 'usage: viewinsar tseries' in capsys.readouterr().out

@@ -18,7 +18,6 @@ from viewinsar.radar import RadarLookup, find_lookup
 from viewinsar.raster import read_any
 
 h5py = pytest.importorskip('h5py')
-pytest.importorskip('mintpy', reason='the viewer needs MintPy')
 matplotlib = pytest.importorskip('matplotlib')
 matplotlib.use('Agg')
 
@@ -124,10 +123,10 @@ def _t_fault():
 #                              the lookup                                    #
 ##############################################################################
 def test_lookup_found_like_mintpy_does(tmp_path):
-    from mintpy.utils import readfile
+    from viewinsar.compat import read_attribute
 
     vfile, gfile = make_radar_product(str(tmp_path / 'a'), geometry='inputs')
-    atr = readfile.read_attribute(vfile)
+    atr = read_attribute(vfile)
     assert find_lookup(vfile, atr, verbose=False) == os.path.normpath(gfile)
 
     # the user's layout: velocity in a backup folder, inputs/ one level up
@@ -137,10 +136,10 @@ def test_lookup_found_like_mintpy_does(tmp_path):
 
 
 def test_a_lookup_of_another_size_is_refused(tmp_path):
-    from mintpy.utils import readfile
+    from viewinsar.compat import read_attribute
 
     vfile, gfile = make_radar_product(str(tmp_path / 'b'))
-    atr = dict(readfile.read_attribute(vfile), LENGTH='999')
+    atr = dict(read_attribute(vfile), LENGTH='999')
     assert find_lookup(vfile, atr, verbose=False) is None
     with pytest.raises(ValueError, match='999'):
         find_lookup(vfile, atr, given=gfile, verbose=False)

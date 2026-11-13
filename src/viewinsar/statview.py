@@ -23,7 +23,7 @@ from matplotlib.lines import Line2D
 from .fault import load_faults, load_faults_radar
 from .stat import circle_outline, distance_to_polyline, from_yx, grid_mirrored, stat_line, to_yx
 from .swath import is_projected
-from .viewer import NO_LOOKUP, _new_figure, swathProfileViewer, unit_label
+from .viewer import NO_LOOKUP, _new_figure, export_dir, swathProfileViewer, unit_label
 
 __all__ = ['StatViewer']
 
@@ -34,6 +34,9 @@ CIRCLE_ALPHA = 0.9          # the circles keep a hint of the data under them
 INK = '#222222'             # text, and the mean / mode strikes
 MODE_STYLE = (0, (1, 1.3))  # dotted
 STRIKE = 0.45               # half length of a strike, as a fraction of the violin width
+RATE_COLORS = ('#d62728', '#1f77b4', '#2ca02c', '#ff7f0e', '#9467bd', '#8c564b', '#e377c2',
+               '#17becf')            # one per file in the -rate plot (red, blue ...)
+ROBUST = 1.349                      # interquartile range / standard deviation (normal)
 
 
 class StatViewer(swathProfileViewer):
@@ -53,6 +56,7 @@ class StatViewer(swathProfileViewer):
 
     def __init__(self, inps, view_cmd):
         super().__init__(inps, view_cmd)
+        self.results = []             # one stat_line result per input file
         self.vertices = []            # [row, col] of the line, full file
         self.mirrored = None          # the grid is a mirror image of the map (radar)
         self.finished = False
@@ -122,7 +126,10 @@ class StatViewer(swathProfileViewer):
             self.draw_line_on_map()
             self.finish()
         if self.save_fig:
-            self.save_outputs()
+            if self.finished:
+                self.save_outputs()
+            elif self.disp_fig:
+                print(f'--save: no line yet - "e" exports into {export_dir(self.outdir)}')
         if self.disp_fig:
             print(self.help_msg())
             plt.show()
@@ -134,31 +141,49 @@ class StatViewer(swathProfileViewer):
         msg += '\n  key Enter      : finish the line -> circles on the map + the violins'
         msg += '\n  key "u" / Back : remove the last point'
         msg += '\n  key "n"        : start a new line'
-        msg += f'\n  key "e"        : export the figures and the .csv files ({self.fig_ext})'
+        msg += f'\n  key "e"        : export the figures and the .csv files ({self.fig_ext}), into'
+        msg += f'\n                   {export_dir(self.outdir)}'
         msg += f'\n  block 1 = {self.block_names[0]}: LEFT of the line, walking from its '
         msg += f'first point to its last;\n  block 2 = {self.block_names[1]}: RIGHT of it'
         msg += '\n' + '-' * 74
         return msg
 
     def create_stat_figure(self):
-        self.fig_stat = _new_figure('Statistics', self.fig_size)
-        self.ax_stat = self.fig_stat.add_subplot(1, 1, 1)
-        self.fig_stat.subplots_adjust(left=0.1, right=0.97, bottom=0.25, top=0.9)
+        n_panel = 1 if (self.rate or len(self.file) == 1) else len(self.file)
+        size = list(self.fig_size)
+        if n_panel > 1:
+            size[1] = self.fig_size[1] * (0.45 + 0.42 * n_panel)
+        self.fig_stat = _new_figure('Rate' if self.rate else 'Statistics', size)
+        axes = self.fig_stat.subplots(n_panel, 1, sharex=True, squeeze=False)[:, 0]
+        self.axes_stat, self.ax_stat = list(axes), axes[0]
+        if n_panel == 1:
+            self.fig_stat.subplots_adjust(left=0.1, right=0.97, bottom=0.25, top=0.9)
+        else:
+            self.fig_stat.subplots_adjust(left=0.1, right=0.97, bottom=0.25 / n_panel ** 0.8,
+                                          top=1 - 0.1 / n_panel ** 0.8, hspace=0.1)
         self.fig_stat.canvas.mpl_connect('key_press_event', self.on_key)
         self.reset_stat_axes('draw a line along the fault on the map:\n'
                              'left-click its points, then press Enter')
         return
 
     def reset_stat_axes(self, message=None):
-        ax = self.ax_stat
-        ax.cla()
-        ax.set_xlabel('Distance along the line [km]', fontsize=self.font_size + 1)
-        ax.set_ylabel(f'LOS velocity{unit_label(self.disp_unit)}', fontsize=self.font_size + 1)
-        ax.tick_params(which='both', direction='in', labelsize=self.font_size,
-                       bottom=True, top=True, left=True, right=True)
+        unit = unit_label(self.disp_unit)
+        for k, ax in enumerate(self.axes_stat):
+            ax.cla()
+            if ax is self.axes_stat[-1]:
+                ax.set_xlabel('Distance along the line [km]', fontsize=self.font_size + 1)
+            if self.rate:
+                ylabel = f'{self.block_names[0]} \u2212 {self.block_names[1]}{unit}'
+            elif len(self.axes_stat) > 1:
+                ylabel = f'{self.labels[k]}{unit}'
+            else:
+                ylabel = f'LOS velocity{unit}'
+            ax.set_ylabel(ylabel, fontsize=self.font_size + 1)
+            ax.tick_params(which='both', direction='in', labelsize=self.font_size,
+                           bottom=True, top=True, left=True, right=True)
         if message:
-            ax.text(0.5, 0.5, message, ha='center', va='center', color='0.55',
-                    fontsize=self.font_size, transform=ax.transAxes)
+            self.ax_stat.text(0.5, 0.5, message, ha='center', va='center', color='0.55',
+                              fontsize=self.font_size, transform=self.ax_stat.transAxes)
         return
 
     ##---------- events
@@ -218,14 +243,25 @@ class StatViewer(swathProfileViewer):
         if len(self.vertices) < 2:
             print('the line needs at least two points.')
             return
-        data, atr, box, msk = (self.data_list[0], self.atr_list[0], self.box_list[0],
-                               self.msk_list[0])
-        try:
-            self.result = stat_line(data, atr, box, self.vertices, self.spacing, self.radius,
-                                    self.gap, mask=msk, keep_zero=self.keep_zero,
-                                    mirrored=self.mirrored)
-        except ValueError as err:
-            print(f'cannot use this line: {err}')
+        verts = np.asarray(self.vertices, dtype=np.float64)
+        self.results = []
+        for i in range(len(self.file)):
+            # the same line on this file's grid (frames, tracks, any CRS)
+            rows, cols = self.rowcol_on_file(i, verts[:, 0], verts[:, 1])
+            mirrored = self.mirrored
+            if i and 'Y_FIRST' in self.atr:
+                mirrored = grid_mirrored(self.atr_list[i])
+            try:
+                res = stat_line(self.data_list[i], self.atr_list[i], self.box_list[i],
+                                np.c_[rows, cols], self.spacing, self.radius, self.gap,
+                                mask=self.msk_list[i], keep_zero=self.keep_zero,
+                                mirrored=mirrored)
+            except ValueError as err:
+                print(f'{self.labels[i]}: cannot use this line: {err}')
+                res = None
+            self.results.append(res)
+        self.result = self.results[0]
+        if self.result is None:
             return
         self.finished = True
         self.report()
@@ -353,11 +389,74 @@ class StatViewer(swathProfileViewer):
         return
 
     def draw_stat(self):
+        """The violins (one panel per file), or with -rate the rates."""
+        self.reset_stat_axes()
+        if self.rate:
+            self.draw_rate()
+        else:
+            for k, ax in enumerate(self.axes_stat):
+                if self.results[k] is not None:
+                    self.draw_violins(ax, self.results[k], first=k == 0,
+                                      last=ax is self.axes_stat[-1])
+        self.fig_stat.canvas.draw_idle()
+        return
+
+    def rate_of(self, res):
+        """Block 1 - block 2 at every point, and its 1-sigma.
+
+        --rate-err iqr (default): the robust spread of the pixels, sqrt(s1^2 +
+        s2^2) with s = (q75 - q25) / 1.349 - conservative, as the pixels of a
+        circle are correlated; sem: the standard error of the two medians,
+        1.2533 sqrt(s1^2/n1 + s2^2/n2), as if they were independent.
+        """
+        st1, st2 = res['stats']
+        get = lambda st, key: np.array([d[key] for d in st], dtype=np.float64)  # noqa: E731
+        rate = get(st1, 'median') - get(st2, 'median')
+        s1 = (get(st1, 'q75') - get(st1, 'q25')) / ROBUST
+        s2 = (get(st2, 'q75') - get(st2, 'q25')) / ROBUST
+        if self.rate_err == 'sem':
+            n1 = np.maximum(get(st1, 'count'), 1)
+            n2 = np.maximum(get(st2, 'count'), 1)
+            err = 1.2533 * np.sqrt(s1 ** 2 / n1 + s2 ** 2 / n2)
+        else:
+            err = np.hypot(s1, s2)
+        return rate, err
+
+    def draw_rate(self):
+        """Block 1 - block 2 along the line, one series per file (as Hussain et al.
+        2016 for the creep along the North Anatolian Fault)."""
+        ax = self.ax_stat
+        lengths, dists = [], []
+        for k, res in enumerate(self.results):
+            if res is None:
+                continue
+            rate, err = self.rate_of(res)
+            good = np.isfinite(rate)
+            color = RATE_COLORS[k % len(RATE_COLORS)]
+            ax.errorbar(res['dist_km'][good], rate[good], yerr=err[good], fmt='o-', ms=5,
+                        lw=1.3, color=color, ecolor=color, elinewidth=1.0, capsize=3,
+                        alpha=0.95, zorder=4 + k, label=self.labels[k])
+            lengths.append(res['length_km'])
+            dists.append(res['dist_km'])
+        ax.axhline(0, color='k', lw=0.7, zorder=1)
+        step = self.spacing
+        dist = np.concatenate(dists)
+        ax.set_xlim(min(0.0, dist.min() - 0.6 * step), max(max(lengths), dist.max() + 0.6 * step))
+        if self.ylim:
+            ax.set_ylim(self.ylim)
+        ax.legend(fontsize=max(self.font_size - 3, 6), loc='best', framealpha=0.85)
+        res = self.result
+        ax.set_title(f"rate = {self.block_names[0]} \u2212 {self.block_names[1]} | line "
+                     f"{res['length_km']:.2f} km, {len(res['dist_km'])} points every {step:g} km"
+                     f" | r = {self.radius:g} km, {self.gap:g} km clear | error: "
+                     f"{'IQR / 1.349' if self.rate_err == 'iqr' else 'SE of the medians'}",
+                     fontsize=max(self.font_size - 1, 6))
+        return
+
+    def draw_violins(self, ax, res, first=True, last=True):
         """A violin per block at every point, with strikes at its median (the
         block's colour), mean (solid) and mode (dotted); the medians of each
         block joined by a dashed line."""
-        res, ax = self.result, self.ax_stat
-        self.reset_stat_axes()
         dist, step = res['dist_km'], self.spacing
         shift, width = 0.2 * step, 0.36 * step
         half = STRIKE * width
@@ -406,13 +505,14 @@ class StatViewer(swathProfileViewer):
                     Line2D([], [], ls='-', lw=1.3, color=INK, label='Mean'),
                     Line2D([], [], ls=MODE_STYLE, lw=1.8, color=INK, dash_capstyle='round',
                            label='Mode')]
-        ax.legend(handles=handles, fontsize=max(self.font_size - 3, 6), ncol=len(handles),
-                  loc='upper center', bbox_to_anchor=(0.5, -0.17), frameon=False,
-                  handlelength=2.4, columnspacing=1.8)
-        ax.set_title(f"line {res['length_km']:.2f} km | {len(dist)} points every "
-                     f"{step:g} km | circles r = {self.radius:g} km, {self.gap:g} km "
-                     'clear of the line', fontsize=self.font_size)
-        self.fig_stat.canvas.draw_idle()
+        if last:
+            ax.legend(handles=handles, fontsize=max(self.font_size - 3, 6),
+                      ncol=len(handles), loc='upper center', bbox_to_anchor=(0.5, -0.17),
+                      frameon=False, handlelength=2.4, columnspacing=1.8)
+        if first:
+            ax.set_title(f"line {res['length_km']:.2f} km | {len(dist)} points every "
+                         f"{step:g} km | circles r = {self.radius:g} km, {self.gap:g} km "
+                         'clear of the line', fontsize=self.font_size)
         return
 
     def close(self):
@@ -444,19 +544,71 @@ class StatViewer(swathProfileViewer):
             return lat, lon
         return None
 
+    def _lalo_file(self, index, rows, cols):
+        """lat/lon (or northing/easting) of pixels of file `index`."""
+        if index == 0 or 'Y_FIRST' not in self.atr:
+            return self._lalo(rows, cols)
+        atr = self.atr_list[index]
+        rows, cols = np.asarray(rows, dtype=np.float64), np.asarray(cols, dtype=np.float64)
+        lat = float(atr['Y_FIRST']) + (rows + 0.5) * float(atr['Y_STEP'])
+        lon = float(atr['X_FIRST']) + (cols + 0.5) * float(atr['X_STEP'])
+        return lat, lon
+
     def save_outputs(self):
-        """The violins, the map, and the statistics as .csv + _info.txt."""
+        """The violins (or rates), the map, and the statistics as .csv + _info.txt."""
         if not self.finished or self.result is None:
             print('nothing to save yet - draw a line and press Enter.')
             return []
-        res, base = self.result, self.outfile_base
+        base = self.outfile_base
         os.makedirs(os.path.dirname(base) or '.', exist_ok=True)
+        written = []
+        for i, res in enumerate(self.results):
+            if res is not None:
+                written += self.save_tables(i, res, base + ('' if i == 0 else f'_{i + 1}'))
+        if self.rate:
+            written.append(self.save_rates(base))
+        written += self.save_info_and_figures(base)
+        for path in written:
+            print(f'saved: {path}')
+        return written
+
+    def save_rates(self, base):
+        """One row per point of the first file: the rate of every file and its error."""
+        res = self.result
+        prow, pcol = to_yx(res['frame'], res['points'])
+        lalo = self._lalo(prow, pcol)
+        tag = 'northing,easting' if is_projected(self.atr) else 'lat,lon'
+        cols = ['point', 'dist_km', 'row', 'col'] + (tag.split(',') if lalo else [])
+        table = [np.arange(len(res['dist_km'])), res['dist_km'], prow, pcol]
+        if lalo:
+            table += [lalo[0], lalo[1]]
+        many = len(self.results) > 1
+        for k, other in enumerate(self.results):
+            tail = f'_{k + 1}' if many else ''
+            rate = np.full(len(res['dist_km']), np.nan)
+            err = np.full(len(res['dist_km']), np.nan)
+            if other is not None:
+                r_k, e_k = self.rate_of(other)
+                # match the points by their distance along the line (the grids differ)
+                for j, d in enumerate(res['dist_km']):
+                    near = int(np.argmin(np.abs(other['dist_km'] - d)))
+                    if abs(other['dist_km'][near] - d) <= 0.25 * self.spacing:
+                        rate[j], err[j] = r_k[near], e_k[near]
+            cols += [f'rate{tail}', f'rate_err{tail}']
+            table += [rate, err]
+        out = f'{base}_rate.csv'
+        np.savetxt(out, np.column_stack(table), delimiter=',', fmt='%.6f',
+                   header=','.join(cols), comments='')
+        return out
+
+    def save_tables(self, index, res, base):
+        """stats.csv and values.csv of one file."""
         tag = 'northing,easting' if is_projected(self.atr) else 'lat,lon'
         written = []
 
         # 1. one row per point: both blocks side by side, and their difference
         prow, pcol = to_yx(res['frame'], res['points'])
-        lalo = self._lalo(prow, pcol)
+        lalo = self._lalo_file(index, prow, pcol)
         keys = ('count', 'median', 'mean', 'mode', 'std', 'q25', 'q75', 'min', 'max')
         cols = ['point', 'dist_km', 'row', 'col'] + (tag.split(',') if lalo else [])
         for b in (1, 2):
@@ -486,7 +638,7 @@ class StatViewer(swathProfileViewer):
                 line_km = distance_to_polyline(res['frame'], xy) * res['frame']['scale']
                 arrs = [np.full(val.size, k), np.full(val.size, b + 1),
                         np.full(val.size, res['dist_km'][k]), val, rr, cc, line_km]
-                ll = self._lalo(rr, cc)
+                ll = self._lalo_file(index, rr, cc)
                 if ll:
                     arrs += [ll[0], ll[1]]
                 blocks.append(np.column_stack(arrs))
@@ -497,13 +649,20 @@ class StatViewer(swathProfileViewer):
         table = np.vstack(blocks) if blocks else np.empty((0, len(vcols)))
         np.savetxt(out, table, delimiter=',', fmt='%.6f', header=','.join(vcols), comments='')
         written.append(out)
+        return written
 
-        # 3. how it was made
+    def save_info_and_figures(self, base):
+        res, written = self.result, []
+        tag = 'northing,easting' if is_projected(self.atr) else 'lat,lon'
         out = f'{base}_info.txt'
         vyx = np.asarray(self.vertices, dtype=np.float64)
         vll = self._lalo(vyx[:, 0], vyx[:, 1])
         with open(out, 'w') as fid:
             fid.write(f'file           : {os.path.abspath(self.file[0])}\n')
+            for i, fname in enumerate(self.file[1:], start=2):
+                fid.write(f'file {i:<10d}: {os.path.abspath(fname)}  (tables *_{i}.csv)\n')
+            if len(self.file) > 1:
+                fid.write(f'labels         : {self.labels}\n')
             fid.write(f'dataset        : {self.dset}\n')
             fid.write(f'unit           : {self.disp_unit}\n')
             fid.write(f"line length    : {res['length_km']:.4f} km, "
@@ -527,6 +686,13 @@ class StatViewer(swathProfileViewer):
                       'the violin\n')
             fid.write('values.csv: one row per pixel used; dist_to_line_km is never below '
                       'the gap\n')
+            if self.rate:
+                fid.write('rate.csv  : rate = median of block 1 - median of block 2 at every '
+                          'point, per file; rate_err = '
+                          + ('the robust spread sqrt(s1^2 + s2^2), s = (q75 - q25) / 1.349\n'
+                             if self.rate_err == 'iqr' else
+                             'the standard error of the medians, 1.2533 sqrt(s1^2/n1 + '
+                             's2^2/n2)\n'))
         written.append(out)
 
         # 4. the figures
@@ -534,8 +700,7 @@ class StatViewer(swathProfileViewer):
         self.fig_stat.savefig(out, bbox_inches='tight', dpi=self.fig_dpi)
         written.append(out)
         out = self.outfile[0] if self.outfile else f'{base}_map{self.fig_ext}'
+        os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
         self.fig_map.savefig(out, bbox_inches='tight', dpi=self.fig_dpi)
         written.append(out)
-        for path in written:
-            print(f'saved: {path}')
         return written
