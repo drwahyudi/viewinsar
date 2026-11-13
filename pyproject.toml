@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "viewinsar"
 dynamic = ["version"]
-description = "Interactive swath (buffered) profile viewer for InSAR velocity and time-series products, built on MintPy"
+description = "Interactive swath (buffered) profiles and fault block statistics for InSAR velocity and time-series products, built on MintPy"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "GPL-3.0-or-later" }
@@ -17,6 +17,7 @@ maintainers = [
 ]
 keywords = [
     "InSAR", "swath profile", "transect", "linear referencing", "MintPy",
+    "fault", "violin plot", "block statistics", "LiCSBAS", "time series viewer",
     "velocity", "time-series", "deformation", "tectonics", "geodesy",
     "remote-sensing",
 ]
@@ -38,10 +39,24 @@ dependencies = [
     "mintpy>=1.5",
     "numpy>=1.20",
     "matplotlib>=3.5",
+    # all of these already come with MintPy / matplotlib; listed because
+    # viewinsar imports them directly
+    "pyproj>=3.0",      # re-projection: --topoxsect, --fault, the DEM download
+    "pyshp>=2.1",       # --fault: shapefiles, without GDAL
+    "shapely>=1.8",     # --fault: GeoPackage / OGR geometries
+    "h5py>=3.0",        # the downloaded DEM, written as a MintPy .h5
+    "pillow>=8.0",      # decoding the Terrain Tiles (PNG)
+    "scipy>=1.5",       # radar-coded data: lon/lat -> radar pixel
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7.0"]
+# rasterio is only a fallback: it lets --topoxsect read a GeoTIFF DEM when the
+# GDAL python bindings MintPy would use are not installed.
+raster = ["rasterio>=1.2"]
+# --fault reads .shp .geojson .gpkg .kml/.kmz and GMT text on its own; pyogrio
+# adds every other vector format GDAL knows (FileGDB, GML, FlatGeobuf, ...).
+vector = ["pyogrio>=0.7"]
+test = ["pytest>=7.0", "rasterio>=1.2"]
 dev = ["pytest>=7.0", "ruff>=0.4", "build>=1.0", "twine>=5.0"]
 
 [project.urls]

@@ -17,14 +17,48 @@ import numpy as np
 EARTH_RADIUS = 6.3781e6      # in meter
 
 __all__ = [
-    'EARTH_RADIUS', 'get_pixel_size', 'line_geometry', 'swath_extract',
-    'weighted_quantile', 'nice_step', 'swath_density',
+    'EARTH_RADIUS', 'is_projected', 'get_pixel_size', 'line_geometry',
+    'swath_extract', 'bilinear_sample', 'weighted_quantile', 'nice_step',
+    'swath_density',
 ]
 
 
 ##############################################################################
 #                              geometry                                      #
 ##############################################################################
+def is_projected(atr):
+    """Is this grid in a projected CRS (metres) rather than degrees?
+
+    Deciding on UTM_ZONE alone is not enough: a GeoTIFF in a projected CRS
+    usually carries EPSG / Y_UNIT but no UTM_ZONE, and treating its metre-sized
+    pixels as degrees inflates every distance by a factor of ~111,320.
+    """
+    for key in ('Y_UNIT', 'X_UNIT'):
+        unit = str(atr.get(key, '')).lower()
+        if unit.startswith('meter') or unit.startswith('metre'):
+            return True
+        if unit.startswith('deg'):
+            return False
+    if atr.get('UTM_ZONE'):
+        return True
+    # no raster has a pixel a degree across - checked BEFORE the EPSG code,
+    # because MintPy's GDAL reader can pick up the GEOGCS code (4326) of a
+    # projected GeoTIFF whose WKT carries no code of its own
+    try:
+        if abs(float(atr['X_STEP'])) > 1.0:
+            return True
+    except (KeyError, TypeError, ValueError):
+        pass
+    code = atr.get('EPSG')
+    if code not in (None, '', 'None'):
+        try:
+            from pyproj import CRS
+            return bool(CRS.from_epsg(int(code)).is_projected)
+        except Exception:        # noqa: BLE001
+            pass
+    return False
+
+
 def get_pixel_size(atr, lat_c=None):
     """Ground pixel size of a MintPy file, in meters.
 
@@ -37,7 +71,7 @@ def get_pixel_size(atr, lat_c=None):
     """
     if 'Y_FIRST' in atr:
         y_step, x_step = abs(float(atr['Y_STEP'])), abs(float(atr['X_STEP']))
-        if not atr.get('UTM_ZONE'):
+        if not is_projected(atr):
             # geographic degrees -> local equirectangular meters, the same
             # approximation MintPy uses in utils.utils.transect_yx()
             if lat_c is None:
@@ -80,7 +114,7 @@ def line_geometry(atr, start_yx, end_yx, half_width):
                 half_width - float, half width of the corridor, in km (or pixel)
     Returns:    geom       - dict describing the corridor
     """
-    if 'Y_FIRST' in atr and not atr.get('UTM_ZONE'):
+    if 'Y_FIRST' in atr and not is_projected(atr):
         lat_c = float(atr['Y_FIRST']) + float(atr['Y_STEP']) * (start_yx[0] + end_yx[0]) / 2.
     else:
         lat_c = None
@@ -110,8 +144,51 @@ def line_geometry(atr, start_yx, end_yx, half_width):
     )
 
 
+def bilinear_sample(data, rows, cols, mask=None):
+    """Sample `data` at fractional (row, col), NaN-aware.
+
+    A plain bilinear interpolation returns NaN as soon as any of the four
+    neighbours is NaN, which would erode the valid area of a speckled InSAR
+    product at every void edge. Instead the weights are renormalised over the
+    neighbours that ARE finite, so a sample survives as long as one of its four
+    neighbours is. Only where all four are invalid does it return NaN.
+
+    Parameters: data  - 2D np.ndarray
+                rows  - 1D np.ndarray of float row coordinates
+                cols  - 1D np.ndarray of float column coordinates
+                mask  - 2D np.ndarray of bool, optional; False counts as invalid
+    Returns:    2D np.ndarray of shape (rows.size, cols.size)
+    """
+    nrow, ncol = data.shape[-2:]
+    r0 = np.clip(np.floor(rows).astype(np.intp), 0, nrow - 1)
+    c0 = np.clip(np.floor(cols).astype(np.intp), 0, ncol - 1)
+    r1 = np.minimum(r0 + 1, nrow - 1)
+    c1 = np.minimum(c0 + 1, ncol - 1)
+    fr = (rows - r0)[:, None]
+    fc = (cols - c0)[None, :]
+
+    val = np.ma.getdata(data).astype(np.float64)
+    good = np.isfinite(val)
+    if np.ma.isMaskedArray(data):
+        good &= ~np.ma.getmaskarray(data)
+    if mask is not None:
+        good &= mask.astype(bool)
+
+    num = np.zeros((rows.size, cols.size), dtype=np.float64)
+    den = np.zeros_like(num)
+    for ri, wr in ((r0, 1.0 - fr), (r1, fr)):
+        for ci, wc in ((c0, 1.0 - fc), (c1, fc)):
+            wgt = wr * wc * good[np.ix_(ri, ci)]
+            num += wgt * np.nan_to_num(val[np.ix_(ri, ci)])
+            den += wgt
+    with np.errstate(invalid='ignore', divide='ignore'):
+        out = np.where(den > 0, num / den, np.nan)
+    return out
+
+
 def swath_extract(data, atr, box, start_yx, end_yx, half_width,
-                  mask=None, keep_zero=False, decimate=1):
+                  mask=None, keep_zero=False, decimate=1, nlook=1,
+                  max_samples=20_000_000):
     """Buffer a line and linearly reference every valid pixel inside the buffer.
 
     Parameters: data       - 2D np.ndarray, the data read within `box`
@@ -123,11 +200,18 @@ def swath_extract(data, atr, box, start_yx, end_yx, half_width,
                 mask       - 2D np.ndarray of bool, same shape as data, True = keep
                 keep_zero  - bool, keep the pixels with an exactly-zero value
                 decimate   - int, use every Nth pixel of the corridor only
+                nlook      - int, OVERSAMPLE the corridor by this factor in each
+                             direction, i.e. sample it on a grid nlook times finer
+                             than the native pixel (nlook**2 more samples), with
+                             NaN-aware bilinear interpolation. 1 = native pixels.
+                             Use it to recover a dense profile from a multilooked
+                             raster; it is the inverse of `decimate`.
+                max_samples - int, refuse to build a sample grid larger than this
     Returns:    swath      - dict of 1D arrays 'dist' (km along the profile from
                              the start point), 'perp' (km from the line, + = left),
                              'value', 'row', 'col' and, for geocoded files,
                              'lat' / 'lon'; plus the scalars 'length',
-                             'half_width', 'dist_unit', 'clipped' and 'geom'.
+                             'half_width', 'dist_unit', 'clipped', 'nlook' and 'geom'.
     """
     geom = line_geometry(atr, start_yx, end_yx, half_width)
     x_step, y_step = geom['x_step'], geom['y_step']
@@ -148,27 +232,51 @@ def swath_extract(data, atr, box, start_yx, end_yx, half_width,
         raise ValueError('the swath corridor falls entirely outside of the data coverage!')
 
     decimate = max(1, int(decimate))
-    rows = np.arange(rr0, rr1 + 1, decimate)
-    cols = np.arange(cc0, cc1 + 1, decimate)
+    nlook = max(1, int(nlook))
+    if nlook > 1 and decimate > 1:
+        raise ValueError('--nlook and --decimate are opposites; use one or the other.')
 
-    # 3. along- / off-profile distance of every pixel of the sub-window
+    if nlook > 1:
+        # sub-pixel grid: nlook samples per native pixel, per axis
+        step = 1.0 / nlook
+        n_r = int(round((rr1 - rr0) * nlook)) + 1
+        n_c = int(round((cc1 - cc0) * nlook)) + 1
+        if n_r * n_c > max_samples:
+            raise ValueError(
+                f'--nlook {nlook} would need {n_r * n_c:,} samples for this corridor '
+                f'(limit {max_samples:,}). Use a smaller --nlook, a shorter line '
+                f'or a narrower --width.')
+        rows = rr0 + np.arange(n_r) * step
+        cols = cc0 + np.arange(n_c) * step
+    else:
+        rows = np.arange(rr0, rr1 + 1, decimate).astype(np.float64)
+        cols = np.arange(cc0, cc1 + 1, decimate).astype(np.float64)
+
+    # 3. along- / off-profile distance of every sample of the sub-window
     #    (outer sums, so only 1D arrays are broadcast into 2D)
     dx = cols * x_step - p0[0]
     dy = -rows * y_step - p0[1]
     d_along = dy[:, None] * uvec[1] + dx[None, :] * uvec[0]
     d_perp = dy[:, None] * nvec[1] + dx[None, :] * nvec[0]
 
-    # 4. the flat-capped buffer + the valid-data mask
-    sub = data[np.ix_(rows - box[1], cols - box[0])]
-    val = np.ma.getdata(sub).astype(np.float64)
-    flag = (np.abs(d_perp) <= hwid) & (d_along >= 0) & (d_along <= length)
-    flag &= np.isfinite(val)
-    if np.ma.isMaskedArray(sub):
-        flag &= ~np.ma.getmaskarray(sub)
+    # 4. the data values at those samples
+    if nlook > 1:
+        val = bilinear_sample(data, rows - box[1], cols - box[0], mask=mask)
+        flag = np.isfinite(val)
+    else:
+        idx = np.ix_(rows.astype(np.intp) - box[1], cols.astype(np.intp) - box[0])
+        sub = data[idx]
+        val = np.ma.getdata(sub).astype(np.float64)
+        flag = np.isfinite(val)
+        if np.ma.isMaskedArray(sub):
+            flag &= ~np.ma.getmaskarray(sub)
+        if mask is not None:
+            flag &= mask[idx].astype(bool)
+
+    # 5. the flat-capped buffer
+    flag &= (np.abs(d_perp) <= hwid) & (d_along >= 0) & (d_along <= length)
     if not keep_zero:
         flag &= val != 0.
-    if mask is not None:
-        flag &= mask[np.ix_(rows - box[1], cols - box[0])].astype(bool)
 
     ridx, cidx = np.where(flag)
     scale = geom['dist_scale']
@@ -176,10 +284,10 @@ def swath_extract(data, atr, box, start_yx, end_yx, half_width,
         dist=(d_along[ridx, cidx] * scale).astype(np.float32),
         perp=(d_perp[ridx, cidx] * scale).astype(np.float32),
         value=val[ridx, cidx].astype(np.float32),
-        row=rows[ridx].astype(np.int32),
-        col=cols[cidx].astype(np.int32),
+        row=rows[ridx].astype(np.float32 if nlook > 1 else np.int32),
+        col=cols[cidx].astype(np.float32 if nlook > 1 else np.int32),
         length=length * scale, half_width=hwid * scale,
-        dist_unit=geom['dist_unit'], clipped=clipped, geom=geom,
+        dist_unit=geom['dist_unit'], clipped=clipped, nlook=nlook, geom=geom,
     )
     if 'Y_FIRST' in atr:
         # vectorized on purpose: coordinate.yx2lalo() loops in python

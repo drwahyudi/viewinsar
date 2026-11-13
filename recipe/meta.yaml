@@ -1,5 +1,5 @@
 {% set name = "viewinsar" %}
-{% set version = "0.1.0" %}
+{% set version = "0.4.0" %}
 
 package:
   name: {{ name|lower }}
@@ -9,7 +9,7 @@ source:
   # For a conda-forge submission, point at the PyPI sdist and paste the sha256
   # printed by:  openssl dgst -sha256 dist/viewinsar-{{ version }}.tar.gz
   url: https://pypi.org/packages/source/{{ name[0] }}/{{ name }}/{{ name }}-{{ version }}.tar.gz
-  sha256: 0000000000000000000000000000000000000000000000000000000000000000
+  sha256: e7fa435fc770bd39a0ce1e0f7169aaf0b994a3ec82b22de7bbf346a7bd15c34c
   # To build straight from a local checkout instead, comment the two lines above
   # and uncomment:
   # path: ..
@@ -32,22 +32,34 @@ requirements:
     - mintpy >=1.5
     - numpy >=1.20
     - matplotlib-base >=3.5
+    - pyproj >=3.0
+    - pyshp >=2.1
+    - shapely >=1.8
+    - h5py >=3.0
+    - pillow >=8.0
+    - scipy >=1.5
+    - rasterio
+    - pyogrio
 
 test:
   imports:
     - viewinsar
     - viewinsar.swath
+    - viewinsar.stat
+    - viewinsar.tsdata
   requires:
     - pytest
   commands:
     - viewinsar --version
     - viewinsar --help
     - viewinsar swath --help
-    - python -c "from viewinsar import swath_extract, swath_density"
+    - viewinsar stat --help
+    - viewinsar tseries --help
+    - python -c "from viewinsar import swath_extract, swath_density, load_faults, stat_line"
 
 about:
   home: https://github.com/drwahyudi/viewinsar
-  summary: Interactive swath (buffered) profile viewer for InSAR data, built on MintPy
+  summary: Interactive swath profiles and fault block statistics for InSAR data, built on MintPy
   description: |
     viewinsar draws a swath profile instead of a single-line transect. You pick a
     line on the map with two clicks; the line is buffered by a given half width
@@ -57,7 +69,14 @@ about:
     the density-weighted median and quartiles. The map panel comes from MintPy's
     view.py, the interaction from plot_transection.py, and an optional third panel
     with the point displacement time series from tsview.py. The located points and
-    the per-bin statistics can be exported to .csv.
+    the per-bin statistics can be exported to .csv. Several sections (A-A', B-B'
+    ...) can be drawn, each in its own window, with an optional elevation panel
+    from a DEM and fault traces from any vector file marked where they cross.
+    `viewinsar stat` compares the two sides of a fault: along a line drawn on
+    it, pairs of circles - one per side, kept clear of the line - are sampled
+    every few km and shown as violins, block 1 against block 2. `viewinsar
+    tseries` is LiCSBAS_plot_ts.py for LiCSBAS and MintPy time series, with the
+    median and quartiles of a circle of pixels at every date.
   license: GPL-3.0-or-later
   license_family: GPL3
   license_file: ../LICENSE

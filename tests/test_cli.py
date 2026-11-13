@@ -27,7 +27,7 @@ def test_version_and_help(capsys):
 
 def test_list_subcommand(velocity_file, capsys):
     cli.main(['list', velocity_file])
-    assert capsys.readouterr().out.strip().splitlines() == ['velocity']
+    assert capsys.readouterr().out.strip().splitlines() == ['velocity  <- default']
 
 
 def test_bare_file_implies_swath(velocity_file, monkeypatch):
@@ -90,10 +90,11 @@ def test_headless_run_writes_everything(velocity_file, tmp_path):
     assert any(f.endswith('_stats.csv') for f in files)
     assert any(f.endswith('_info.txt') for f in files)
     assert any(f.endswith('.png') for f in files)
+    assert any(f.startswith('swath_map_') for f in files)      # the map is saved too
 
     pts = np.genfromtxt(next(out.glob('*_points.csv')), delimiter=',', names=True)
     assert set(pts.dtype.names) >= {'dist_km', 'perp_km', 'value', 'row', 'col', 'lat', 'lon'}
-    assert pts.size == obj.swath_list[0]['value'].size
+    assert pts.size == obj.sections[0].swath_list[0]['value'].size
     assert np.abs(pts['perp_km']).max() <= 10.0 + 1e-4
     assert pts['dist_km'].min() >= -1e-4
 
@@ -109,7 +110,7 @@ def test_profile_length_is_physical(velocity_file, tmp_path):
                 '--end-lalo', '30.30', '130.75', '-w', '5',
                 '--save', '--nodisplay', '--outdir', str(tmp_path), '--noverbose'])
     expected = 0.6 * 111.32 * np.cos(np.deg2rad(30.3))       # 0.6 deg of longitude
-    assert obj.swath_list[0]['length'] == pytest.approx(expected, rel=0.01)
+    assert obj.sections[0].swath_list[0]['length'] == pytest.approx(expected, rel=0.01)
 
 
 def test_x_offset_is_applied_to_the_csv(velocity_file, tmp_path):
@@ -126,7 +127,7 @@ def test_yx_input_and_subset(velocity_file, tmp_path):
     obj = _run([velocity_file, '--start-yx', '150', '75', '--end-yx', '150', '375',
                 '-w', '5', '--sub-lat', '30.15', '30.45', '--sub-lon', '130.05', '130.85',
                 '--save', '--nodisplay', '--outdir', str(tmp_path), '--noverbose'])
-    assert obj.swath_list[0]['value'].size > 0
+    assert obj.sections[0].swath_list[0]['value'].size > 0
     assert obj.pix_box[3] - obj.pix_box[1] < 300      # the subset really was applied
 
 
@@ -141,31 +142,108 @@ def test_interactive_clicks(velocity_file, tmp_path):
     obj = swathProfileViewer(inps, cli.get_view_cmd(inps))
     obj.open()
     obj.plot()
-    obj.fig.canvas.draw()
+    obj.fig_map.canvas.draw()
+
+    # the map and the section live in SEPARATE windows
+    assert obj.fig_map is not obj.sections[0].fig
+    assert obj.fig_map.get_label() == 'Map'
+    assert obj.sections[0].label == 'A'
 
     def click(lon, lat, button=MouseButton.LEFT):
         x, y = obj.ax_img.transData.transform((lon, lat))
-        evt = MouseEvent('button_release_event', obj.fig.canvas, x, y, button=button)
+        evt = MouseEvent('button_release_event', obj.fig_map.canvas, x, y, button=button)
         assert evt.inaxes is obj.ax_img
         obj.select_point(evt)
 
-    assert obj.swath_list is None
+    def key(k):
+        x, y = obj.ax_img.transData.transform((130.5, 30.3))
+        obj.on_key(KeyEvent('key_press_event', obj.fig_map.canvas, k, x, y))
+
+    sec = obj.sections[0]
+    assert not sec.has_data
     click(130.18, 30.25)
-    assert obj.swath_list is None            # one click is not enough
+    assert not sec.has_data                  # one click is not enough
     click(130.72, 30.38)
 
-    swath = obj.swath_list[0]
+    swath = sec.swath_list[0]
     assert np.abs(swath['perp']).max() <= 8.0 + 1e-6
     assert swath['dist'].min() >= -1e-6
     assert swath['dist'].max() <= swath['length'] + 1e-6
-    assert obj.poly_obj is not None and obj.line_obj is not None
+    assert sec.poly_obj is not None and sec.line_obj is not None
+    assert sec.txt0.get_text() == 'A' and sec.txt1.get_text() == "A'"
 
-    # "e" exports, "n" resets
-    x, y = obj.ax_swath.transData.transform((5, 0))
-    obj.on_key(KeyEvent('key_press_event', obj.fig.canvas, 'e', x, y))
-    assert list(tmp_path.glob('*_points.csv'))
-    obj.on_key(KeyEvent('key_press_event', obj.fig.canvas, 'n', x, y))
-    assert obj.swath_list is None and obj.start_yx is None and obj.poly_obj is None
+    # "e" exports, "n" clears only the current section
+    key('e')
+    assert list(tmp_path.glob('*_A_*_points.csv'))
+    assert list(tmp_path.glob('swath_map_*'))
+    key('n')
+    assert not sec.has_data and sec.start_yx is None and sec.poly_obj is None
+
+
+def test_multiple_sections(velocity_file, tmp_path):
+    """"=" starts B-B' in a new window and leaves A-A' on the map."""
+    from matplotlib.backend_bases import KeyEvent, MouseButton, MouseEvent
+
+    from viewinsar.viewer import swathProfileViewer
+
+    inps = cli.cmd_line_parse([velocity_file, '-w', '8', '--svg',
+                               '--outdir', str(tmp_path), '--noverbose', '--nodisplay'])
+    inps.save_fig = False
+    obj = swathProfileViewer(inps, cli.get_view_cmd(inps))
+    obj.open()
+    obj.plot()
+    obj.fig_map.canvas.draw()
+
+    def click(lon, lat):
+        x, y = obj.ax_img.transData.transform((lon, lat))
+        obj.select_point(MouseEvent('button_release_event', obj.fig_map.canvas,
+                                    x, y, button=MouseButton.LEFT))
+
+    def key(k, fig=None):
+        x, y = obj.ax_img.transData.transform((130.5, 30.3))
+        obj.on_key(KeyEvent('key_press_event', (fig or obj.fig_map).canvas, k, x, y))
+
+    click(130.15, 30.22)
+    click(130.78, 30.40)
+    key('=')
+    assert len(obj.sections) == 2 and obj.sections[1].label == 'B'
+    click(130.20, 30.42)
+    click(130.80, 30.18)
+    # "+" works too, and from a section window
+    key('+', fig=obj.sections[1].fig)
+    click(130.10, 30.30)
+    click(130.85, 30.33)
+
+    assert [s.label for s in obj.sections] == ['A', 'B', 'C']
+    assert len({id(s.fig) for s in obj.sections}) == 3          # three windows
+    assert all(s.has_data for s in obj.sections)
+    # every earlier line is still drawn on the map, with its own labels
+    assert all(s.line_obj is not None for s in obj.sections)
+    assert [s.txt1.get_text() for s in obj.sections] == ["A'", "B'", "C'"]
+
+    key('e')
+    svg = sorted(p.name for p in tmp_path.glob('*.svg'))
+    assert len(svg) == 4, svg                       # map + 3 sections
+    assert any(f.startswith('swath_map_ABC') for f in svg)
+    assert sum(1 for p in tmp_path.glob('*_points.csv')) == 3
+    assert next(tmp_path.glob('*_A_*.svg')).read_text()[:200].lstrip().startswith('<?xml')
+
+
+def test_new_section_needs_a_drawn_one(velocity_file, tmp_path, capsys):
+    from matplotlib.backend_bases import KeyEvent
+
+    from viewinsar.viewer import swathProfileViewer
+
+    inps = cli.cmd_line_parse([velocity_file, '-w', '8', '--outdir', str(tmp_path),
+                               '--noverbose', '--nodisplay'])
+    inps.save_fig = False
+    obj = swathProfileViewer(inps, cli.get_view_cmd(inps))
+    obj.open()
+    obj.plot()
+    x, y = obj.ax_img.transData.transform((130.5, 30.3))
+    obj.on_key(KeyEvent('key_press_event', obj.fig_map.canvas, '=', x, y))
+    assert len(obj.sections) == 1                   # refused: A has no profile yet
+    assert 'no profile yet' in capsys.readouterr().out
 
 
 def test_timeseries_panel(velocity_file, timeseries_file, tmp_path):
@@ -181,11 +259,12 @@ def test_timeseries_panel(velocity_file, timeseries_file, tmp_path):
     if obj.ts_obj is None:
         pytest.skip('tsview could not be initiated in this environment')
     obj.plot()
-    obj.fig.canvas.draw()
+    obj.fig_map.canvas.draw()
     assert obj.ax_ts is not None
+    assert obj.fig_ts is not obj.fig_map                # its own window
 
     x, y = obj.ax_img.transData.transform((130.55, 30.33))
-    obj.select_point(MouseEvent('button_release_event', obj.fig.canvas, x, y,
+    obj.select_point(MouseEvent('button_release_event', obj.fig_map.canvas, x, y,
                                 button=MouseButton.RIGHT))
     assert obj.ax_ts.lines or obj.ax_ts.collections
 

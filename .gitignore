@@ -16,3 +16,13 @@ swath_*_points.csv
 swath_*_stats.csv
 swath_*_info.txt
 swath_*.png
+swath_*.svg
+stat_*_stats.csv
+stat_*_values.csv
+stat_*_info.txt
+stat_*.png
+stat_*.svg
+tseries_*.csv
+tseries_*_info.txt
+tseries_*.png
+tseries_*.svg
