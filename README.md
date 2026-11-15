@@ -323,6 +323,7 @@ headers (mm/yr, cm/yr, m/yr) or `--gnss-unit`, and is converted to the data's.
 |--------|----------------------------------------|
 | `los` (default) | projected into the line of sight of the first file, `ve·uₑ + vn·uₙ + vu·uᵤ`: the LOS unit vector from MintPy's geometry file (`geometryGeo.h5` / `geometryRadar.h5` beside the data), LiCSBAS's `GEOCml*/E.geo …` or LiCSAR's `*.geo.E.tif`, or `--geom`; else the data's `CENTER_INCIDENCE_ANGLE` and `HEADING`, or `--los-inc` / `--los-az`; else nominal angles for the orbit the file's name says (`asc`, `desc` …, see *model*). A station without `vu` counts `vu = 0` |
 | `ve`, `vn`, `vu` | that component, for decomposed velocity maps |
+| several, e.g. `--vel ve vn vu los` | all of them on the same profile, each in a colour of its own (ve magenta, vn orange, vu white, los black), each shifted onto the InSAR on its own; `_gnss.csv` gets a row per station and component (`component` column). `vu` exists for 3D stations only. `model` takes one: the component it fits |
 
 Every station is drawn on the map - a **triangle** for a 3D station (one with
 `vu`), a **circle** for a 2D one, in black. The stations inside a swath (the

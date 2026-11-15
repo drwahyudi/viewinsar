@@ -96,7 +96,7 @@ def test_every_example_parses(cmd):
     view_cli = pytest.importorskip('mintpy.cli.view', reason='checked against view.py')
     view_parser = view_cli.create_parser
 
-    args = shlex.split(cmd)[2:]                       # drop "viewinsar swath"
+    args = shlex.split(cmd, comments=True)[2:]   # drop "viewinsar swath"; a shell drops # comments
     _, unknown = cli.create_swath_parser().parse_known_args(args)
     if unknown:
         # whatever viewinsar does not recognise is forwarded to view.py

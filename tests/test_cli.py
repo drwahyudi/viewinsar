@@ -418,3 +418,12 @@ def test_swath_gnss_nofit_is_gone_but_harmless(capsys):
         'v.h5', '--width', '5']
     assert 'not needed any more' in capsys.readouterr().out
     assert cli.modern_options(['v.h5', '--gnss-nofit'], 'model') == ['v.h5', '--gnss-nofit']
+
+
+def test_model_takes_one_gnss_component(velocity_file):
+    with pytest.raises(ValueError, match='ONE GNSS component'):
+        cli.model_cmd_line_parse([velocity_file, '--vel', 've', 'vn', '--noverbose'])
+    assert cli.model_cmd_line_parse([velocity_file, '--vel', 've', '--noverbose']).gnss_comp == 've'
+    # swath takes several
+    inps = cli.cmd_line_parse([velocity_file, '--vel', 'los', 've', '--noverbose'])
+    assert inps.gnss_comps == ['los', 've'] and inps.gnss_comp == 'los'

@@ -110,6 +110,11 @@ def file_labels(files):
     return names
 
 
+# several GNSS components on one profile (--vel ve vn vu los): face, edge
+GNSS_STYLE = {'los': ('k', 'w'), 've': ('#e7298a', 'k'), 'vn': ('#ff7f00', 'k'),
+              'vu': ('w', 'k')}
+
+
 def velocity_factor(from_unit, to_unit):
     """The factor from one velocity unit to another (mm/yr, cm/year, m/yr ...),
     or None when `to_unit` is not a velocity."""
@@ -349,12 +354,15 @@ class Section:
         geom = line_geometry(v.atr, self.start_yx, self.end_yx, v.width)
         along, perp = project_points(geom, v.gnss_rows, v.gnss_cols)
         length = geom['length'] * geom['dist_scale']
-        inside = (np.isfinite(v.gnss_value) & np.isfinite(along)
+        series = v.gnss_series or {v.gnss_comp: (v.gnss_value, v.gnss_sigma)}
+        valued = np.any([np.isfinite(val) for val, _ in series.values()], axis=0)
+        inside = (valued & np.isfinite(along)
                   & (np.abs(perp) <= v.width) & (along >= 0) & (along <= length))
         idx = np.flatnonzero(inside)
-        gin = dict(index=idx, dist=along[idx], perp=perp[idx], value=v.gnss_value[idx],
-                   sigma=v.gnss_sigma[idx], is3d=v.gnss.has_vu[idx],
-                   site=[v.gnss.site[i] for i in idx], offset=0.0, n_ref=0, insar=None)
+        gin = dict(index=idx, dist=along[idx], perp=perp[idx], is3d=v.gnss.has_vu[idx],
+                   site=[v.gnss.site[i] for i in idx], insar=None,
+                   series={c: dict(value=val[idx], sigma=sig[idx], offset=0.0, n_ref=0)
+                           for c, (val, sig) in series.items()})
         if idx.size and v.gnss_ref == 'insar':
             # the InSAR right at each station: the pixels within --gnss-radius
             dist = np.concatenate([sw['dist'] for sw in self.swath_list]).astype(np.float64)
@@ -368,15 +376,27 @@ class Section:
                         near[k] = np.median(value[sel])
                         break
             gin['insar'] = near
-            diff = near - gin['value']
-            good = np.isfinite(diff)
-            if good.any():
-                gin['offset'], gin['n_ref'] = float(np.median(diff[good])), int(good.sum())
+            for one in gin['series'].values():         # each component on its own
+                diff = near - one['value']
+                good = np.isfinite(diff)
+                if good.any():
+                    one['offset'], one['n_ref'] = float(np.median(diff[good])), int(good.sum())
+        # the first component, as before several were possible
+        first = gin['series'][next(iter(gin['series']))]
+        gin.update(value=first['value'], sigma=first['sigma'], offset=first['offset'],
+                   n_ref=first['n_ref'])
         self.gnss_in = gin
         if idx.size:
-            v.vprint(f'   GNSS: {idx.size} station(s) in the swath'
-                     + (f', shifted by {gin["offset"]:+.3g} {v.disp_unit} onto the InSAR '
-                        f'(median over {gin["n_ref"]})' if gin['n_ref'] else ''))
+            shifts = [f'{c} {one["offset"]:+.3g}' + ('' if len(gin['series']) == 1 else
+                                                    f' (over {one["n_ref"]})')
+                      for c, one in gin['series'].items() if one['n_ref']]
+            if len(gin['series']) == 1:
+                shifted = (f', shifted by {first["offset"]:+.3g} {v.disp_unit} onto the '
+                           f'InSAR (median over {first["n_ref"]})' if first['n_ref'] else '')
+            else:
+                shifted = (f', shifted onto the InSAR by {", ".join(shifts)} {v.disp_unit}'
+                           if shifts else '')
+            v.vprint(f'   GNSS: {idx.size} station(s) in the swath' + shifted)
         return
 
     def extract_topo(self, main_length):
@@ -571,23 +591,47 @@ class Section:
         return
 
     def draw_gnss(self):
-        """The GNSS in the swath: black triangles (3D stations) and circles (2D),
-        their 1-sigma as error bars - the stations only, no line through them."""
+        """The GNSS in the swath: triangles (3D stations) and circles (2D), their
+        1-sigma as error bars - the stations only, no line through them. One
+        component in black; several (--vel ve vn vu los) in a colour each."""
         v, ax, gin = self.v, self.ax_swath, self.gnss_in
         if gin is None or not gin['index'].size:
             return
         x = gin['dist'] - v.x_offset
-        y = gin['value'] + gin['offset']
-        for is3d, marker, label in ((True, '^', 'GNSS (3D)'), (False, 'o', 'GNSS (2D)')):
-            sel = gin['is3d'] == is3d
-            if sel.any():
-                ax.errorbar(x[sel], y[sel], yerr=gin['sigma'][sel], fmt=marker, ms=8,
-                            color='k', mfc='k', mec='w', mew=0.8, ecolor='k', elinewidth=1.4,
-                            capsize=4, capthick=1.4, zorder=9, label=label)
-        if not v.ylim:                               # keep every station in view
+        series = gin.get('series') or {v.gnss_comp: dict(value=gin['value'],
+                                                         sigma=gin['sigma'],
+                                                         offset=gin['offset'])}
+        several = len(series) > 1
+        lows, highs = [], []
+        for comp, one in series.items():
+            y = one['value'] + one['offset']
+            ok = np.isfinite(y)
+            if not ok.any():
+                continue
+            face, edge = GNSS_STYLE.get(comp, ('k', 'w')) if several else ('k', 'w')
+            line = face if face != 'w' else '0.15'
+            # several: circles first, so that each entry of the legend is a circle
+            sets = (((False, 'o'), (True, '^')) if several else ((True, '^'), (False, 'o')))
+            labelled = False
+            for is3d, marker in sets:
+                sel = ok & (gin['is3d'] == is3d)
+                if not sel.any():
+                    continue
+                if several:
+                    label, labelled = (f'GNSS {comp}' if not labelled else '_nolegend_'), True
+                else:
+                    label = 'GNSS (3D)' if is3d else 'GNSS (2D)'
+                ax.errorbar(x[sel], y[sel], yerr=one['sigma'][sel], fmt=marker, ms=8,
+                            color=line, mfc=face, mec=edge, mew=0.8, ecolor=line,
+                            elinewidth=1.4, capsize=4, capthick=1.4, zorder=9, label=label)
+            lows.append(float(np.nanmin(y[ok] - one['sigma'][ok])))
+            highs.append(float(np.nanmax(y[ok] + one['sigma'][ok])))
+        if several and gin['is3d'].any():          # after the components in the legend
+            ax.errorbar([], [], yerr=[], fmt='^', ms=8, color='0.4', mfc='0.7', mec='k',
+                        mew=0.8, label='3D station (2D: circle)')
+        if lows and not v.ylim:                      # keep every station in view
             lo, hi = ax.get_ylim()
-            ylo = float(np.nanmin(y - gin['sigma']))
-            yhi = float(np.nanmax(y + gin['sigma']))
+            ylo, yhi = min(lows), max(highs)
             pad = 0.05 * (max(hi, yhi) - min(lo, ylo))
             ax.set_ylim(min(lo, ylo - pad), max(hi, yhi + pad))
         return
@@ -726,16 +770,20 @@ class Section:
         if gin is not None and gin['index'].size:
             out = f'{base}_gnss.csv'
             lon, lat = v.gnss.lon[gin['index']], v.gnss.lat[gin['index']]
+            series = gin.get('series') or {v.gnss_comp: gin}
             with open(out, 'w') as fid:
                 fid.write('site,lon,lat,dist_km,perp_km,value,sigma,value_shifted,'
-                          'insar_near,is3d\n')
-                for k in range(gin['index'].size):
-                    fid.write(f"{gin['site'][k]},{lon[k]:.6f},{lat[k]:.6f},"
-                              f"{gin['dist'][k] - v.x_offset:.4f},{gin['perp'][k]:.4f},"
-                              f"{gin['value'][k]:.6g},{gin['sigma'][k]:.6g},"
-                              f"{gin['value'][k] + gin['offset']:.6g},"
-                              f"{(gin['insar'][k] if gin['insar'] is not None else np.nan):.6g},"
-                              f"{int(gin['is3d'][k])}\n")
+                          'insar_near,is3d,component\n')
+                for comp, one in series.items():         # a row per station and component
+                    for k in range(gin['index'].size):
+                        if not np.isfinite(one['value'][k]):
+                            continue                     # vu of a 2D station
+                        insar = gin['insar'][k] if gin['insar'] is not None else np.nan
+                        fid.write(f"{gin['site'][k]},{lon[k]:.6f},{lat[k]:.6f},"
+                                  f"{gin['dist'][k] - v.x_offset:.4f},{gin['perp'][k]:.4f},"
+                                  f"{one['value'][k]:.6g},{one['sigma'][k]:.6g},"
+                                  f"{one['value'][k] + one['offset']:.6g},{insar:.6g},"
+                                  f"{int(gin['is3d'][k])},{comp}\n")
             print(f'saved the GNSS in the swath to: {out}')
             written.append(out)
 
@@ -789,12 +837,21 @@ class Section:
                     fid.write('fault crossing : none - the centre line crosses no trace\n')
             if v.gnss is not None:
                 gin = self.gnss_in or {}
-                fid.write(f'GNSS           : {os.path.abspath(v.gnss_file)}, --vel {v.gnss_comp}'
+                comps = ' '.join(v.gnss_comps or [v.gnss_comp])
+                fid.write(f'GNSS           : {os.path.abspath(v.gnss_file)}, --vel {comps}'
                           f' [{v.disp_unit}]' + (f', {v.gnss_note}' if v.gnss_note else '')
                           + '\n')
                 n_in = len(gin.get('site', []))
                 fid.write(f'GNSS in swath  : {n_in} station(s)')
-                if gin.get('n_ref'):
+                series = gin.get('series') or {}
+                if len(series) > 1:
+                    shifts = [f"{c} {one['offset']:+.6g} (over {one['n_ref']})"
+                              for c, one in series.items() if one['n_ref']]
+                    if shifts:
+                        fid.write(f"; each component shifted by the median of (InSAR within "
+                                  f"{v.gnss_radius:g} km - GNSS): {', '.join(shifts)} "
+                                  f"{v.disp_unit}")
+                elif gin.get('n_ref'):
                     fid.write(f", shifted by {gin['offset']:+.6g} {v.disp_unit} = median of "
                               f"(InSAR within {v.gnss_radius:g} km - GNSS) over "
                               f"{gin['n_ref']} station(s)")
@@ -857,6 +914,8 @@ class swathProfileViewer:
         self.data_scale = None                   # --data-scale: a factor per file
         self._scale_said = set()
         self.gnss_comp, self.gnss_unit, self.gnss_ref = 'los', 'auto', 'insar'
+        self.gnss_comps = None                   # --vel: every component asked for
+        self.gnss_series = {}                    # component -> (value, sigma) per station
         self.gnss_radius, self.gnss_fit, self.gnss_label = 1.0, True, False
         self.gnss = self.gnss_value = self.gnss_sigma = None
         self.gnss_rows = self.gnss_cols = None
@@ -1257,7 +1316,7 @@ class swathProfileViewer:
         return
 
     def init_gnss(self):
-        """Read --gnss, take the component of --vel, in the data's unit, and
+        """Read --gnss, take the component(s) of --vel, in the data's unit, and
         place every station on the grid of the first file."""
         from .gnss import LOSGeometry, read_gnss
 
@@ -1269,25 +1328,41 @@ class swathProfileViewer:
                       f'the GNSS stay in {gnss.unit}')
                 factor = 1.0
             gnss = gnss.scaled(factor, self.disp_unit)
+            comps = list(self.gnss_comps or [self.gnss_comp])
+            if 'vu' in comps and not gnss.has_vu.any():
+                if len(comps) == 1:
+                    raise ValueError('--vel vu, but no station has a vertical velocity')
+                print('WARNING: --vel vu: no station has a vertical velocity --> left out')
+                comps.remove('vu')
             uvec = None
-            if self.gnss_comp == 'los':
+            if 'los' in comps:
                 geom_file = self.geom_file
                 if isinstance(geom_file, (list, tuple)):        # one per file: the first
                     geom_file = geom_file[0] if geom_file else None
-                geom = LOSGeometry.for_file(self.file[0], self.atr, geom_file=geom_file,
-                                            inc=per_file(self.los_inc, 0),
-                                            az=per_file(self.los_az, 0),
-                                            verbose=self.print_msg)
-                uvec = geom.unit_vector_at(gnss.lon, gnss.lat)
-                self.gnss_note = f'LOS of {os.path.basename(self.file[0])} ({geom.source})'
-            value, sigma = gnss.component(self.gnss_comp, uvec)
-            if self.gnss_comp == 'vu' and not gnss.has_vu.any():
-                raise ValueError('--vel vu, but no station has a vertical velocity')
-            self.gnss, self.gnss_value, self.gnss_sigma = gnss, value, sigma
+                try:
+                    geom = LOSGeometry.for_file(self.file[0], self.atr, geom_file=geom_file,
+                                                inc=per_file(self.los_inc, 0),
+                                                az=per_file(self.los_az, 0),
+                                                verbose=self.print_msg)
+                except ValueError as err:
+                    if len(comps) == 1:
+                        raise
+                    print(f'WARNING: --vel los: {err} --> los left out')
+                    comps.remove('los')
+                else:
+                    uvec = geom.unit_vector_at(gnss.lon, gnss.lat)
+                    self.gnss_note = (f'LOS of {os.path.basename(self.file[0])} '
+                                      f'({geom.source})')
+            self.gnss_series = {c: gnss.component(c, uvec if c == 'los' else None)
+                                for c in comps}
+            self.gnss_comps, self.gnss_comp = comps, comps[0]
+            self.gnss = gnss
+            self.gnss_value, self.gnss_sigma = self.gnss_series[comps[0]]
             self.gnss_rows, self.gnss_cols = self.lonlat_to_rowcol(gnss.lon, gnss.lat)
-            usable = np.isfinite(value) & np.isfinite(self.gnss_rows)
-            self.vprint(f'GNSS: {int(usable.sum())} of {len(gnss)} station(s) usable for '
-                        f'--vel {self.gnss_comp} [{self.disp_unit}]')
+            for c in comps:
+                usable = np.isfinite(self.gnss_series[c][0]) & np.isfinite(self.gnss_rows)
+                self.vprint(f'GNSS: {int(usable.sum())} of {len(gnss)} station(s) usable for '
+                            f'--vel {c} [{self.disp_unit}]')
         except Exception as err:      # noqa: BLE001 - the GNSS are a nicety
             print(f'WARNING: cannot use --gnss: {err}')
             print('         --> continuing without GNSS.')

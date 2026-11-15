@@ -658,10 +658,13 @@ def add_gnss_options(parser):
                           '... with columns lon, lat, ve, vn [vu] [se sn su] [site],\n'
                           'any spelling (Ve(mm/yr), sig_e ...); no header = GMT psvelo\n'
                           '(lon lat ve vn se sn corr site).')
-    grp.add_argument('--vel', dest='gnss_comp', default='los',
-                     choices=['ve', 'vn', 'vu', 'los'],
-                     help='the GNSS component to compare with the data (default: los,\n'
-                          'projected into the LOS of the first file).')
+    grp.add_argument('--vel', dest='gnss_comp', default=['los'], nargs='+',
+                     choices=['ve', 'vn', 'vu', 'los'], metavar='COMP',
+                     help='the GNSS component(s) to compare with the data, one or\n'
+                          'several of ve vn vu los (default: los, projected into the\n'
+                          'LOS of the first file). Several - --vel ve vn vu los - are\n'
+                          'drawn together, each in a colour of its own and shifted\n'
+                          'onto the InSAR on its own (--gnss-ref).')
     grp.add_argument('--gnss-unit', dest='gnss_unit', default='auto',
                      choices=['auto', 'mm/yr', 'cm/yr', 'm/yr'],
                      help='unit of the GNSS file (default: auto - said by the column\n'
@@ -837,6 +840,10 @@ def cmd_line_parse(iargs=None):
     inps, view_extra = parser.parse_known_args(args=_bare_save(iargs))
     inps.argv = list(iargs)
     inps.view_extra = view_extra
+    # --vel: one GNSS component or several, each once, in the order given
+    comps = inps.gnss_comp if isinstance(inps.gnss_comp, list) else [inps.gnss_comp]
+    inps.gnss_comps = list(dict.fromkeys(comps))
+    inps.gnss_comp = inps.gnss_comps[0]
 
     check_save_options(inps)
     if inps.svg:
@@ -1442,11 +1449,12 @@ def create_model_parser(prog=f'{PROG} model'):
                           '.geojson .gpkg .kml, GMT psvelo ...). Those within\n'
                           '--gnss-width of the line are fitted with an offset of\n'
                           'their own, and drawn in blue with their 1-sigma.')
-    gns.add_argument('--vel', dest='gnss_comp',
-                     choices=['par', 've', 'vn', 'vu', 'los'],
-                     help='the GNSS component that matches the data (default: par,\n'
-                          'fault-parallel, from ve and vn; los when --comp auto fits\n'
-                          'LOS data as they are). --comp as-is needs it.')
+    gns.add_argument('--vel', dest='gnss_comp', nargs='+',
+                     choices=['par', 've', 'vn', 'vu', 'los'], metavar='COMP',
+                     help='the GNSS component that matches the data, one of par ve\n'
+                          'vn vu los (default: par, fault-parallel, from ve and vn;\n'
+                          'los when --comp auto fits LOS data as they are). One only:\n'
+                          'it is fitted with the data. --comp as-is needs it.')
     gns.add_argument('--gnss-unit', dest='gnss_unit', default='auto',
                      choices=['auto', 'mm/yr', 'cm/yr', 'm/yr'],
                      help='unit of the GNSS file (default: auto).')
@@ -1540,6 +1548,13 @@ def model_cmd_line_parse(iargs=None):
     inps, view_extra = parser.parse_known_args(args=_bare_save(iargs))
     inps.argv = list(iargs)
     inps.view_extra = view_extra
+    if isinstance(inps.gnss_comp, list):
+        comps = list(dict.fromkeys(inps.gnss_comp))
+        if len(comps) > 1:
+            raise ValueError(f'--vel {" ".join(comps)}: model fits ONE GNSS component with '
+                             'the data - the one that matches them (par, ve, vn, vu or '
+                             'los). Several at once are for swath.')
+        inps.gnss_comp = comps[0]
 
     check_save_options(inps)
     if inps.svg:
@@ -1961,8 +1976,8 @@ swath - swath (buffered) profiles
                 and a dashed line where a section crosses one (--fault-label,
                 --fault-color, --fault-lw)
   GNSS          --gnss FILE (.csv .xlsx .shp .geojson .gpkg .kml, GMT psvelo): on the
-                map and on every profile; --vel los|ve|vn|vu, --gnss-ref,
-                --gnss-radius, --gnss-label, --geom / --los-inc
+                map and on every profile; --vel los ve vn vu (one or several),
+                --gnss-ref, --gnss-radius, --gnss-label, --geom / --los-inc
   several files f1.h5 f2.h5 ... --labels: one density, a median line for each file
   time series   --timeseries ts.h5: right-click a pixel for its history (MintPy)
   keys          left click x2: draw | "=" new section | "n" redo the current one |

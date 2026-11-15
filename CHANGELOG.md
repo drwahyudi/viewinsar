@@ -4,6 +4,19 @@ All notable changes to viewinsar are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.5.2] - 2026-11-15
+
+### Added
+- **`swath --vel` takes several components at once**: `--vel ve vn vu los`
+  draws all of them on the same profile, each in a colour of its own (ve
+  magenta, vn orange, vu white, los black; triangles for 3D stations, circles
+  for 2D), each shifted onto the InSAR on its own (`--gnss-ref insar`). The
+  console and `_info.txt` give each shift; `_gnss.csv` has a row per station
+  and component, with a new `component` column. A component that cannot be
+  had - `vu` with no 3D station, `los` with no look angles - is left out
+  with a warning, the others stay. One component is drawn as before.
+  `model --vel` takes one, the component it fits, and says so if given more.
+
 ## [0.5.1] - 2026-11-15
 
 ### Removed

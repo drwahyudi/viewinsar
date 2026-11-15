@@ -311,3 +311,59 @@ def test_swath_of_two_frames(two_frames, velocity_file, tmp_path):
 def test_swath_labels_must_match_the_files(two_frames):
     with pytest.raises(ValueError, match='--labels'):
         cli.cmd_line_parse([*two_frames, '--labels', 'only-one', '--noverbose'])
+
+
+def test_swath_with_several_gnss_components(velocity_file, gnss_csv, tmp_path):
+    """--vel ve vn vu: every component on the profile, each in its colour and
+    shifted onto the InSAR on its own; a row per station and component."""
+    out = tmp_path / 'out'
+    obj = cli.swath_main([velocity_file, *ALONG_30_3, '--gnss', gnss_csv, '--vel', 've', 'vn',
+                          'vu', 've', '--gnss-radius', '2', '--nodisplay', '--noverbose',
+                          '--outdir', str(out)])
+    assert obj.gnss_comps == ['ve', 'vn', 'vu'] and obj.gnss_comp == 've'   # each once
+    sec = obj.sections[0]
+    gin = sec.gnss_in
+    idx = gin['index']
+    assert list(gin['series']) == ['ve', 'vn', 'vu'] and idx.size == 6
+    assert gin['series']['ve']['value'] == pytest.approx(
+        [_east_mm(lon) / 10 for lon in obj.gnss.lon[idx]], abs=1e-3)
+    assert gin['series']['vn']['value'] == pytest.approx(np.full(6, 0.1), abs=1e-6)  # cm/yr
+    vu = gin['series']['vu']['value']
+    assert np.isfinite(vu).sum() == 3                                 # the 3D stations
+    # the first component is still where it always was
+    assert gin['value'] == pytest.approx(gin['series']['ve']['value'])
+    assert gin['offset'] == gin['series']['ve']['offset']
+    offsets = {c: one['offset'] for c, one in gin['series'].items()}
+    assert offsets['ve'] != offsets['vn'] and all(one['n_ref'] for one in gin['series'].values())
+    labels = [t.get_text() for t in sec.ax_swath.get_legend().get_texts()]
+    assert {'GNSS ve', 'GNSS vn', 'GNSS vu', '3D station (2D: circle)'} <= set(labels)
+    table = np.genfromtxt(next(out.glob('*_gnss.csv')), delimiter=',', names=True,
+                          dtype=None, encoding='utf-8')
+    assert len(table) == 6 + 6 + 3 and set(table['component']) == {'ve', 'vn', 'vu'}
+    info = next(out.glob('*_info.txt')).read_text()
+    assert '--vel ve vn vu' in info and 'each component shifted' in info
+
+
+def test_gnss_vu_without_3d_stations(velocity_file, tmp_path, capsys):
+    path = tmp_path / 'g2d.csv'
+    path.write_text('site,lon,lat,ve,vn\nA,130.30,30.30,1,2\nB,130.60,30.30,3,4\n')
+    args = [velocity_file, *ALONG_30_3, '--gnss', str(path), '--nodisplay', '--noverbose',
+            '--outdir', str(tmp_path / 'o')]
+    obj = cli.swath_main(args + ['--vel', 'vu', 've'])                # left out, said
+    assert obj.gnss_comps == ['ve'] and 'no station has a vertical' in capsys.readouterr().out
+    obj = cli.swath_main(args + ['--vel', 'vu'])                       # alone: no GNSS
+    assert obj.gnss is None and 'no station has a vertical' in capsys.readouterr().out
+
+
+def test_several_components_survive_a_missing_los(velocity_file, gnss_csv, tmp_path, capsys):
+    """No look angles anywhere (not even ORBIT_DIRECTION for nominal ones):
+    --vel los ve keeps ve, and says why los is gone."""
+    import shutil
+
+    vfile = str(tmp_path / 'velocity.h5')
+    shutil.copy(velocity_file, vfile)
+    with h5py.File(vfile, 'a') as fid:
+        del fid.attrs['ORBIT_DIRECTION']
+    obj = cli.swath_main([vfile, *ALONG_30_3, '--gnss', gnss_csv, '--vel', 'los', 've',
+                          '--nodisplay', '--noverbose', '--outdir', str(tmp_path / 'o')])
+    assert obj.gnss_comps == ['ve'] and 'los left out' in capsys.readouterr().out
