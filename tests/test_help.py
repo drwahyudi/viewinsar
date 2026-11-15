@@ -33,10 +33,10 @@ def _flat(text):
     '--fault', '-fault', '--fault-label', '--fault-color', '--fault-lw', 'Fault line',
     '.shp', '.geojson', '.gpkg', '.kml', 'any CRS', 'dashed vertical line',
     'crosses each fault trace', '--faultline',
-    # the single-dash spellings the options were asked for with
-    '-nlook', '-topoxsect', '-svg', 'one dash or two',
+    # 0.5.0: one spelling for every option, --long; the old ones still work
+    'written with two dashes', '-fault, -gnss, -vel, -d, -w', 'still work, with a note',
     # 0.3.0: the DEM, downloaded or given once
-    '-d, --dem [DEM]', '--topoxsect, -topoxsect, --topo [DEM]', '--dem-zoom',
+    '--dem [DEM]', '--topoxsect [DEM]', '--dem-zoom',
     'Terrain Tiles', 'Mapzen Global Terrain', 'terrarium/{z}/{x}/{y}.png',
     '~/.cache/viewinsar', 'VIEWINSAR_CACHE', 'not --nlook', 'says why in its panel',
     'the exact median', 'DEM covering part of a section', 'please cite them',
@@ -52,7 +52,7 @@ def test_swath_help_documents(needle):
 def test_top_level_help_points_at_the_new_features(capsys):
     assert cli.main(['--help']) == 0
     out = capsys.readouterr().out
-    for needle in ('--nlook', '--topoxsect', '--svg', '--timeseries', '-fault', '-d --topoxsect',
+    for needle in ('--nlook', '--topoxsect', '--svg', '--timeseries', '--fault', '--dem --topoxsect',
                    '"="', '"n"', '"e"', "A-A'", 'swath', 'list'):
         assert needle in out, f'`viewinsar -h` does not mention {needle!r}'
 
@@ -106,7 +106,9 @@ def test_every_example_parses(cmd):
 
 def test_help_lines_fit_a_terminal():
     """RawTextHelpFormatter does not wrap, so keep every line readable."""
-    for name, text in (('swath -h', _swath_help()), ('-h', cli.top_level_help())):
+    helps = [('swath -h', _swath_help()), ('-h', cli.top_level_help())]
+    helps += [(f'{name} -h', cli.command_help(name)) for name in ('stat', 'model', 'tseries')]
+    for name, text in helps:
         long = [ln for ln in text.splitlines() if len(ln) > 92]
         assert not long, f'`viewinsar {name}` has lines over 92 columns:\n' + '\n'.join(long)
 
@@ -142,8 +144,8 @@ def test_top_level_help_covers_every_command():
         assert named, name
         assert not named - known, f'{name}: unknown option(s) {sorted(named - known)}'
     top = cli.top_level_help()
-    for needle in ('--profile', '--line-file', '-rate', '--creep', 'posteriors',
-                   'model_sections_ABC.csv', '--save [DIR]', '-r KM', 'LiCSBAS',
+    for needle in ('--profile', '--line-file', '--rate', '--creep', 'posteriors',
+                   'model_sections_ABC.csv', '--save [DIR]', '--radius KM', 'LiCSBAS',
                    'pip install "viewinsar[mintpy]"', '--help-all'):
         assert needle in top, needle
 

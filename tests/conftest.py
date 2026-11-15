@@ -140,3 +140,10 @@ def _close_figures():
         plt.close('all')
     except ImportError:
         pass
+
+
+@pytest.fixture(autouse=True)
+def no_user_config(tmp_path, monkeypatch):
+    """Never the viewinsar.ini of whoever runs the tests (an ALOS-2 = 0.1 rule
+    would scale the test data)."""
+    monkeypatch.setenv('VIEWINSAR_CONFIG', str(tmp_path / 'no-viewinsar.ini'))

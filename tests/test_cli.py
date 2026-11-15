@@ -367,3 +367,43 @@ def test_console_entry_point_is_installed():
                          capture_output=True, text=True,
                          env={**os.environ, 'MPLBACKEND': 'Agg'})
     assert viewinsar.__version__ in out.stdout
+
+
+##############################################################################
+#        0.5.0: one --long spelling per option; the old ones still work      #
+##############################################################################
+@pytest.mark.parametrize('command, old, new', [
+    (cmd, old, new) for cmd, table in cli.OLD_SPELLINGS.items() for old, new in table.items()])
+def test_every_old_spelling_is_an_option_of_today(command, old, new):
+    """Each spelling of before maps onto an option the command has now."""
+    parser = {'swath': cli.create_swath_parser, 'stat': cli.create_stat_parser,
+              'model': cli.create_model_parser, 'tseries': cli.create_tseries_parser,
+              'list': cli.create_list_parser}[command]()
+    known = set(parser._option_string_actions)
+    assert new in known and old not in known
+
+
+def test_old_spellings_are_rewritten_with_a_note(capsys):
+    argv = ['v.h5', '-fault', 'f.shp', '-gnss', 'g.csv', '-vel', 'los', '-d', '-w15',
+            '--buffer=8', '-v', '-3', '3', '-u', 'mm/yr', '--start-lalo', '-0.8', '121.1']
+    got = cli.modern_options(argv, 'swath')
+    assert got == ['v.h5', '--fault', 'f.shp', '--gnss', 'g.csv', '--vel', 'los', '--dem',
+                   '--width', '15', '--width=8', '-v', '-3', '3', '-u', 'mm/yr',
+                   '--start-lalo', '-0.8', '121.1']        # view.py's -v, -u untouched
+    out = capsys.readouterr().out
+    assert out.count('NOTE:') == 1 and '--fault for -fault' in out and '--width for -w' in out
+    # today's spellings: nothing to say
+    assert cli.modern_options(got, 'swath') == got and not capsys.readouterr().out
+    # tseries' own letters are tseries' own
+    assert cli.modern_options(['cum.h5', '-r', '2', '-m', '20170105', '-p', '10/20', '-c',
+                               'jet', '-u', 'cm'], 'tseries') == [
+        'cum.h5', '--radius', '2', '--ref-date', '20170105', '--point', '10/20',
+        '--colormap', 'jet', '--unit', 'cm']
+
+
+def test_old_and_new_spellings_parse_the_same(velocity_file):
+    old = cli.cmd_line_parse([velocity_file, '-w', '12', '-nlook', '2', '-svg', '--noverbose'])
+    new = cli.cmd_line_parse([velocity_file, '--width', '12', '--nlook', '2', '--svg',
+                              '--noverbose'])
+    assert (old.width, old.nlook, old.svg) == (new.width, new.nlook, new.svg) == (12.0, 2, True)
+    assert old.argv == new.argv[:1] + ['--width', '12', '--nlook', '2', '--svg', '--noverbose']

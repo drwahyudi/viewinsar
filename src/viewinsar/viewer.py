@@ -21,11 +21,17 @@ from .compat import (
     MINTPY_HINT,
     auto_figure_size,
     coordinate,
+    guess_velocity_unit,
     have_mintpy,
+    is_unitless,
+    mintpy_reads,
+    normalise_unit,
     read,
     read_attribute,
     read_mask,
     scale_data2disp_unit,
+    unit_ratio,
+    velocity_name,
 )
 from .fault import load_faults, load_faults_radar, profile_crossings, to_display
 from .radar import PIXEL_ATR, RadarLookup, find_lookup, has_height
@@ -117,6 +123,15 @@ def velocity_factor(from_unit, to_unit):
     if src is None or dst is None:
         return None
     return src / dst
+
+
+def per_file(values, index):
+    """The value of option `values` (one, or one per input file) for file `index`."""
+    if values is None or not isinstance(values, (list, tuple)):
+        return values
+    if not values:
+        return None
+    return values[index] if index < len(values) else values[-1]
 
 
 def export_dir(folder):
@@ -780,7 +795,7 @@ class Section:
                     fid.write('fault crossing : none - the centre line crosses no trace\n')
             if v.gnss is not None:
                 gin = self.gnss_in or {}
-                fid.write(f'GNSS           : {os.path.abspath(v.gnss_file)}, -vel {v.gnss_comp}'
+                fid.write(f'GNSS           : {os.path.abspath(v.gnss_file)}, --vel {v.gnss_comp}'
                           f' [{v.disp_unit}]' + (f', {v.gnss_note}' if v.gnss_note else '')
                           + '\n')
                 n_in = len(gin.get('site', []))
@@ -813,7 +828,7 @@ class swathProfileViewer:
         from viewinsar.cli import cmd_line_parse, get_view_cmd
         from viewinsar.viewer import swathProfileViewer
 
-        inps = cmd_line_parse('geo_velocity.h5 -w 15'.split())
+        inps = cmd_line_parse('geo_velocity.h5 --width 15'.split())
         obj = swathProfileViewer(inps, get_view_cmd(inps))
         obj.open()
         obj.plot()
@@ -842,6 +857,11 @@ class swathProfileViewer:
         self.labels = None                       # names of the input files, for legends
         self.crs_list = []                       # the CRS of every input file
         self.gnss_file = self.geom_file = self.los_inc = self.los_az = None
+        self.data_unit = None                    # --data-unit: for files without a unit
+        self._unit_said = set()
+        self._unit_guess = {}                    # file -> the unit guessed for it
+        self.data_scale = None                   # --data-scale: a factor per file
+        self._scale_said = set()
         self.gnss_comp, self.gnss_unit, self.gnss_ref = 'los', 'auto', 'insar'
         self.gnss_radius, self.gnss_fit, self.gnss_label = 1.0, True, False
         self.gnss = self.gnss_value = self.gnss_sigma = None
@@ -872,7 +892,8 @@ class swathProfileViewer:
             plt.switch_backend('Agg')
 
         # the map: view.py does all of the work - or, without MintPy, mapview.py
-        if have_mintpy():
+        self.map_by_view = mintpy_reads(self.file[0])      # view.py's map, or ours
+        if self.map_by_view:
             from mintpy import view
             self.vprint(f'run: {self.view_cmd}')
             self.data_img, self.atr, view_inps = view.prep_slice(self.view_cmd)
@@ -884,6 +905,42 @@ class swathProfileViewer:
         for key, value in view_inps.__dict__.items():
             if key not in self._own_keys:
                 setattr(self, key, value)
+        # --data-scale (or a rule of viewinsar.ini): the map is multiplied first
+        scale0 = self.file_scale(0, self.file[0], read_attribute(self.file[0]))
+        if scale0 != 1.0:
+            self.rescale_map(scale0)
+
+        # the unit of the first file: --data-unit (which also corrects a wrong
+        # one), mm/yr for a LiCSBAS velocity without one, a guess from the
+        # numbers for a velocity that says none (a GeoTIFF), else the file's
+        # own - the UNIT it says, which view.py ignores for some datasets
+        # ("velocity" is always m/year to it): the map follows the file, as the
+        # profiles do
+        own0 = read_attribute(self.file[0]).get('UNIT')
+        unit0 = self.file_unit(self.file[0], {'UNIT': own0}, values=self.data_img)
+        true0 = unit0 or (None if is_unitless(own0) else own0)
+        shown = self.atr.get('UNIT')                # what the map was scaled from
+        if true0:
+            if is_unitless(shown):                  # the map shows the file's numbers
+                if is_unitless(self.disp_unit):     # a guessed velocity: in mm/yr
+                    self.disp_unit = ('mm/year' if self.file[0] in self._unit_guess
+                                      else true0)
+                elif ('/' in true0 and '/' not in str(self.disp_unit)
+                      and unit_ratio(true0, f'{self.disp_unit}/year') is not None):
+                    self.disp_unit = f'{self.disp_unit}/year'   # view.py cut "--unit mm/yr"
+                ratio = unit_ratio(true0, self.disp_unit)
+                if ratio not in (None, 1.0):
+                    self.rescale_map(ratio)
+                    self.vprint(f'map: in {self.disp_unit} ({ratio:g} x the numbers of '
+                                f'the file), as the profiles')
+            else:
+                ratio = unit_ratio(true0, shown)
+                if ratio is not None and ratio != 1.0:
+                    if not unit0:
+                        print(f'NOTE: {os.path.basename(self.file[0])} says {own0}; view.py '
+                              f'read it as {shown}: the map is put back in {own0}')
+                    self.rescale_map(ratio)
+            self.atr['UNIT'] = true0
 
         # read the data of every input file, within the displayed window
         self.data_list, self.atr_list, self.box_list, self.msk_list = [], [], [], []
@@ -929,9 +986,15 @@ class swathProfileViewer:
                 if not base_geo:
                     box_i = tuple(self.pix_box)
 
-            data_i = read(fname, datasetName=self.dset, box=box_i, print_msg=False)[0]
-            data_i = scale_data2disp_unit(np.array(data_i, dtype=np.float32), metadata=atr_i,
-                                          disp_unit=self.disp_unit)[0]
+            data_i = np.array(read(fname, datasetName=self.dset, box=box_i, print_msg=False)[0],
+                              dtype=np.float32)
+            scale_i = self.file_scale(i, fname, atr_i)
+            if scale_i != 1.0:
+                data_i *= np.float32(scale_i)
+            unit_i = self.file_unit(fname, atr_i, values=data_i)
+            if unit_i:
+                atr_i['UNIT'] = unit_i
+            data_i = scale_data2disp_unit(data_i, metadata=atr_i, disp_unit=self.disp_unit)[0]
             msk_i = read_mask(fname, mask_file=self.mask_file, datasetName=self.dset,
                               box=box_i, print_msg=False)[0]
 
@@ -939,8 +1002,8 @@ class swathProfileViewer:
             self.atr_list.append(atr_i)
             self.box_list.append(box_i)
             self.msk_list.append(msk_i)
-            self.vprint(f'read {os.path.basename(fname)} within box {box_i}'
-                        f' -> {data_i.shape} [{self.disp_unit}]')
+            self.vprint(f'read {os.path.basename(fname)} (in {atr_i.get("UNIT") or "?"}) within '
+                        f'box {box_i} -> {data_i.shape} [{self.disp_unit}]')
 
         if not kept:
             raise ValueError('no usable input file left.')
@@ -959,7 +1022,7 @@ class swathProfileViewer:
                                           or self.lookup_file or self.gnss_file):
             self.init_lookup()
 
-        # -d / --topoxsect without a file: one download, for the map extent
+        # --dem / --topoxsect without a file: one download, for the map extent
         if is_auto(self.dem_file) or is_auto(self.topoxsect):
             self.init_terrain()
 
@@ -986,6 +1049,87 @@ class swathProfileViewer:
             self.fig_size = [7.6, 4.8]
         return
 
+    def file_scale(self, index, fname, atr):
+        """The factor the data of a file are multiplied by before anything:
+        --data-scale, else the first rule of your viewinsar.ini that applies
+        (by mission or path), else 1. Said once per file, with a note when the
+        file's WAVELENGTH is not its mission's."""
+        from .settings import config_scale, wavelength_note
+
+        given = per_file(self.data_scale, index)
+        if given is not None:
+            factor, why = float(given), '--data-scale'
+        else:
+            factor, why = config_scale(fname, atr)
+        if fname not in self._scale_said:
+            self._scale_said.add(fname)
+            note = wavelength_note(fname, atr)
+            if note:
+                print(note)
+            if factor != 1.0:
+                print(f'{os.path.basename(fname)}: its values x {factor:g} ({why}) - on the map, '
+                      'in the profiles, the fit and the statistics')
+        return factor
+
+    def expects_velocity(self, fname):
+        """Are the data a velocity? `model` fits velocities, --gnss compares them
+        with GNSS velocities; otherwise the name says it (vel*, rate ...)."""
+        return (self.COMMAND == 'model' or bool(self.gnss_file)
+                or velocity_name(fname, self.dset))
+
+    def file_unit(self, fname, atr, values=None):
+        """The unit to read a file in, when it is not the file's own: --data-unit
+        (for a file without a unit, or with a wrong one), mm/yr for a LiCSBAS
+        velocity without one, or - for a velocity that says no unit at all (a
+        GeoTIFF) - m/yr or mm/yr, as its numbers say. None: the file's own
+        unit stands."""
+        stated = atr.get('UNIT')
+        if self.data_unit:
+            unit, why = normalise_unit(self.data_unit), '--data-unit'
+            if not is_unitless(stated) and unit_ratio(unit, stated) == 1.0:
+                return None                           # the same unit, spelt otherwise
+        elif is_unitless(stated):
+            from .licsbas import licsbas_unit
+            unit, why = licsbas_unit(fname, geom_hint=self.geom_file), 'a LiCSBAS velocity'
+            if not unit and fname in self._unit_guess:
+                unit, why = self._unit_guess[fname]
+            elif not unit and values is not None and self.expects_velocity(fname):
+                unit, p99 = guess_velocity_unit(values)
+                if unit:
+                    why = (f'99% of its values are within +/-{p99:.3g}: '
+                           + ('a velocity in m/yr' if unit == 'm/year' else 'a velocity in '
+                              'mm/yr') + '; --data-unit if not')
+                    self._unit_guess[fname] = (unit, why)
+            if not unit:
+                return None
+        else:
+            return None
+        if not is_unitless(stated) and unit_ratio(unit, stated) is None:
+            raise ValueError(f'--data-unit {unit}: {os.path.basename(fname)} is in {stated}, '
+                             'which does not convert to it')
+        name = os.path.basename(fname)
+        if name not in self._unit_said:
+            self._unit_said.add(name)
+            if is_unitless(stated):
+                print(f'{name}: no unit in the file - read in {unit} ({why})')
+            else:
+                print(f'{name}: the file says {stated}; read in {unit} instead ({why}): '
+                      f'its values are {1 / unit_ratio(unit, stated):g}x smaller than it says')
+        return unit
+
+    def rescale_map(self, ratio):
+        """The map was read in another unit than the data are in - `ratio` of
+        it in each of theirs: scale it, and its colour range."""
+        if ratio is None or ratio == 1.0:
+            return
+        self.data_img = np.asarray(self.data_img, dtype=np.float32) * np.float32(ratio)
+        given = {'-v', '--vlim', '--wrap-range'} & set(self.view_extra or [])
+        if getattr(self, 'vlim', None) is not None and not given:
+            self.vlim = [float(v) * ratio for v in self.vlim]
+        if getattr(self, 'dlim', None) is not None:
+            self.dlim = [float(v) * ratio for v in self.dlim]
+        return
+
     def init_lookup(self):
         """Find and read the radar-coded geometry file (--lookup, or MintPy's places)."""
         try:
@@ -999,7 +1143,7 @@ class swathProfileViewer:
         return
 
     def init_terrain(self):
-        """A DEM for -d and/or --topoxsect given without a file.
+        """A DEM for --dem and/or --topoxsect given without a file.
 
         Geocoded data: the Terrain Tiles over the map, downloaded. Radar-coded
         data: the `height` of the geometry file - the DEM of the processing, on
@@ -1031,7 +1175,7 @@ class swathProfileViewer:
                 print(f'DEM: {ATTRIBUTION}')
         except Exception as err:      # noqa: BLE001 - the DEM is a nicety
             print(f'WARNING: no DEM for the map: {err}')
-            print('         --> continuing without it. A DEM file works too: -d dem.tif')
+            print('         --> continuing without it. A DEM file works too: --dem dem.tif')
 
         if is_auto(self.dem_file):
             self.dem_file = path
@@ -1137,18 +1281,19 @@ class swathProfileViewer:
                 if isinstance(geom_file, (list, tuple)):        # one per file: the first
                     geom_file = geom_file[0] if geom_file else None
                 geom = LOSGeometry.for_file(self.file[0], self.atr, geom_file=geom_file,
-                                            inc=self.los_inc, az=self.los_az,
+                                            inc=per_file(self.los_inc, 0),
+                                            az=per_file(self.los_az, 0),
                                             verbose=self.print_msg)
                 uvec = geom.unit_vector_at(gnss.lon, gnss.lat)
                 self.gnss_note = f'LOS of {os.path.basename(self.file[0])} ({geom.source})'
             value, sigma = gnss.component(self.gnss_comp, uvec)
             if self.gnss_comp == 'vu' and not gnss.has_vu.any():
-                raise ValueError('-vel vu, but no station has a vertical velocity')
+                raise ValueError('--vel vu, but no station has a vertical velocity')
             self.gnss, self.gnss_value, self.gnss_sigma = gnss, value, sigma
             self.gnss_rows, self.gnss_cols = self.lonlat_to_rowcol(gnss.lon, gnss.lat)
             usable = np.isfinite(value) & np.isfinite(self.gnss_rows)
             self.vprint(f'GNSS: {int(usable.sum())} of {len(gnss)} station(s) usable for '
-                        f'-vel {self.gnss_comp} [{self.disp_unit}]')
+                        f'--vel {self.gnss_comp} [{self.disp_unit}]')
         except Exception as err:      # noqa: BLE001 - the GNSS are a nicety
             print(f'WARNING: cannot use --gnss: {err}')
             print('         --> continuing without GNSS.')
@@ -1311,7 +1456,7 @@ class swathProfileViewer:
         subplot_kw = dict(projection=self.map_proj_obj) if self.map_proj_obj is not None else {}
         self.fig_map = _new_figure('Map', self.fig_size_map)
         self.ax_img = self.fig_map.add_subplot(1, 1, 1, **subplot_kw)
-        if have_mintpy():
+        if getattr(self, 'map_by_view', have_mintpy()):
             from mintpy import view
             self.ax_img = view.plot_slice(self.ax_img, self.data_img, self.atr, self)[0]
         else:

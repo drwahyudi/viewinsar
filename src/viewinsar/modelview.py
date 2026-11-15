@@ -12,6 +12,7 @@ and a second window with the posterior distributions of the parameters.
 """
 
 import os
+import re
 import textwrap
 
 import numpy as np
@@ -19,7 +20,7 @@ from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.offsetbox import AnchoredText
 
-from .model import UNITS, describe, fit_profile, model_band, strain_rate
+from .model import NAMES, UNITS, describe, fit_profile, model_band, strain_rate
 from .radar import PIXEL_ATR
 from .raster import same_crs
 from .swath import EARTH_RADIUS, is_projected, line_geometry, project_points
@@ -28,6 +29,7 @@ from .viewer import (
     Section,
     _new_figure,
     export_dir,
+    per_file,
     swathProfileViewer,
     velocity_factor,
 )
@@ -42,6 +44,12 @@ MAP_COLOR = 'k'                                  # the MAP model: bold black das
 BAND_COLOR = '0.62'                              # the 95 % range: light grey
 POST_COLOR = '#d62728'                           # the MAP in the posterior plots
 HIST_COLOR, HIST_EDGE = '#1f4fd8', '#0a1f73'      # the marginal histograms, blue
+# names that mark a component of a decomposition, not a line of sight
+DECOMPOSED = {'hz', 'horz', 'horizontal', 'up', 'vert', 'vertical', 'east', 'north', 'ew',
+              'ns', 've', 'vn', 'vu', 'decomp', 'decomposed'}
+# the GNSS component that matches a file named as one (horizontal: unknown direction)
+DECOMPOSED_GNSS = {'up': 'vu', 'vert': 'vu', 'vertical': 'vu', 'vu': 'vu', 'east': 've',
+                   'ew': 've', 've': 've', 'north': 'vn', 'ns': 'vn', 'vn': 'vn'}
 POSTERIOR_ORDER = ('S', 'd1', 'a', 'C', 'd2', 'x0')   # as Hussain et al. (2016)
 POSTERIOR_LABEL = {'S': 'Slip rate', 'd1': 'Locking depth', 'a': 'Offset',
                    'C': 'Creep rate', 'd2': 'Creep depth', 'x0': 'Fault position'}
@@ -116,6 +124,25 @@ def _fmt(value):
     if not np.isfinite(value):
         return 'nan'
     return f'{value:.2f}' if abs(value) < 1 else f'{value:.1f}'
+
+
+def _num(value):
+    """_fmt with a true minus sign, so a range reads (−10.7 – −2.7)."""
+    return _fmt(value).replace('-', '\u2212')
+
+
+def _unit_text(unit):
+    """' mm/yr', or '' for data without a unit."""
+    unit = str(unit or '').strip()
+    return '' if unit.lower() in ('', '1', 'none', 'value') else f' {unit}'
+
+
+def strain_unit(model_unit):
+    """The unit of dv/dx: µstrain/yr for mm/yr over km."""
+    if model_unit == 'mm/yr':
+        return 'µstrain/yr'
+    unit = _unit_text(model_unit).strip()
+    return f'{unit}/km' if unit else '1/km'
 
 
 class _Placer:
@@ -282,11 +309,12 @@ class ModelSection(Section):
         for ax in axes[:-1]:
             ax.tick_params(labelbottom=False)
         axes[-1].set_xlabel('Distance from the fault [km]', fontsize=v.font_size + 1)
-        what = 'Velocity' if v.comp == 'as-is' else 'Fault-parallel velocity'
-        self.ax_swath.set_ylabel(f'{what} [{v.model_unit}]', fontsize=v.font_size + 1)
+        what = 'Velocity' if v.comp in ('as-is', 'auto') else 'Fault-parallel velocity'
+        unit = _unit_text(v.model_unit).strip()
+        self.ax_swath.set_ylabel(what + (f' [{unit}]' if unit else ''), fontsize=v.font_size + 1)
         if self.ax_strain is not None:
-            unit = 'µstrain/yr' if v.model_unit == 'mm/yr' else f'{v.model_unit}/km'
-            self.ax_strain.set_ylabel(f'dv/dx\n[{unit}]', fontsize=v.font_size)
+            self.ax_strain.set_ylabel(f'dv/dx\n[{strain_unit(v.model_unit)}]',
+                                      fontsize=v.font_size)
         if self.ax_topo is not None:
             self.ax_topo.set_ylabel('Elevation\n[m]', fontsize=v.font_size)
         return
@@ -623,18 +651,8 @@ class ModelSection(Section):
         ends = [ax.annotate(self.label, xy=(0.012, 0.975), ha='left', **kw),
                 ax.annotate(f"{self.label}'", xy=(0.988, 0.975), ha='right', **kw)]
 
-        # the parameters, as Hussain et al.: MAP [95 % range]
-        lines = []
-        for name in [n for n in PHYSICAL if n in summ]:
-            s = summ[name]
-            unit = v.model_unit if UNITS[name] == 'mm/yr' else UNITS[name]
-            text = f'{SYMBOL[name]} = {_fmt(s["map"])} [{_fmt(s["lo"])}, {_fmt(s["hi"])}] {unit}'
-            if name == 'S' and self.sense_known:
-                text += f', {slip_sense(s["map"], self.strike, self.prof_az)}'
-            lines.append(text)
-        d = res['derived']['strain']
-        unit = 'µstrain/yr' if v.model_unit == 'mm/yr' else f'{v.model_unit}/km'
-        lines.append(rf'$\dot\gamma_0$ = {d["map"]:.2f} [{d["lo"]:.2f}, {d["hi"]:.2f}] {unit}')
+        # the parameters, as Hussain et al. (2016): "slip rate = 20 mm/yr (11 – 29, 95% CI)"
+        lines = self.parameter_lines()
 
         # ... and the legend: each where it hides the least (points, bins,
         # the model, the GNSS), never on the A / A' labels nor on each other
@@ -672,6 +690,32 @@ class ModelSection(Section):
                  + f'\nstrike {self.strike:.0f}°, {COMP_TEXT[v.comp]}')
         ax.set_title(title, fontsize=v.font_size - 1, pad=6)
         return
+
+    def parameter_lines(self):
+        """The parameters as Hussain et al. (2016) write them: the MAP value, its
+        unit, and the 95 % range - the slip rate as a rate, with its sense."""
+        v, res = self.v, self.result
+        summ = res['summary']
+        lines = []
+        for name in [n for n in PHYSICAL if n in summ]:
+            s = summ[name]
+            unit = v.model_unit if UNITS[name] == 'mm/yr' else UNITS[name]
+            val, lo, hi, extra = s['map'], s['lo'], s['hi'], ''
+            if name == 'S' and self.sense_known:
+                sense = slip_sense(s['map'], self.strike, self.prof_az)
+                if lo * hi > 0 and val * lo > 0:      # one sense all over the range
+                    val, (lo, hi) = abs(val), sorted((abs(lo), abs(hi)))
+                    extra = f', {sense}'
+                else:
+                    extra = f', {sense} (the range crosses 0: S > 0 is right-lateral)'
+            # LOS data fitted as they are: the rates are what the LOS sees of them
+            seen = ' in the LOS' if v.data_los and name in ('S', 'C') else ''
+            lines.append(f'{NAMES[name]}{seen} = {_num(val)}{_unit_text(unit)} '
+                         f'({_num(lo)} – {_num(hi)}, 95% CI){extra}')
+        d = res['derived']['strain']
+        lines.append(f'strain rate{" in the LOS" if v.data_los else ""} = {d["map"]:.2f} '
+                     f'{strain_unit(v.model_unit)} ({d["lo"]:.2f} – {d["hi"]:.2f}, 95% CI)')
+        return lines
 
     def draw_strain(self):
         ax, res = self.ax_strain, self.result
@@ -1038,7 +1082,7 @@ class ModelViewer(swathProfileViewer):
         from viewinsar.cli import get_view_cmd, model_cmd_line_parse
         from viewinsar.modelview import ModelViewer
 
-        inps = model_cmd_line_parse('geo_velocity.h5 --comp los -fault faults.shp'.split())
+        inps = model_cmd_line_parse('geo_velocity.h5 --comp los --fault faults.shp'.split())
         obj = ModelViewer(inps, get_view_cmd(inps))
         obj.open()
         obj.plot()
@@ -1051,6 +1095,7 @@ class ModelViewer(swathProfileViewer):
         super().__init__(inps, view_cmd)
         self._los = {}
         self.gnss_comp_used = None
+        self.data_los = False            # LOS data, fitted as they are (--comp auto)
 
     ##---------- units
     @property
@@ -1079,14 +1124,71 @@ class ModelViewer(swathProfileViewer):
         super().open()
         if 'Y_FIRST' not in self.atr and self.lookup is None:
             self.init_lookup()
+        self.resolve_comp()
         if self.model_unit != 'mm/yr':
             print(f'NOTE: the data are in {self.disp_unit!r}, not a velocity: the model is '
-                  f'fitted in that unit (S bound +/-{self.s_max_used:.3g})')
-        elif self.print_msg and self.disp_unit != 'mm/yr':
+                  f'fitted in that unit (S bound +/-{self.s_max_used:.3g}). A file without a '
+                  'unit (a GeoTIFF) takes one with --data-unit, e.g. --data-unit mm/yr')
+        elif self.print_msg and velocity_factor(self.disp_unit, 'mm/yr') != 1.0:
             print(f'model: in mm/yr (the data are read in {self.disp_unit})')
         if self.comp == 'as-is' and self.print_msg:
             print('NOTE: --comp as-is: the data are fitted as they are; for LOS data '
                   '--comp los gives the fault-parallel velocity (and the sense of slip)')
+        return
+
+    def resolve_comp(self):
+        """--comp auto: los when the LOS geometry of every file is known and no
+        file is named as a component of a decomposition; as-is otherwise."""
+        from .cli import check_model_gnss
+
+        was_auto = self.comp == 'auto'
+        if was_auto:
+            why, named = None, []
+            for i, fname in enumerate(self.file):
+                tokens = set(re.split(r'[^a-z0-9]+', os.path.basename(fname).lower()))
+                named = sorted(tokens & DECOMPOSED)
+                if named:
+                    why = f'{os.path.basename(fname)} is named as a component ({named[0]})'
+                    break
+                try:
+                    geom = self._los_geometry(i)
+                except ValueError:
+                    why = f'no LOS geometry for {os.path.basename(fname)}'
+                    break
+                if geom.kind == 'nominal':
+                    why = (f'only nominal LOS angles for {os.path.basename(fname)}, too rough '
+                           'to turn its LOS into fault-parallel velocity')
+                    break
+            self.comp = 'as-is' if why else 'los'
+            self.data_los = bool(why) and not named
+            if self.print_msg:
+                print(f'--comp auto -> {self.comp}: ' + (
+                    f'{why}; the data are fitted as they are' if why else
+                    'the LOS velocity becomes fault-parallel velocity, pixel by pixel '
+                    '(--comp as-is fits the LOS itself)'))
+            if self.comp == 'as-is' and self.gnss_file and self.gnss_comp is None:
+                # the GNSS component that matches the data, as they are
+                self.gnss_comp = (DECOMPOSED_GNSS.get(named[0]) if named else 'los')
+                if self.gnss_comp and self.print_msg:
+                    print(f'GNSS: --vel {self.gnss_comp}, to match the data as they are')
+            check_model_gnss(self)
+        elif self.comp == 'los':
+            for i, fname in enumerate(self.file):
+                try:
+                    nominal = self._los_geometry(i).kind == 'nominal'
+                except ValueError:
+                    continue                        # said where the LOS is needed
+                if nominal:
+                    raise ValueError(
+                        f'--comp los: no LOS geometry for {os.path.basename(fname)} - only '
+                        'nominal angles from its name, too rough to turn the LOS into '
+                        'fault-parallel velocity. Give --geom (MintPy geometryGeo.h5, LiCSBAS '
+                        'GEOCml*/, LiCSAR *.geo.E.tif), or --los-inc and --los-az; or fit the '
+                        'LOS as it is with --comp as-is')
+        if self.gnss is not None:
+            self.gnss_comp_used = self.gnss_comp
+            self.vprint(f'GNSS: the {self.gnss_comp} component, '
+                        f'{"fitted" if self.gnss_fit else "shown"} [{self.model_unit}]')
         return
 
     def init_gnss(self):
@@ -1104,8 +1206,6 @@ class ModelViewer(swathProfileViewer):
             self.gnss = gnss.scaled(factor, self.model_unit)
             self.gnss_rows, self.gnss_cols = self.lonlat_to_rowcol(gnss.lon, gnss.lat)
             self.gnss_comp_used = self.gnss_comp
-            self.vprint(f'GNSS: {len(gnss)} station(s), the {self.gnss_comp} component, '
-                        f'{"fitted" if self.gnss_fit else "shown"} [{self.model_unit}]')
         except Exception as err:      # noqa: BLE001 - the GNSS are a nicety
             print(f'WARNING: cannot use --gnss: {err}')
             print('         --> continuing without GNSS.')
@@ -1219,8 +1319,10 @@ class ModelViewer(swathProfileViewer):
             files = self.geom_file or []
             given = files[index] if index < len(files) else None
             self._los[index] = LOSGeometry.for_file(self.file[index], self.atr_list[index],
-                                                    geom_file=given, inc=self.los_inc,
-                                                    az=self.los_az, verbose=self.print_msg)
+                                                    geom_file=given,
+                                                    inc=per_file(self.los_inc, index),
+                                                    az=per_file(self.los_az, index),
+                                                    verbose=self.print_msg)
         return self._los[index]
 
     def los_vectors(self, index, rows, cols, lon=None, lat=None):

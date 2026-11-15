@@ -360,8 +360,12 @@ def test_model_options(products):
                                      '--free-x0', '--d1-prior', '17', '5', '--noverbose'])
     assert inps.noise == (3.0, 12.0) and inps.free_x0 == 5.0 and inps.creep
     assert inps.gnss_comp == 'par' and inps.bin_x == inps.bin_km == 1.0
+    # --comp auto (the default) settles the GNSS component once the files are read
+    auto = cli.model_cmd_line_parse([asc, '-gnss', products['gnss'], '--noverbose'])
+    assert auto.comp == 'auto' and auto.gnss_comp is None
     with pytest.raises(ValueError, match='-vel'):
-        cli.model_cmd_line_parse([asc, '-gnss', products['gnss'], '--noverbose'])
+        cli.model_cmd_line_parse([asc, '--comp', 'as-is', '-gnss', products['gnss'],
+                                  '--noverbose'])
     with pytest.raises(ValueError, match='--strike'):
         cli.model_cmd_line_parse([asc, '--comp', 'par', '-gnss', products['gnss'],
                                   '--noverbose'])
@@ -536,8 +540,8 @@ def test_model_east_velocity_given_fault(products, tmp_path):
 
 
 def test_model_as_is_needs_no_strike(products, tmp_path):
-    obj = cli.model_main([products['asc'], *PROFILE, *FAST, '--nodisplay', '--noverbose',
-                          '--outdir', str(tmp_path), '--noise', 'white'])
+    obj = cli.model_main([products['asc'], '--comp', 'as-is', *PROFILE, *FAST, '--nodisplay',
+                          '--noverbose', '--outdir', str(tmp_path), '--noise', 'white'])
     sec = obj.sections[0]
     assert not sec.sense_known and sec.strike_how == 'perpendicular to the profile'
     assert sec.fault_how.startswith('the middle')
@@ -592,7 +596,8 @@ def test_model_on_radar_coded_data(tmp_path):
     fault.write_text(json.dumps({'type': 'FeatureCollection', 'features': [{
         'type': 'Feature', 'properties': {}, 'geometry': {
             'type': 'LineString', 'coordinates': [[FAULT_LON, 30.0], [FAULT_LON, 30.8]]}}]}))
-    obj = cli.model_main([vfile, *SECTION, '-w', '5', '-fault', str(fault), '--s-max', '1500',
+    obj = cli.model_main([vfile, *SECTION, '--comp', 'as-is', '-w', '5', '-fault', str(fault),
+                          '--s-max', '1500',
                           *FAST, '--nodisplay', '--noverbose', '--outdir', str(tmp_path / 'out')])
     sec = obj.sections[0]
     assert sec.fault_how.startswith('where the profile crosses')

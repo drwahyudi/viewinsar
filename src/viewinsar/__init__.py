@@ -6,7 +6,7 @@ from ``mintpy.tsview``. What it adds is the swath itself - a flat-capped buffer
 around the drawn line, linear referencing of every pixel inside it, and a 2-D
 point-density profile with the density-weighted median and quartiles. And
 ``viewinsar stat``: block statistics in pairs of circles on both sides of a
-line drawn along a fault, or their difference (-rate); ``viewinsar tseries``:
+line drawn along a fault, or their difference (--rate); ``viewinsar tseries``:
 LiCSBAS_plot_ts.py for LiCSBAS and MintPy time series, with the median of a
 circle at every date; ``viewinsar model``: the slip rate and locking depth of
 an elastic dislocation (and shallow creep) fitted to a profile across a fault
@@ -19,7 +19,7 @@ pulled in when the viewer is used, so ``viewinsar.swath`` stays importable with
 numpy alone.
 """
 
-__version__ = '0.4.1'
+__version__ = '0.5.0'
 __author__ = 'Donny Wahyudi'
 __license__ = 'GPL-3.0-or-later'
 

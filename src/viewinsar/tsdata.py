@@ -126,7 +126,7 @@ class TimeSeries:
     """
 
     def __init__(self, fname, mask_file=None, vel_file=None, results_dir=None,
-                 verbose=True):
+                 verbose=True, scale=None):
         import h5py
 
         self.fname, self.verbose = fname, verbose
@@ -155,6 +155,25 @@ class TimeSeries:
         if vel_file:
             self.vel = self._read_velocity(vel_file)
             self.vel_source = vel_file
+        self._scale(scale)
+
+    def _scale(self, scale):
+        """--data-scale (or a rule of viewinsar.ini): every value x the factor."""
+        from .settings import config_scale, wavelength_note
+
+        if scale is not None:
+            self.scale, why = float(scale), '--data-scale'
+        else:
+            self.scale, why = config_scale(self.fname, self.atr)
+        note = wavelength_note(self.fname, self.atr)
+        if note:
+            print(note)
+        if self.scale != 1.0:
+            self.to_mm *= self.scale
+            if self.vel is not None:
+                self.vel = self.vel * self.scale
+            print(f'{os.path.basename(self.fname)}: its values x {self.scale:g} ({why}) - the '
+                  'map and every time series')
 
     def vprint(self, *args):
         if self.verbose:

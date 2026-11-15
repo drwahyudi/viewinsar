@@ -32,7 +32,30 @@ jobs:
       - name: run the core tests
         run: pytest tests/test_swath.py -v
 
-  # The viewer needs the full MintPy stack; conda-forge is the reliable source.
+  # The plain install: no MintPy - viewinsar reads the files and draws the map
+  # itself. rasterio for the GeoTIFF tests.
+  lean:
+    name: lean (no MintPy) / py${{ matrix.python }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.9', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --upgrade pip
+      - name: install viewinsar and its few dependencies
+        run: pip install -e ".[test,raster]"
+      - name: run the whole suite, without MintPy
+        env:
+          MPLBACKEND: Agg
+        run: pytest tests/ -v
+
+  # With MintPy, the map is view.py's; conda-forge is the reliable source.
   full:
     name: full / py${{ matrix.python }}
     runs-on: ubuntu-latest

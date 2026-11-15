@@ -196,7 +196,7 @@ def test_dem_without_a_file_parses(velocity_file, args, dem, topo):
 def test_dem_file_is_still_view_pys_and_feeds_topoxsect(velocity_file, dem_file):
     inps = cli.cmd_line_parse([velocity_file, '-d', dem_file, '--topoxsect', '--noverbose'])
     assert inps.dem_file == dem_file and inps.topoxsect == dem_file
-    assert inps.view_extra[-2:] == ['-d', dem_file]
+    assert inps.view_extra[-2:] == ['--dem', dem_file]          # view.py's spelling too
 
 
 def test_bad_dem_options(velocity_file):

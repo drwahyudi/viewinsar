@@ -32,3 +32,6 @@ model_*.csv
 model_*_params.txt
 model_*.png
 model_*.svg
+# Claude Code: personal notes and settings, never committed
+CLAUDE.local.md
+.claude/settings.local.json

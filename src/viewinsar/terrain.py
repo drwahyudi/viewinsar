@@ -35,7 +35,7 @@ __all__ = ['TERRARIUM_URL', 'ATTRIBUTION', 'AUTO_DEM', 'is_auto', 'terrain_dem',
            'choose_zoom', 'lonlat_to_tile', 'decode_terrarium', 'tile_resolution',
            'cache_dir', 'terrain_dem_radar']
 
-AUTO_DEM = 'auto'                            # -d / --topoxsect given without a file
+AUTO_DEM = 'auto'                            # --dem / --topoxsect given without a file
 TERRARIUM_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'
 ATTRIBUTION = ('Terrain Tiles (Mapzen/Tilezen, AWS Open Data): SRTM, GMTED2010 and ETOPO1 '
                'courtesy of the U.S. Geological Survey and NOAA, and others - '
@@ -50,7 +50,7 @@ MAX_SIDE = 8000                              # pixels per side of the re-gridded
 
 
 def is_auto(value):
-    """Was -d / --topoxsect given without a file (or as 'auto')?"""
+    """Was --dem / --topoxsect given without a file (or as 'auto')?"""
     return isinstance(value, str) and value.strip().lower() == AUTO_DEM
 
 
@@ -170,7 +170,7 @@ def mosaic_tiles(zoom, tx0, tx1, ty0, ty1, fetch=None, workers=8, verbose=True):
                 print(f'   ... {done}/{len(jobs)} tiles')
     if failed and len(failed) == len(jobs):
         raise RuntimeError(f'could not download any Terrain Tile ({failed[0]}). Is there '
-                           'internet access (or HTTPS_PROXY)? A DEM file works too: -d dem.tif')
+                           'internet access (or HTTPS_PROXY)? A DEM file works too: --dem dem.tif')
     if failed and verbose:
         print(f'   WARNING: {len(failed)} of {len(jobs)} tiles failed ({failed[0]}); '
               'those areas are left empty.')

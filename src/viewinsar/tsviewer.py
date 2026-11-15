@@ -5,11 +5,11 @@ series.
 Two windows, as in LiCSBAS. The map: the velocity (or a noise index, or the
 cumulative displacement at the date of the slider), relative to the
 reference area. The time series of the selected point, with LiCSBAS's four
-fit models. And circles: with -r KM a double click takes every pixel within
+fit models. And circles: with --radius KM a double click takes every pixel within
 that radius, and each date shows their median, with the 25th - 75th
 percentiles as an error bar.
 
-    left double click   the time series there (of the circle, with -r)
+    left double click   the time series there (of the circle, with --radius)
     right drag          a new reference area
     "e"                 export the time series (.csv), its figure and the map
 """
@@ -36,7 +36,7 @@ from .tsdata import (
     relative_series,
     series_stats,
 )
-from .viewer import _new_figure
+from .viewer import _new_figure, per_file
 
 __all__ = ['TimeSeriesViewer', 'get_cmap']
 
@@ -118,7 +118,8 @@ class TimeSeriesViewer:
         if not self.disp_fig:
             plt.switch_backend('Agg')
         ts = self.ts = TimeSeries(self.file, mask_file=self.mask_file, vel_file=self.vel_file,
-                                  results_dir=self.results_dir, verbose=self.print_msg)
+                                  results_dir=self.results_dir, verbose=self.print_msg,
+                                  scale=per_file(getattr(self, 'data_scale', None), 0))
         self.vprint(f'{ts.kind} time series {self.file}: {ts.n_date} dates '
                     f'{ts.dates[0]} - {ts.dates[-1]}, {ts.length} x {ts.width} pixels')
         if self.file2:
@@ -169,7 +170,8 @@ class TimeSeriesViewer:
     def open_second(self):
         """--i2: a second time series on the same grid (LiCSBAS: cum.h5 beside
         cum_filt.h5), drawn in red, matched date by date."""
-        ts2 = TimeSeries(self.file2, results_dir=self.results_dir, verbose=False)
+        ts2 = TimeSeries(self.file2, results_dir=self.results_dir, verbose=False,
+                         scale=per_file(getattr(self, 'data_scale', None), 1))
         if (ts2.length, ts2.width) != (self.ts.length, self.ts.width):
             print(f'WARNING: --i2 {self.file2} is {ts2.length} x {ts2.width}, '
                   f'{self.file} {self.ts.length} x {self.ts.width} --> not used')
@@ -225,7 +227,7 @@ class TimeSeriesViewer:
             row, col = int(round(rows[0])), int(round(cols[0]))
         else:
             raise ValueError('radar-coded data without geometryRadar.h5 (--lookup): '
-                             'give the pixel instead (--yx Y X, -p X/Y)')
+                             'give the pixel instead (--yx Y X, --point X/Y)')
         return self._inside(row, col, f'{lat}, {lon}')
 
     def _lonlat_to_grid(self, lat, lon):
@@ -265,7 +267,7 @@ class TimeSeriesViewer:
             return self.lalo2yx(*self.lalo)
         if self.point_xy:
             return self._inside(self.point_xy[1], self.point_xy[0],
-                                f'-p {self.point_xy[0]}/{self.point_xy[1]}')
+                                f'--point {self.point_xy[0]}/{self.point_xy[1]}')
         if self.point_geo:
             return self.lalo2yx(self.point_geo[1], self.point_geo[0])
         x1, x2, y1, y2 = self.ref                      # LiCSBAS: the reference area's centre

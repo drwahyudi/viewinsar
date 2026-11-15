@@ -35,7 +35,7 @@ INK = '#222222'             # text, and the mean / mode strikes
 MODE_STYLE = (0, (1, 1.3))  # dotted
 STRIKE = 0.45               # half length of a strike, as a fraction of the violin width
 RATE_COLORS = ('#d62728', '#1f77b4', '#2ca02c', '#ff7f0e', '#9467bd', '#8c564b', '#e377c2',
-               '#17becf')            # one per file in the -rate plot (red, blue ...)
+               '#17becf')            # one per file in the --rate plot (red, blue ...)
 ROBUST = 1.349                      # interquartile range / standard deviation (normal)
 
 
@@ -46,7 +46,7 @@ class StatViewer(swathProfileViewer):
         from viewinsar.cli import get_view_cmd, stat_cmd_line_parse
         from viewinsar.statview import StatViewer
 
-        inps = stat_cmd_line_parse('geo_velocity.h5 -sp 5 -r 2'.split())
+        inps = stat_cmd_line_parse('geo_velocity.h5 --spacing 5 --radius 2'.split())
         obj = StatViewer(inps, get_view_cmd(inps))
         obj.open()
         obj.plot()
@@ -389,7 +389,7 @@ class StatViewer(swathProfileViewer):
         return
 
     def draw_stat(self):
-        """The violins (one panel per file), or with -rate the rates."""
+        """The violins (one panel per file), or with --rate the rates."""
         self.reset_stat_axes()
         if self.rate:
             self.draw_rate()

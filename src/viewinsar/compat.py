@@ -50,6 +50,90 @@ def have_mintpy():
     return _mintpy_importable()
 
 
+@functools.cache
+def _gdal_importable():
+    try:
+        from osgeo import gdal  # noqa: F401
+        return True
+    except Exception:            # noqa: BLE001
+        return False
+
+
+_GDAL_EXT = ('.tif', '.tiff', '.vrt', '.img', '.jp2', '.grd', '.nc', '.dem.wgs84')
+
+
+def _licsbas(fname):
+    """'h5' / 'raw' for LiCSBAS's own files (cum.h5, results/vel ...), else None."""
+    from .licsbas import kind_of
+    return kind_of(fname)[0]
+
+
+def mintpy_reads(fname):
+    """Read this file with MintPy? Not LiCSBAS's own files (MintPy knows
+    neither their grid nor their unit), nor a GeoTIFF (or another GDAL raster)
+    when MintPy has no GDAL to read it with: rasterio does it then."""
+    if not have_mintpy() or _licsbas(fname):
+        return False
+    return not (str(fname).lower().endswith(_GDAL_EXT) and not _gdal_importable())
+
+
+def is_unitless(unit):
+    """No unit: missing, '1' (MintPy's for a GeoTIFF without one) or 'none'."""
+    return str(unit or '').strip().lower() in ('', '1', 'none')
+
+
+_UNIT_RE = re.compile(r'^(mm|cm|dm|m|km)(/(yr|year|y|a))?$')
+
+
+_LENGTH_M = {'mm': 1e-3, 'cm': 1e-2, 'dm': 1e-1, 'm': 1.0, 'km': 1e3}
+
+
+def unit_ratio(unit, other):
+    """How many `other` one `unit` makes - mm/year in m/year: 0.001 - or None
+    when the two do not convert (radian, another time base ...)."""
+    def split(text):
+        head, _, tail = str(text).strip().lower().replace(' ', '').partition('/')
+        return head, ('year' if tail in ('yr', 'year', 'y', 'a') else tail)
+    (h1, t1), (h2, t2) = split(unit), split(other)
+    if t1 != t2 or h1 not in _LENGTH_M or h2 not in _LENGTH_M:
+        return None
+    return _LENGTH_M[h1] / _LENGTH_M[h2]
+
+
+def guess_velocity_unit(values):
+    """(unit, p99) of a velocity map that says no unit, from its numbers: in
+    m/yr nearly every pixel of a deformation map is below 1 (1 m/yr is
+    extreme), in mm/yr the noise alone exceeds 1 - so p99 of |v| below 1 is
+    m/year, else mm/year. (None, None) without a finite, non-zero value."""
+    v = np.abs(np.asarray(values, dtype=np.float64).ravel())
+    v = v[np.isfinite(v) & (v > 0)]
+    if not v.size:
+        return None, None
+    if v.size > 2_000_000:
+        v = v[::v.size // 1_000_000]
+    p99 = float(np.percentile(v, 99))
+    return ('m/year' if p99 < 1.0 else 'mm/year'), p99
+
+
+def velocity_name(fname, dset=None):
+    """Does the file (or dataset) name say it is a velocity - vel*, *velocity*, rate?"""
+    names = [os.path.basename(str(fname)).lower(), str(dset or '').lower()]
+    tokens = {t for name in names for t in re.split(r'[^a-z0-9]+', name) if t}
+    return any(t.startswith('vel') or 'velocity' in t or t in ('rate', 'rates', 'vlos')
+               for t in tokens)
+
+
+def normalise_unit(unit):
+    """mm/yr, cm/a, m ... in MintPy's spelling (mm/year, cm/year, m); radian."""
+    text = str(unit).strip().lower().replace(' ', '')
+    if text in ('rad', 'radian', 'radians'):
+        return 'radian'
+    match = _UNIT_RE.match(text)
+    if not match:
+        raise ValueError(f'unknown unit {unit!r}: use mm/yr, cm/yr, m/yr, mm, cm, m or radian')
+    return match.group(1) + ('/year' if match.group(2) else '')
+
+
 ##############################################################################
 #                                  reading                                   #
 ##############################################################################
@@ -134,7 +218,10 @@ def _roipac_attrs(fname):
 
 def read_attribute(fname, datasetName=None):
     """The metadata of a file, in MintPy's terms (LENGTH, WIDTH, X_FIRST ...)."""
-    if have_mintpy():
+    if _licsbas(fname):
+        from . import licsbas
+        return licsbas.attributes(fname, datasetName)
+    if mintpy_reads(fname):
         from mintpy.utils import readfile
         return dict(readfile.read_attribute(fname, datasetName=datasetName))
     if not os.path.isfile(fname) and not os.path.isdir(fname):
@@ -208,7 +295,10 @@ def _pick_dataset(fid, datasetName, atr):
 
 def read(fname, datasetName=None, box=None, print_msg=False):
     """(data, metadata) of one 2D slice of a file; box = (x0, y0, x1, y1)."""
-    if have_mintpy():
+    if _licsbas(fname):
+        from . import licsbas
+        return licsbas.read(fname, datasetName=datasetName, box=box)
+    if mintpy_reads(fname):
         from mintpy.utils import readfile
         data, atr = readfile.read(fname, datasetName=datasetName, box=box,
                                   print_msg=print_msg)
@@ -238,7 +328,10 @@ def read(fname, datasetName=None, box=None, print_msg=False):
 
 def get_slice_list(fname):
     """The names of the 2D slices of a file: velocity, timeseries-20200101 ..."""
-    if have_mintpy():
+    if _licsbas(fname):
+        from . import licsbas
+        return licsbas.slices(fname)
+    if mintpy_reads(fname):
         from mintpy.utils import readfile
         return list(readfile.get_slice_list(fname))
     if not _is_hdf5(fname):
@@ -432,7 +525,12 @@ def read_mask(fname, mask_file=None, datasetName=None, box=None, print_msg=False
     """The mask of a data file, as view.py finds it: maskTempCoh.h5 (or
     maskResInv.h5) beside a velocity / time series, -m FILE, or none (-m no).
     Returns (bool mask or None, mask file)."""
-    if have_mintpy():
+    if _licsbas(fname) and not mask_file and 'msk' not in os.path.basename(fname):
+        from .licsbas import mask_for
+        mask_file = mask_for(fname)              # LiCSBAS's results/mask, as LiCSBAS
+        if not mask_file:
+            return None, None
+    if mintpy_reads(fname) and (not mask_file or mintpy_reads(mask_file)):
         from mintpy.utils import plot as pp
         return pp.read_mask(fname, mask_file=mask_file, datasetName=datasetName, box=box,
                             print_msg=print_msg)

@@ -536,7 +536,7 @@ def test_help_and_top_level(capsys):
     with pytest.raises(SystemExit):
         cli.main(['tseries', '--help'])
     out = capsys.readouterr().out
-    for needle in ('-r KM', 'median', '25th', '--ref X1:X2/Y1:Y2', '--p-geo', '--i2',
+    for needle in ('--radius KM', 'median', '25th', '--ref X1:X2/Y1:Y2', '--p-geo', '--i2',
                    'cum_filt.h5', 'timeseries', 'HDF-EOS5', 'right drag'):
         assert needle in out, needle
 

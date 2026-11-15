@@ -4,6 +4,122 @@ All notable changes to viewinsar are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.5.0] - 2026-11-14
+
+0.4.3 was built but never released; its changes are part of this one.
+
+### Changed
+- **Every option is written `--long`**, one spelling each: `--fault`, `--gnss`,
+  `--vel`, `--dem`, `--width`, `--nlook`, `--topoxsect`, `--profile`, `--svg`,
+  `--save`, `--outfile`; `stat`: `--spacing`, `--radius`, `--rate`; `tseries`:
+  `--radius`, `--ref-date`, `--point`, `--colormap`, `--unit`; `list`: `--num`.
+  The spellings of before (`-fault`, `-gnss`, `-vel`, `--gnss-comp`, `-d`,
+  `-w`, `--buffer`, `-nlook`, `-topoxsect`, `--topo`, `-profile`, `-svg`,
+  `-save`, `-o`, `-sp`, `-r`, `-rate`, `-m`, `-p`, `-c`, `-u`, `-n`) still
+  work, with a note that names the new ones. view.py's own options (`-v`,
+  `-u`, `-c`, `-m` ... for the map) are view.py's and pass as they are; the
+  help and the README write them long (`--vlim`, `--unit`, `--colormap`,
+  `--mask`).
+- `tseries --vel FILE` is `--vel-file FILE`, so that `--vel` means one thing
+  (the GNSS component of `swath` and `model`); `--vel` still works there.
+- `model --comp auto` fitting LOS data as they are takes the GNSS in the LOS
+  (`--vel los`) without being told, or the component a file is named as
+  (`up` -> `vu`, `east` -> `ve` ...), and writes the rates as "slip rate in
+  the LOS", "strain rate in the LOS" - what the LOS sees of them.
+
+### Added
+- **`--geom FOLDER`**: a folder is searched, with its subfolders, for the line
+  of sight - LiCSBAS's `GEOCml*/` (E.geo, N.geo, U.geo), E / N / U GeoTIFFs
+  under any of their usual names (`{frame}.geo.E.tif`, `E.geo.tif`, `E.tif`,
+  `*_e.tif`, `*_east.tif`), incidence + azimuth GeoTIFF pairs
+  (`incidenceAngle.tif` + `azimuthAngle.tif`, `inc.tif` + `az.tif` ...) and
+  MintPy's geometry file - and the first that covers the data is taken. The
+  interferogram folders of LiCSBAS's `GEOC/` are skipped. `--geom` the LiCSBAS
+  work folder, or a folder of geometry GeoTIFFs, and `model --comp auto` turns
+  the LOS into fault-parallel velocity.
+- **`--data-scale FACTOR`** (swath, stat, model, tseries): multiplies the data
+  before anything - the map, the profiles, the fit, the statistics, the time
+  series - one factor per file, or one for all; `0.1` for a product 10x too
+  large.
+- **Your own defaults, `~/.config/viewinsar/viewinsar.ini`**: `[data-scale]
+  ALOS-2 = 0.1` scales every file of a mission (told by its `PLATFORM`, or by
+  its name and folders), `*/path/pattern*.h5 = 0.1` every file whose path
+  matches. Every run says when a rule applies; `--data-scale` comes first.
+- A note when a file's `WAVELENGTH` is not its mission's (ALOS-2 0.238 m,
+  Sentinel-1 0.0555 m): a displacement computed with it is wrong by the same
+  ratio.
+- **A velocity that says no unit gets one from its numbers.** A GeoTIFF
+  (or any file) without a unit, used as a velocity - in `model`, with
+  `--gnss`, or named `vel*` - is read in m/yr when 99% of its values are
+  below 1 and in mm/yr otherwise, and is then shown in mm/yr, like the
+  GNSS. The console says what it chose and why; `--data-unit` overrides it.
+  Before, such a file stayed unitless ('1'): the GNSS were compared with it
+  unconverted and the model was fitted "not a velocity", with a slip-rate
+  bound of +/-4.
+- **Nominal line-of-sight angles from the file's name**, as a last resort
+  when no geometry is found: a name (or folder, or `ORBIT_DIRECTION`) that
+  says the orbit - `asc`, `desc`, `scansardesc`, LiCSAR's `105D_...`,
+  `T125A` - gives the heading of a sun-synchronous orbit at the scene's
+  latitude and a mid-swath incidence (Sentinel-1 IW 37.5 deg, ALOS-2 38
+  deg), right-looking. They put the GNSS in the LOS (swath and model), with
+  a note that they are approximate; they never turn the InSAR into
+  fault-parallel velocity: `--comp auto` then fits the LOS as it is, and
+  `--comp los` asks for `--geom` or `--los-inc` / `--los-az`.
+- MintPy's geometry file is also looked for in `mintpy/inputs/`,
+  `mintpy/geo/` and one or two folders up.
+
+### Fixed
+- `-u` / `--unit` with a file whose unit viewinsar supplies (`--data-unit`,
+  LiCSBAS, the guess): the map stayed in the file's numbers while the
+  profiles were converted.
+
+## [0.4.2] - 2026-11-14
+
+### Added
+- **LiCSBAS and LiCSAR without typing the look angles.** The line of sight of
+  every pixel comes from LiCSBAS's `GEOCml*/E.geo`, `N.geo`, `U.geo` (with
+  `EQA.dem_par`) - found by itself for a file anywhere under `TS_GEOCml*/`,
+  e.g. `TS_GEOCml10GACOS/results/vel.filt.mskd.geo.tif` → `GEOCml10GACOS/` -
+  or from LiCSAR's `{frame}.geo.E.tif`, `.N.tif`, `.U.tif`, as well as from
+  MintPy's geometry file. `--geom` takes any of them (or the `GEOCml*`
+  folder), one per input file, for `model --comp los` and `swath -vel los`.
+- **LiCSBAS's own files open directly** in swath, stat and model, as MintPy
+  files and GeoTIFFs do: `TS_GEOCml*/cum_filt.h5` / `cum.h5` (the velocity
+  `vel` by default, `--dset cum-YYYYMMDD` an epoch, `viewinsar list` the
+  rest) and the float32 files of `results/` (`vel`, `vel.filt.mskd`, `vstd`
+  ...) on the grid of `GEOCml*/EQA.dem_par` - in mm/yr (mm for `cum`), with
+  LiCSBAS's `results/mask`, and the line of sight of every pixel from
+  `GEOCml*/E.geo`, `N.geo`, `U.geo`.
+- **The unit of a LiCSBAS velocity**: `vel*` and `vstd*` in a LiCSBAS folder
+  are read in mm/yr - the GeoTIFFs say nothing - so the slip rate is in
+  mm/yr and the strain rate in µstrain/yr.
+- **`--data-unit UNIT`** (swath, stat, model): the unit the input files are
+  really in - for a file that does not say it, or says a wrong one (values
+  in mm/yr labelled m/year or cm/year). The map, its colour range, the
+  profiles, the fit and the comparison with the GNSS all follow; the console
+  says which unit each file is read in.
+- **`model --comp auto`, the new default**: a LOS velocity whose line of sight
+  is known becomes fault-parallel velocity, pixel by pixel; without one (or
+  for a file named as a component - hz, up, east, ve ...) the data are
+  fitted as they are. The run says which.
+- `--los-inc` / `--los-az` take one value per input file (ascending and
+  descending in one run).
+
+### Changed
+- **The parameters on the fit are written as Hussain et al. (2016)**:
+  `slip rate = 20.3 mm/yr (18.4 – 34.0, 95% CI), right-lateral`, `locking depth
+  = 12.7 km (…)`, creep rate, creep depth, and `strain rate` in µstrain/yr -
+  the slip rate as a rate with its sense. A velocity axis without a unit no
+  longer reads "[1]".
+- With MintPy but without GDAL, GeoTIFFs are read with rasterio (and drawn on
+  viewinsar's own map) instead of failing.
+
+### Fixed
+- The map now follows the UNIT a file says, as the profiles always did:
+  view.py takes any `velocity` dataset as m/year whatever its UNIT, so a
+  velocity labelled mm/year or cm/year was drawn 1000x or 100x too large on
+  the map.
+
 ## [0.4.1] - 2026-11-13
 
 ### Added
