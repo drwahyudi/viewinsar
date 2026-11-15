@@ -15,7 +15,7 @@ import re
 import sys
 
 from . import __version__
-from .terrain import AUTO_DEM, is_auto
+from .terrain import AUTO_DEM, DEM_SOURCES, is_auto
 
 PROG = 'viewinsar'
 
@@ -46,8 +46,8 @@ Optional: an elevation profile under the LOS panel (--topoxsect), fault traces
 from any vector file on the map, marked on every section that crosses them
 (--fault), oversampling for coarse data (--nlook), vector output (--svg).
 
-No DEM at hand? --dem and --topoxsect without a file download one for the map
-extent from the Terrain Tiles (the "Mapzen Global Terrain" of QGIS).
+No DEM at hand? --dem and --topoxsect without a file download the Copernicus
+GLO-30 DEM (1", ~30 m) for the map extent.
 
 Radar-coded data (no geocoding) work too: MintPy's geometryRadar.h5, found
 next to the data or given with --lookup, supplies the DEM (its height) and
@@ -94,13 +94,14 @@ examples:
   viewinsar swath geo_velocity.h5 --topoxsect srtm1.dem
   viewinsar swath geo_velocity.h5 --topoxsect dem_utm.tif --nlook 4
 
-  # no DEM file: download one for the map extent (Terrain Tiles, cached) and use
-  # it for the shaded-relief map AND the elevation profile - or the profile only
+  # no DEM file: download the Copernicus GLO-30 DEM for the map extent (cached)
+  # and use it for the shaded-relief map AND the elevation profile - or the
+  # profile only
   viewinsar swath geo_velocity.h5 --dem --topoxsect
   viewinsar swath geo_velocity.h5 --topoxsect
-  # finer tiles for a small area (zoom 13 ~ 19 m)
-  viewinsar swath geo_velocity.h5 --dem --topoxsect --dem-zoom 13 \\
-      --sub-lat -1.6 -1.2 --sub-lon 119.9 120.4
+  # the Terrain Tiles ("Mapzen Global Terrain" of QGIS) instead, zoom 13 ~ 19 m
+  viewinsar swath geo_velocity.h5 --dem --topoxsect --dem-source terrain \\
+      --dem-zoom 13 --sub-lat -1.6 -1.2 --sub-lon 119.9 120.4
   # your own DEM for both: --dem names it once, --topoxsect alone re-uses it
   viewinsar swath geo_velocity.h5 --dem srtm1.dem --topoxsect
 
@@ -179,13 +180,21 @@ map options:
   Run `view.py -h` for the full list.
 
 downloaded DEM:
-  Terrain Tiles on AWS Open Data, terrarium PNG tiles in Web Mercator:
+  --dem-source cop30 (the default): the Copernicus DEM GLO-30 on AWS Open Data,
+  1" (~30 m), heights above the EGM2008 geoid, one Cloud Optimized GeoTIFF per
+  1 x 1 deg cell: https://copernicus-dem-30m.s3.amazonaws.com/
+  Only the parts over the map are read, by byte range - no GDAL needed. The
+  elevation profile gets 1" pixels up to 8000 a side (a map of ~2.2 deg), the
+  map background up to 3000 (~0.8 deg); a bigger map gets wider pixels, read
+  from the tiles' own overviews. The sea has no tiles: 0 m there.
+  --dem-source terrain: the Terrain Tiles ("Mapzen Global Terrain" of QGIS),
+  terrarium PNG tiles in Web Mercator - SRTM, GMTED2010 and ETOPO1 (bathymetry);
+  the fallback when GLO-30 cannot be had and no source was named:
   https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png
-  SRTM, GMTED2010 and ETOPO1 (bathymetry) worldwide, finer national DEMs where
-  available; please cite them - the attribution is printed and written to
-  _info.txt. The tiles over the map are mosaicked, re-gridded onto the data's
-  CRS and saved as a MintPy geometry .h5 (height, m) in ~/.cache/viewinsar,
-  re-used by later runs. Needs internet access (HTTPS_PROXY is honoured).
+  Either way, please cite them: the attribution is printed and written to _info.txt.
+  The download is re-gridded onto the data's CRS and saved as a MintPy geometry
+  .h5 (height, m) in ~/.cache/viewinsar, re-used by later runs. Needs internet
+  access (HTTPS_PROXY is honoured).
 
 radar-coded data:
   view.py draws them in pixel rows / columns (flipped left-right for a
@@ -195,8 +204,8 @@ radar-coded data:
   current folder, or named with --lookup:
     --dem, --topoxsect (no file)   its height: the DEM of your own processing,
                                 already on the radar grid - nothing downloaded
-                                (only if it has none, Terrain Tiles resampled
-                                onto the radar grid through its lat/lon)
+                                (only if it has none, GLO-30 resampled onto
+                                the radar grid through its lat/lon)
     --topoxsect dem.tif         a geocoded DEM, reached through its lat/lon
     --fault faults.shp          traces mapped from lon/lat to radar pixels;
                                 _info.txt gives each crossing's row/col and
@@ -398,19 +407,19 @@ def create_swath_parser(prog=f'{PROG} swath'):
                       'the LOS panel - from a DEM file, or downloaded for the map extent')
     topo.add_argument('--dem', dest='dem_file', nargs='?', const=AUTO_DEM, metavar='DEM',
                       help='DEM for the shaded-relief background of the map, as in\n'
-                           'view.py. WITHOUT a file, it is downloaded for the map\n'
-                           'extent from the Terrain Tiles (AWS Open Data - the\n'
-                           '"Mapzen Global Terrain" layer of QGIS) and cached in\n'
-                           '~/.cache/viewinsar ($VIEWINSAR_CACHE), so a second run\n'
-                           'downloads nothing. On RADAR-coded data it is the height\n'
-                           'of geometryRadar.h5 instead (see --lookup). --topoxsect\n'
-                           'without a file uses the same DEM.')
+                           'view.py. WITHOUT a file, the Copernicus GLO-30 DEM (1",\n'
+                           '~30 m, AWS Open Data) is downloaded for the map extent\n'
+                           '(see --dem-source) and cached in ~/.cache/viewinsar\n'
+                           '($VIEWINSAR_CACHE), so a second run downloads nothing.\n'
+                           'On RADAR-coded data it is the height of geometryRadar.h5\n'
+                           'instead (see --lookup). --topoxsect without a file uses\n'
+                           'the same download.')
     topo.add_argument('--topoxsect', dest='topoxsect', nargs='?',
                       const=AUTO_DEM, metavar='DEM',
                       help='DEM to profile along the SAME swath, drawn as a black\n'
                            'median line in a panel under the LOS profile, sharing\n'
                            'its distance axis. WITHOUT a file: the --dem DEM, or the\n'
-                           'Terrain Tiles download if --dem names no file. Any format\n'
+                           'GLO-30 download if --dem names no file. Any format\n'
                            '(MintPy .h5, GeoTIFF, .dem + .rsc, any GDAL raster) and\n'
                            'any CRS - read from the file itself; the line is\n'
                            're-projected when the DEM and the data differ. On\n'
@@ -421,11 +430,13 @@ def create_swath_parser(prog=f'{PROG} swath'):
                            'past ~4 million samples per section). A section that\n'
                            'gets no topography says why in its panel. Written to\n'
                            '_stats.csv as elevation_median_m, the exact median.')
+    add_dem_source(topo)
     topo.add_argument('--dem-zoom', dest='dem_zoom', type=int, metavar='Z',
-                      help='zoom level of the downloaded tiles, 0-15 (default: auto,\n'
-                           'the finest that keeps the download within ~300 tiles,\n'
-                           'at most 12). Ground pixel ~ 156 km / 2**Z at the equator:\n'
-                           '10 ~ 150 m, 12 ~ 38 m, 13 ~ 19 m.')
+                      help='--dem-source terrain only: zoom level of the Terrain\n'
+                           'Tiles, 0-15 (default: auto, the finest that keeps the\n'
+                           'download within ~300 tiles, at most 12). Ground pixel\n'
+                           '~ 156 km / 2**Z at the equator: 10 ~ 150 m, 12 ~ 38 m,\n'
+                           '13 ~ 19 m.')
     topo.add_argument('--lookup', dest='lookup_file', metavar='FILE',
                       help='RADAR-coded data only: MintPy geometry file on the same\n'
                            'grid - geometryRadar.h5, with latitude / longitude /\n'
@@ -761,8 +772,20 @@ def make_folder(folder, option='--save'):
     return folder
 
 
+def add_dem_source(group):
+    """--dem-source: where --dem / --topoxsect without a file download from."""
+    group.add_argument('--dem-source', dest='dem_source', type=str.lower, choices=DEM_SOURCES,
+                       metavar='SOURCE',
+                       help='where --dem / --topoxsect without a file download from:\n'
+                            'cop30 - the Copernicus GLO-30 DEM, 1" (~30 m), the\n'
+                            'default; terrain - the Terrain Tiles ("Mapzen Global\n'
+                            'Terrain" of QGIS), also the fallback when GLO-30 cannot\n'
+                            'be had and no source is named.')
+
+
 def check_map_options(inps):
-    """--dem, --dem-zoom, --lookup and --fault - the same for swath and stat."""
+    """--dem, --dem-source, --dem-zoom, --lookup and --fault - the same for swath,
+    stat and model."""
     # --dem FILE stays view.py's background, exactly as before; --dem alone = download
     if is_auto(inps.dem_file):
         inps.dem_file = AUTO_DEM
@@ -772,6 +795,9 @@ def check_map_options(inps):
         inps.view_extra = list(inps.view_extra) + ['--dem', inps.dem_file]
     if inps.dem_zoom is not None and not 0 <= inps.dem_zoom <= 15:
         raise ValueError(f'--dem-zoom must be 0-15, got {inps.dem_zoom}')
+    if inps.dem_zoom is not None and getattr(inps, 'dem_source', None) != 'terrain':
+        print(f'NOTE: --dem-zoom {inps.dem_zoom} is for the Terrain Tiles (--dem-source '
+              'terrain); the Copernicus GLO-30 DEM comes at its own 1" (~30 m)')
     if inps.lookup_file and not os.path.isfile(inps.lookup_file):
         raise ValueError(f'--lookup: no such file: {inps.lookup_file}')
     if inps.fault_file:
@@ -1060,10 +1086,13 @@ def create_stat_parser(prog=f'{PROG} stat'):
     mapg = parser.add_argument_group('Map', 'the guides drawn on the map')
     mapg.add_argument('--dem', dest='dem_file', nargs='?', const=AUTO_DEM, metavar='DEM',
                       help='DEM for the shaded-relief background, as in view.py.\n'
-                           'Without a file: downloaded for the map (Terrain Tiles),\n'
-                           'or the height of geometryRadar.h5 on radar-coded data.')
+                           'Without a file: downloaded for the map (Copernicus\n'
+                           'GLO-30), or the height of geometryRadar.h5 on radar-coded\n'
+                           'data.')
+    add_dem_source(mapg)
     mapg.add_argument('--dem-zoom', dest='dem_zoom', type=int, metavar='Z',
-                      help='zoom of the downloaded tiles, 0-15 (default: auto).')
+                      help='zoom of the Terrain Tiles (--dem-source terrain), 0-15\n'
+                           '(default: auto).')
     mapg.add_argument('--lookup', dest='lookup_file', metavar='FILE',
                       help='radar-coded data: MintPy geometryRadar.h5 (default:\n'
                            'found in inputs/, ./ or ../inputs/ as MintPy does).')
@@ -1478,12 +1507,14 @@ def create_model_parser(prog=f'{PROG} model'):
     topo = parser.add_argument_group('Topography', 'the map background, an elevation panel')
     topo.add_argument('--dem', dest='dem_file', nargs='?', const=AUTO_DEM, metavar='DEM',
                       help='DEM for the shaded-relief map, as in view.py; without a\n'
-                           'file it is downloaded (Terrain Tiles), as in swath.')
+                           'file it is downloaded (Copernicus GLO-30), as in swath.')
     topo.add_argument('--topoxsect', dest='topoxsect', nargs='?',
                       const=AUTO_DEM, metavar='DEM',
                       help='an elevation panel under the fit (as in swath).')
+    add_dem_source(topo)
     topo.add_argument('--dem-zoom', dest='dem_zoom', type=int, metavar='Z',
-                      help='zoom of the downloaded tiles, 0-15 (default: auto).')
+                      help='zoom of the Terrain Tiles (--dem-source terrain), 0-15\n'
+                           '(default: auto).')
     topo.add_argument('--lookup', dest='lookup_file', metavar='FILE',
                       help='radar-coded data: MintPy geometryRadar.h5 (default:\n'
                            'found in inputs/, ./ or ../inputs/ as MintPy does).')
@@ -1970,8 +2001,8 @@ swath - swath (buffered) profiles
                 --cmin / --cmax / --pcmap, --x-offset, --keep-zero, --decimate,
                 --nlook N (oversample a coarse raster so the swath fills in)
   elevation     --topoxsect [DEM] a profile under the data, --dem [DEM] shaded relief
-                on the map - either without a file downloads Terrain Tiles
-                (--dem-zoom); radar-coded data take the height of geometryRadar.h5
+                on the map - either without a file downloads Copernicus GLO-30
+                (--dem-source); radar-coded data take the height of geometryRadar.h5
   faults        --fault FILE ... (.shp .geojson .gpkg .kml .gmt, any CRS): on the map,
                 and a dashed line where a section crosses one (--fault-label,
                 --fault-color, --fault-lw)

@@ -45,7 +45,17 @@ from .raster import (
     same_crs,
 )
 from .swath import is_projected, line_geometry, project_points, swath_density, swath_extract
-from .terrain import ATTRIBUTION, is_auto, terrain_dem, terrain_dem_radar
+from .terrain import (
+    ATTRIBUTION,
+    COP30_ATTRIBUTION,
+    MAP_SIDE,
+    MAX_SIDE,
+    copernicus_dem,
+    copernicus_dem_radar,
+    is_auto,
+    terrain_dem,
+    terrain_dem_radar,
+)
 
 __all__ = ['swathProfileViewer', 'Section', 'topo_sampling']
 
@@ -110,9 +120,20 @@ def file_labels(files):
     return names
 
 
-# several GNSS components on one profile (--vel ve vn vu los): face, edge
-GNSS_STYLE = {'los': ('k', 'w'), 've': ('#e7298a', 'k'), 'vn': ('#ff7f00', 'k'),
-              'vu': ('w', 'k')}
+# several GNSS components on one profile (--vel ve vn vu los): the face colour
+GNSS_STYLE = {'los': 'k', 've': '#e7298a', 'vn': '#ff7f00', 'vu': '#1f78b4'}
+# every GNSS marker on a profile has a white edge, every error bar a white halo:
+# they stand out on the data drawn behind them (swath and model alike)
+GNSS_EDGE = {'mec': 'w', 'mew': 1.4}
+GNSS_HALO = 3.2                                  # points: the width of the halo
+
+
+def white_halo(container, width=GNSS_HALO):
+    """A white outline under the error bars and caps of an errorbar() result."""
+    effect = [patheffects.withStroke(linewidth=width, foreground='w')]
+    for artist in [*container[1], *container[2]]:
+        artist.set_path_effects(effect)
+    return container
 
 
 def velocity_factor(from_unit, to_unit):
@@ -608,8 +629,8 @@ class Section:
             ok = np.isfinite(y)
             if not ok.any():
                 continue
-            face, edge = GNSS_STYLE.get(comp, ('k', 'w')) if several else ('k', 'w')
-            line = face if face != 'w' else '0.15'
+            face = GNSS_STYLE.get(comp, 'k') if several else 'k'
+            line = face
             # several: circles first, so that each entry of the legend is a circle
             sets = (((False, 'o'), (True, '^')) if several else ((True, '^'), (False, 'o')))
             labelled = False
@@ -621,14 +642,15 @@ class Section:
                     label, labelled = (f'GNSS {comp}' if not labelled else '_nolegend_'), True
                 else:
                     label = 'GNSS (3D)' if is3d else 'GNSS (2D)'
-                ax.errorbar(x[sel], y[sel], yerr=one['sigma'][sel], fmt=marker, ms=8,
-                            color=line, mfc=face, mec=edge, mew=0.8, ecolor=line,
-                            elinewidth=1.4, capsize=4, capthick=1.4, zorder=9, label=label)
+                white_halo(ax.errorbar(x[sel], y[sel], yerr=one['sigma'][sel], fmt=marker,
+                                       ms=8, color=line, mfc=face, ecolor=line, elinewidth=1.4,
+                                       capsize=4, capthick=1.4, zorder=9, label=label,
+                                       **GNSS_EDGE))
             lows.append(float(np.nanmin(y[ok] - one['sigma'][ok])))
             highs.append(float(np.nanmax(y[ok] + one['sigma'][ok])))
         if several and gin['is3d'].any():          # after the components in the legend
-            ax.errorbar([], [], yerr=[], fmt='^', ms=8, color='0.4', mfc='0.7', mec='k',
-                        mew=0.8, label='3D station (2D: circle)')
+            ax.errorbar([], [], yerr=[], fmt='^', ms=8, color='0.4', mfc='0.4',
+                        label='3D station (2D: circle)', **GNSS_EDGE)
         if lows and not v.ylim:                      # keep every station in view
             lo, hi = ax.get_ylim()
             ylo, yhi = min(lows), max(highs)
@@ -815,8 +837,8 @@ class Section:
             if v.topoxsect:
                 fid.write(f'DEM            : {os.path.abspath(v.topoxsect)}'
                           f'  ({crs_name(v.topo_crs)})\n')
-                if v.dem_download and v.topoxsect == v.dem_download:
-                    fid.write(f'DEM source     : {ATTRIBUTION}\n')
+                if v.topoxsect in v.dem_sources:
+                    fid.write(f'DEM source     : {v.dem_sources[v.topoxsect]}\n')
                 if self.topo_error:
                     fid.write(f'DEM sampling   : none - {self.topo_error}\n')
                 else:
@@ -896,8 +918,10 @@ class swathProfileViewer:
         self.ts_obj = None
         self.topo_atr = None
         self.data_crs = self.topo_crs = None     # EPSG int or WKT, read from the files
-        self.dem_file = self.dem_zoom = None
-        self.dem_download = None                 # path of a downloaded (Terrain Tiles) DEM
+        self.dem_file = self.dem_zoom = self.dem_source = None
+        self.dem_download = None                 # path of the DEM downloaded (the profile's)
+        self.dem_sources = {}                    # downloaded DEM -> its attribution
+        self._cop30_failed = False
         self.lookup_file = self.lookup = None    # radar-coded data: geometryRadar.h5
         self.topo_mode = None                    # 'geo', 'grid' (radar, same grid), 'lookup'
         self.fault_atr = None                    # the "map" the fault traces are in
@@ -1198,46 +1222,82 @@ class swathProfileViewer:
     def init_terrain(self):
         """A DEM for --dem and/or --topoxsect given without a file.
 
-        Geocoded data: the Terrain Tiles over the map, downloaded. Radar-coded
-        data: the `height` of the geometry file - the DEM of the processing, on
-        the very grid of the data - or, if it has none, the Terrain Tiles
-        resampled onto the radar grid through its latitude / longitude.
+        Geocoded data: downloaded over the map - Copernicus GLO-30 (the default;
+        the Terrain Tiles when it cannot be had), or the Terrain Tiles with
+        --dem-source terrain. The elevation profile gets up to MAX_SIDE pixels a
+        side (1", ~30 m, over ~2 deg), the map background at most MAP_SIDE - one
+        and the same file on a map small enough. Radar-coded data: the `height`
+        of the geometry file - the DEM of the processing, on the very grid of the
+        data - or, if it has none, a download resampled onto the radar grid
+        through its latitude / longitude.
         """
-        path = None
+        want_map, want_topo = is_auto(self.dem_file), is_auto(self.topoxsect)
+        map_path = topo_path = None
         try:
             if 'Y_FIRST' not in self.atr:
                 if self.lookup is None:
                     raise ValueError(NO_LOOKUP)
                 if has_height(self.lookup_file):
-                    path = self.lookup_file
+                    map_path = topo_path = self.lookup_file
                     print(f'DEM: the height of {self.lookup_file} '
                           '(the DEM of the processing, on the radar grid)')
                 else:
-                    path = terrain_dem_radar(self.lookup, self.atr, zoom=self.dem_zoom,
-                                             verbose=self.print_msg)
-                    self.dem_download = path
-                    print(f'DEM: {ATTRIBUTION}')
+                    map_path = topo_path = self.download_dem(radar=True)
             else:
                 if not self.geo_box:
                     raise ValueError('the map extent is unknown')
                 if self.data_crs is None:
                     raise ValueError("the data's coordinate reference system is unknown")
-                path = terrain_dem(self.geo_box, self.data_crs, is_projected(self.atr),
-                                   zoom=self.dem_zoom, verbose=self.print_msg)
-                self.dem_download = path
-                print(f'DEM: {ATTRIBUTION}')
+                if want_topo:
+                    topo_path = self.download_dem(MAX_SIDE)
+                if want_map:
+                    map_path = self.download_dem(MAP_SIDE)
         except Exception as err:      # noqa: BLE001 - the DEM is a nicety
             print(f'WARNING: no DEM for the map: {err}')
             print('         --> continuing without it. A DEM file works too: --dem dem.tif')
 
-        if is_auto(self.dem_file):
-            self.dem_file = path
+        if want_map:
+            self.dem_file = map_path
             # what view.py does for a DEM it is given: let the relief show through
-            if path and self.disp_dem_shade and '--alpha' not in self.view_extra:
+            if map_path and self.disp_dem_shade and '--alpha' not in self.view_extra:
                 self.transparency = 0.8
-        if is_auto(self.topoxsect):
-            self.topoxsect = path
+        if want_topo:
+            self.topoxsect = topo_path
+        self.dem_download = next((p for p in (topo_path, map_path) if p in self.dem_sources),
+                                 None)
         return
+
+    def download_dem(self, max_side=MAX_SIDE, radar=False):
+        """Download a DEM over the map (or onto the radar grid) and say whose it is:
+        Copernicus GLO-30 - or the Terrain Tiles, if --dem-source says so, or
+        GLO-30 cannot be had and no source was named."""
+        def get(source):
+            if source == 'cop30':
+                if radar:
+                    return copernicus_dem_radar(self.lookup, self.atr, verbose=self.print_msg)
+                return copernicus_dem(self.geo_box, self.data_crs, is_projected(self.atr),
+                                      max_side=max_side, verbose=self.print_msg)
+            if radar:
+                return terrain_dem_radar(self.lookup, self.atr, zoom=self.dem_zoom,
+                                         verbose=self.print_msg)
+            return terrain_dem(self.geo_box, self.data_crs, is_projected(self.atr),
+                               zoom=self.dem_zoom, max_side=max_side, verbose=self.print_msg)
+
+        source = self.dem_source or ('terrain' if self._cop30_failed else 'cop30')
+        try:
+            path = get(source)
+        except Exception as err:      # noqa: BLE001 - try the other source
+            if self.dem_source or source != 'cop30':
+                raise
+            self._cop30_failed = True
+            print(f'WARNING: no Copernicus GLO-30 DEM: {err}')
+            print('         --> the Terrain Tiles instead (--dem-source terrain)')
+            source = 'terrain'
+            path = get(source)
+        if path not in self.dem_sources:
+            self.dem_sources[path] = COP30_ATTRIBUTION if source == 'cop30' else ATTRIBUTION
+            print(f'DEM: {self.dem_sources[path]}')
+        return path
 
     def init_topo(self):
         """Validate the DEM for --topoxsect, and work out how sections reach it.

@@ -120,7 +120,8 @@ viewinsar swath geo_velocity_ml10.h5 --nlook 10
 # an elevation profile under the LOS panel, from a DEM in any format or CRS
 viewinsar swath geo_velocity.h5 --topoxsect srtm1.dem
 
-# no DEM file? download one for the map: shaded relief + elevation profile
+# no DEM file? the Copernicus GLO-30 DEM is downloaded for the map: shaded
+# relief + elevation profile
 viewinsar swath geo_velocity.h5 --dem --topoxsect
 
 # fault traces on the map, and a dashed "Fault line" where a section crosses one
@@ -198,9 +199,10 @@ The swath-specific options:
 | `--keep-zero` | off | keep exactly-zero pixels (dropped by default, as in `plot_transection.py`) |
 | `--decimate` | `1` | use every *N*th pixel of the corridor |
 | `--nlook` | `1` | **oversample** the corridor *N*× per axis (*N*² more samples). The cure for a sparse profile from multilooked data; inverse of `--decimate` |
-| `--dem` | — | DEM for the shaded-relief map background, as in view.py; **without a file, downloaded** for the map extent (see below) |
+| `--dem` | — | DEM for the shaded-relief map background, as in view.py; **without a file, the Copernicus GLO-30 DEM is downloaded** for the map extent (see below) |
 | `--topoxsect` | — | DEM to profile under the LOS panel, any format / any CRS; **without a file**, the `--dem` DEM or a download |
-| `--dem-zoom` | auto | zoom of the downloaded tiles, 0–15 (12 ≈ 38 m, 13 ≈ 19 m) |
+| `--dem-source` | `cop30` | where a download comes from: `cop30` (Copernicus GLO-30, 1″ ≈ 30 m) or `terrain` (the Terrain Tiles, also the fallback when GLO-30 cannot be had) |
+| `--dem-zoom` | auto | `--dem-source terrain` only: zoom of the tiles, 0–15 (12 ≈ 38 m, 13 ≈ 19 m) |
 | `--lookup` | auto | radar-coded data only: MintPy's `geometryRadar.h5` (found in `inputs/`, `./` or `../inputs/` when not given) |
 | `--fault` | — | fault trace file(s), any vector format / any CRS: drawn on the map, and a dashed vertical line + "Fault line" on every profile at each crossing |
 | `--fault-label` / `--fault-color` / `--fault-lw` | `Fault line` / `k` / `1.2` | the annotation text (`""` for none), the colour, and the map line width |
@@ -247,24 +249,46 @@ Without a DEM file, `--dem` and `--topoxsect` fetch one:
 |---------|----------------|-------------------|
 | `--dem` | downloaded | — |
 | `--topoxsect` | — | downloaded |
-| `--dem --topoxsect` | downloaded | the same download |
+| `--dem --topoxsect` | downloaded | the same download (finer than the background on a map over ~0.8°) |
 | `--dem dem.tif --topoxsect` | `dem.tif` | `dem.tif` |
 
-The download comes from the [Terrain Tiles](https://registry.opendata.aws/terrain-tiles/)
-on AWS Open Data, the "Mapzen Global Terrain" layer of QGIS:
+The download is the [Copernicus DEM GLO-30](https://registry.opendata.aws/copernicus-dem/)
+on AWS Open Data: the 1-arc-second (~30 m) DEM of the TanDEM-X mission, with
+heights above the EGM2008 geoid, as one Cloud Optimized GeoTIFF per 1 × 1°
+cell, e.g. `Copernicus_DSM_COG_10_S01_00_E119_00_DEM` for lat −1…0,
+lon 119…120. Only the parts over the map are read, by HTTP byte range, so
+neither GDAL nor rasterio is needed. The tiles are joined seamlessly,
+re-gridded onto the data's CRS (lat/lon or UTM) and saved as a MintPy geometry
+`.h5` (`height`, metres) in `~/.cache/viewinsar` (or `$VIEWINSAR_CACHE`),
+along with the pieces read. A second run over the same area downloads
+nothing.
+
+| what | grid |
+|------|------|
+| `--topoxsect` (the elevation profile) | 1″ pixels (30.9 m on a UTM grid), up to 8000 a side: full resolution over a map of up to ~2.2° |
+| `--dem` (the map background) | the same, up to 3000 a side (~0.8°): view.py shades every pixel it is given |
+| a bigger map | proportionally wider pixels, read from the tiles' own half- and quarter-resolution overviews, so the download shrinks with them |
+
+The sea has no tiles; it is 0 m, as the product specifies. So are the few
+countries not released (Armenia, Azerbaijan). A tile that cannot be
+downloaded leaves its area empty, and the run says so. The licence is free,
+with the notice printed and written into the DEM file and `_info.txt`:
+"produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus
+Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European
+Union and ESA; all rights reserved".
+
+`--dem-source terrain` takes the [Terrain Tiles](https://registry.opendata.aws/terrain-tiles/)
+instead, the "Mapzen Global Terrain" layer of QGIS:
 `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png`.
 These are 256-px PNG tiles in Web Mercator, with the height coded in the colour
-as R·256 + G + B/256 − 32768 m. The tiles over the map are mosaicked,
-re-gridded onto the data's CRS (lat/lon or UTM) and saved as a MintPy geometry
-`.h5` (`height`, metres) in `~/.cache/viewinsar` (or `$VIEWINSAR_CACHE`). A
-second run over the same area downloads nothing.
-
-The zoom is the finest that keeps the download within about 300 tiles (at
-most 12, about 38 m). A big map gets a coarser DEM, which is still plenty for
-a median line in 0.5 km bins. `--dem-zoom 13` with `--sub-lat/--sub-lon` gives
-about 19 m over a small area. The sources are SRTM, GMTED2010 and ETOPO1 (with
-bathymetry) worldwide, plus finer national DEMs where available. Please cite
-them: the attribution is printed and written to `_info.txt`.
+as R·256 + G + B/256 − 32768 m. The zoom is the finest that keeps the download
+within about 300 tiles (at most 12, about 38 m); `--dem-zoom 13` with
+`--sub-lat/--sub-lon` gives about 19 m over a small area. The sources are SRTM,
+GMTED2010 and ETOPO1 (with bathymetry) worldwide, plus finer national DEMs
+where available. They are also the fallback: when GLO-30 cannot be had (no
+access to its server, say) and `--dem-source` was not given, the run says so
+and takes the Terrain Tiles. Either way, please cite them: the attribution is
+printed and written to `_info.txt`.
 
 ### Radar-coded data
 
@@ -281,8 +305,9 @@ in the current folder. You can also name it with `--lookup`. Then:
 | `--topoxsect dem.tif` | a geocoded DEM, reached through its latitude/longitude |
 | `--fault faults.shp` | traces mapped from lon/lat onto the radar pixels; `_info.txt` gives each crossing's row/col and lat/lon |
 
-Only a geometry file without `height` makes `--dem` download the Terrain Tiles,
-resampled onto the radar grid.
+Only a geometry file without `height` makes `--dem` download GLO-30 (or the
+Terrain Tiles, `--dem-source terrain`), resampled onto the radar grid at about
+its own pixel spacing.
 
 ### Fault traces
 
@@ -323,12 +348,13 @@ headers (mm/yr, cm/yr, m/yr) or `--gnss-unit`, and is converted to the data's.
 |--------|----------------------------------------|
 | `los` (default) | projected into the line of sight of the first file, `ve·uₑ + vn·uₙ + vu·uᵤ`: the LOS unit vector from MintPy's geometry file (`geometryGeo.h5` / `geometryRadar.h5` beside the data), LiCSBAS's `GEOCml*/E.geo …` or LiCSAR's `*.geo.E.tif`, or `--geom`; else the data's `CENTER_INCIDENCE_ANGLE` and `HEADING`, or `--los-inc` / `--los-az`; else nominal angles for the orbit the file's name says (`asc`, `desc` …, see *model*). A station without `vu` counts `vu = 0` |
 | `ve`, `vn`, `vu` | that component, for decomposed velocity maps |
-| several, e.g. `--vel ve vn vu los` | all of them on the same profile, each in a colour of its own (ve magenta, vn orange, vu white, los black), each shifted onto the InSAR on its own; `_gnss.csv` gets a row per station and component (`component` column). `vu` exists for 3D stations only. `model` takes one: the component it fits |
+| several, e.g. `--vel ve vn vu los` | all of them on the same profile, each in a colour of its own (ve magenta, vn orange, vu blue, los black), each shifted onto the InSAR on its own; `_gnss.csv` gets a row per station and component (`component` column). `vu` exists for 3D stations only. `model` takes one: the component it fits |
 
 Every station is drawn on the map - a **triangle** for a 3D station (one with
 `vu`), a **circle** for a 2D one, in black. The stations inside a swath (the
 same flat-capped buffer as the pixels) are drawn on its profile, in black with
-their 1-σ as error bars, as a comparison with the InSAR. By default
+their 1-σ as error bars, as a comparison with the InSAR - outlined in white,
+error bars too, so they stand out on the density behind them. By default
 they are shifted onto the InSAR (`--gnss-ref insar`): by the median, over the
 stations, of the InSAR within `--gnss-radius` km of a station minus the
 station; `--gnss-ref none` leaves them as read. `--gnss-label` writes the site
@@ -463,7 +489,7 @@ view.py flips it): there, `geometryRadar.h5` gives the lat/lon of the line
 | `--names` / `--colors` | `Block 1` `Block 2` / blue, vermilion | the two blocks |
 | `--ylim` | auto | value range of the violin plot |
 | `--keep-zero` | off | keep exactly-zero pixels |
-| `--dem`, `--dem-zoom`, `--lookup`, `--fault` | — | as in `viewinsar swath` |
+| `--dem`, `--dem-source`, `--dem-zoom`, `--lookup`, `--fault` | — | as in `viewinsar swath` |
 | `--save` / `--nodisplay` / `--svg` / `--outfile` / `--outdir` | — | output control |
 
 Everything else goes to view.py, as for `swath`. The export (<kbd>e</kbd> or
@@ -642,8 +668,8 @@ component, from `ve` and `vn` (`--vel` picks another one, to match
 
 **The figures**, after Hussain et al.: the pixels as points (red; a colour per
 file), the median of each bin with ±1σ (its robust spread), the GNSS in blue
-with their error bars, the MAP model as a bold dashed line and its 95 % range
-in grey, the fault dotted, and the parameters written as Hussain et al. do -
+with their error bars (outlined in white), the MAP model as a bold dashed line
+and its 95 % range in grey, the fault dotted, and the parameters written as Hussain et al. do -
 `slip rate = 20.3 mm/yr (18.4 – 34.0, 95% CI), right-lateral`, `locking depth
 = 12.7 km (…)`, `creep rate` in mm/yr, `creep depth` in km, and the `strain
 rate` at the fault in µstrain/yr - placed where they hide the fewest points.

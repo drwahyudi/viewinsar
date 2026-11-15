@@ -3,6 +3,10 @@
 import numpy as np
 import pytest
 
+from viewinsar import terrain as _terrain
+
+REAL_GET = _terrain._get                 # before no_dem_downloads replaces it
+
 LENGTH, WIDTH = 300, 450
 LAT0, LON0, DLAT, DLON = 30.60, 130.00, -0.002, 0.002
 FAULT_LON = 130.45
@@ -147,3 +151,18 @@ def no_user_config(tmp_path, monkeypatch):
     """Never the viewinsar.ini of whoever runs the tests (an ALOS-2 = 0.1 rule
     would scale the test data)."""
     monkeypatch.setenv('VIEWINSAR_CONFIG', str(tmp_path / 'no-viewinsar.ini'))
+
+
+@pytest.fixture(autouse=True)
+def no_dem_downloads(tmp_path, monkeypatch):
+    """No test downloads a DEM from the internet, nor fills ~/.cache: the DEM
+    tests serve synthetic tiles in place of the network (and override this)."""
+    import urllib.error
+
+    from viewinsar import terrain
+
+    def offline(url, *args, **kwargs):
+        raise urllib.error.URLError(f'no network in the tests ({url})')
+
+    monkeypatch.setattr(terrain, '_get', offline)
+    monkeypatch.setenv('VIEWINSAR_CACHE', str(tmp_path / 'viewinsar-cache'))

@@ -38,6 +38,9 @@ def _flat(text):
     # 0.3.0: the DEM, downloaded or given once
     '--dem [DEM]', '--topoxsect [DEM]', '--dem-zoom',
     'Terrain Tiles', 'Mapzen Global Terrain', 'terrarium/{z}/{x}/{y}.png',
+    # 0.5.3: Copernicus GLO-30 by default
+    'Copernicus GLO-30', '--dem-source', 'cop30', 'copernicus-dem-30m', 'EGM2008',
+    'The sea has no tiles', 'no GDAL needed', 'overviews', 'the fallback when GLO-30',
     '~/.cache/viewinsar', 'VIEWINSAR_CACHE', 'not --nlook', 'says why in its panel',
     'the exact median', 'DEM covering part of a section', 'please cite them',
     # 0.4.0: radar-coded data, through MintPy's geometry file

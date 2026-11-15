@@ -19,7 +19,7 @@ pulled in when the viewer is used, so ``viewinsar.swath`` stays importable with
 numpy alone.
 """
 
-__version__ = '0.5.2'
+__version__ = '0.5.3'
 __author__ = 'Donny Wahyudi'
 __license__ = 'GPL-3.0-or-later'
 
@@ -39,13 +39,14 @@ from .swath import (
     swath_extract,
     weighted_quantile,
 )
-from .terrain import terrain_dem
+from .terrain import copernicus_dem, terrain_dem
 
 __all__ = [
     '__version__',
     'EARTH_RADIUS',
     'RadarLookup',
     'bilinear_sample',
+    'copernicus_dem',
     'find_lookup',
     'fit_profile',
     'get_pixel_size',

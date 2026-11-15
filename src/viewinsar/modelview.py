@@ -25,6 +25,7 @@ from .radar import PIXEL_ATR
 from .raster import same_crs
 from .swath import EARTH_RADIUS, is_projected, line_geometry, project_points
 from .viewer import (
+    GNSS_EDGE,
     NO_LOOKUP,
     Section,
     _new_figure,
@@ -32,6 +33,7 @@ from .viewer import (
     per_file,
     swathProfileViewer,
     velocity_factor,
+    white_halo,
 )
 
 __all__ = ['ModelViewer', 'ModelSection', 'azimuth_of', 'local_en', 'strike_of_points',
@@ -611,11 +613,12 @@ class ModelSection(Section):
         # the GNSS
         if has_gnss:
             shift = self.gnss_shift()
-            ax.errorbar(gin['x'], gin['value'] + shift, yerr=gin['sigma'], fmt='o', ms=6.5,
-                        mfc=GNSS_COLOR, mec='k', mew=0.7, ecolor=GNSS_COLOR, elinewidth=1.4,
-                        capsize=3, capthick=1.2, zorder=7)
-            handles.append(Line2D([], [], ls='', marker='o', ms=6, mfc=GNSS_COLOR, mec='k',
-                                  label='GNSS' + ('' if model.gnss else ' (not fitted)')))
+            white_halo(ax.errorbar(gin['x'], gin['value'] + shift, yerr=gin['sigma'], fmt='o',
+                                   ms=6.5, mfc=GNSS_COLOR, ecolor=GNSS_COLOR, elinewidth=1.4,
+                                   capsize=3, capthick=1.2, zorder=7, **GNSS_EDGE))
+            handles.append(Line2D([], [], ls='', marker='o', ms=6, mfc=GNSS_COLOR,
+                                  label='GNSS' + ('' if model.gnss else ' (not fitted)'),
+                                  **GNSS_EDGE))
 
         # the fault (dotted), and the traces the profile crosses (dash-dot)
         free = 'x0' in summ

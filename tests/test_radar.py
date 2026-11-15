@@ -218,8 +218,9 @@ def test_download_onto_the_radar_grid(tmp_path, monkeypatch):
     monkeypatch.setattr(terrain, 'fetch_tile',
                         lambda z, x, y, folder=None, url=None: synthetic_tile(z, x, y))
     monkeypatch.setenv('VIEWINSAR_CACHE', str(tmp_path / 'cache'))
-    obj = cli.swath_main([vfile, *SECTION, '-w', '4', '-d', '--topoxsect', '--dem-zoom', '11',
-                          '--nodisplay', '--outdir', str(tmp_path), '--noverbose'])
+    obj = cli.swath_main([vfile, *SECTION, '-w', '4', '-d', '--topoxsect', '--dem-source',
+                          'terrain', '--dem-zoom', '11', '--nodisplay', '--outdir', str(tmp_path),
+                          '--noverbose'])
     assert obj.dem_download and obj.topoxsect == obj.dem_download == obj.dem_file
     with h5py.File(obj.dem_download, 'r') as fid:
         assert fid['height'].shape == (LENGTH, WIDTH) and 'Y_FIRST' not in fid.attrs
@@ -228,6 +229,28 @@ def test_download_onto_the_radar_grid(tmp_path, monkeypatch):
     # the synthetic tiles also carry a north-south gradient of 100 m per degree
     expect = ridge(lon_of(rows, cols)) + 100.0 * (lat_of(rows, cols) - 30.3)
     assert np.nanmax(np.abs(dem - expect)) < 6.0
+    sec = obj.sections[0]
+    assert _peak_km(sec) == pytest.approx(_t_fault() * sec.swath_list[0]['length'], abs=1.0)
+
+
+def test_glo30_onto_the_radar_grid(tmp_path, monkeypatch):
+    """A geometry file without height: Copernicus GLO-30 resampled onto the radar
+    grid, at the level nearest the grid's own spacing."""
+    from test_cop30 import height, serve_glo30
+
+    vfile, gfile = make_radar_product(str(tmp_path / 'proc'), with_height=False)
+    requests = serve_glo30(monkeypatch, str(tmp_path / 'server'), [(30, 130), (30, 129)])
+    obj = cli.swath_main([vfile, *SECTION, '-w', '4', '--dem', '--topoxsect',
+                          '--nodisplay', '--outdir', str(tmp_path), '--noverbose'])
+    assert obj.topoxsect == obj.dem_download == obj.dem_file
+    assert os.path.basename(obj.dem_file).startswith('dem_cop30_radar_')
+    with h5py.File(obj.dem_download, 'r') as fid:
+        assert fid['height'].shape == (LENGTH, WIDTH) and 'Y_FIRST' not in fid.attrs
+        assert 'GLO-30' in fid.attrs['ATTRIBUTION']
+        dem = fid['height'][:]
+    rows, cols = np.mgrid[0:LENGTH, 0:WIDTH]
+    assert np.nanmax(np.abs(dem - height(lon_of(rows, cols), lat_of(rows, cols)))) < 3.0
+    assert {r[0] for r in requests} >= {'Copernicus_DSM_COG_10_N30_00_E130_00_DEM.tif'}
     sec = obj.sections[0]
     assert _peak_km(sec) == pytest.approx(_t_fault() * sec.swath_list[0]['length'], abs=1.0)
 

@@ -4,6 +4,34 @@ All notable changes to viewinsar are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.5.3] - 2026-11-15
+
+### Changed
+- **`--dem` / `--topoxsect` without a file now download the Copernicus DEM
+  GLO-30** (1", ~30 m, heights above the EGM2008 geoid; AWS Open Data,
+  `copernicus-dem-30m`) instead of the Terrain Tiles, in `swath`, `stat`
+  and `model`. Only the parts of the 1 x 1 deg Cloud Optimized GeoTIFFs over
+  the map are read, by HTTP byte range - no GDAL or rasterio needed - from
+  the overview nearest the grid being made, and the tiles are joined
+  seamlessly. The elevation profile gets 1" pixels up to 8000 a side (a map
+  of ~2.2 deg), the map background up to 3000 (view.py shades every pixel
+  it is given); a bigger map gets wider pixels. The sea, which has no tiles,
+  is 0 m; a tile that cannot be downloaded leaves its area empty. Radar-coded
+  data whose geometry file has no `height` get GLO-30 resampled onto their
+  grid. The Copernicus licence notice is printed and written into the DEM
+  file and `_info.txt`. Everything read is cached in `~/.cache/viewinsar`.
+- **GNSS points on the profiles are outlined in white** - marker edges and
+  error bars - in `swath` and `model`, so they stand out on the data behind
+  them. With several components (`--vel ve vn vu los`), `vu` is now blue
+  instead of white.
+
+### Added
+- **`--dem-source cop30|terrain`** (`swath`, `stat`, `model`): where a
+  download comes from. `terrain` takes the Terrain Tiles as before
+  (`--dem-zoom` applies to them only, and says so otherwise). Without
+  `--dem-source`, a GLO-30 that cannot be had (no access to its server, say)
+  falls back to the Terrain Tiles, with a warning.
+
 ## [0.5.2] - 2026-11-15
 
 ### Added

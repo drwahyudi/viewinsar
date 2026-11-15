@@ -1,4 +1,5 @@
-"""-d / --topoxsect without a file: Terrain Tiles download, mosaic and re-grid.
+"""--dem-source terrain: the Terrain Tiles download, mosaic and re-grid (also
+what --dem / --topoxsect fall back to when Copernicus GLO-30 cannot be had).
 
 No network here: the tiles are synthesised with the real Terrarium encoding
 and Web Mercator geometry from a known height field, and served in place of
@@ -209,8 +210,8 @@ def test_bad_dem_options(velocity_file):
 def test_download_for_the_map_and_the_profile(velocity_file, served, tmp_path):
     out = tmp_path / 'out'
     obj = cli.swath_main([velocity_file, *LINE, '-w', '6', '-d', '--topoxsect',
-                          '--dem-zoom', '10', '--save', '--nodisplay',
-                          '--outdir', str(out), '--noverbose'])
+                          '--dem-source', 'terrain', '--dem-zoom', '10', '--save',
+                          '--nodisplay', '--outdir', str(out), '--noverbose'])
     # one download serves both
     assert obj.dem_file == obj.topoxsect == obj.dem_download
     assert obj.dem_file.endswith('.h5') and str(tmp_path / 'cache') in obj.dem_file
@@ -229,17 +230,18 @@ def test_download_for_the_map_and_the_profile(velocity_file, served, tmp_path):
 
 
 def test_topoxsect_alone_downloads_without_a_background(velocity_file, served, tmp_path):
-    obj = cli.swath_main([velocity_file, *LINE, '-w', '6', '--topoxsect', '--dem-zoom', '9',
-                          '--nodisplay', '--outdir', str(tmp_path), '--noverbose'])
+    obj = cli.swath_main([velocity_file, *LINE, '-w', '6', '--topoxsect', '--dem-source',
+                          'terrain', '--dem-zoom', '9', '--nodisplay', '--outdir',
+                          str(tmp_path), '--noverbose'])
     assert obj.dem_file is None and obj.topoxsect == obj.dem_download
     assert obj.sections[0].topo_den is not None
     assert obj.transparency == pytest.approx(1.0)
 
 
 def test_alpha_given_by_the_user_wins(velocity_file, served, tmp_path):
-    obj = cli.swath_main([velocity_file, *LINE, '-w', '6', '-d', '--dem-zoom', '9',
-                          '--alpha', '0.6', '--nodisplay', '--outdir', str(tmp_path),
-                          '--noverbose'])
+    obj = cli.swath_main([velocity_file, *LINE, '-w', '6', '-d', '--dem-source', 'terrain',
+                          '--dem-zoom', '9', '--alpha', '0.6', '--nodisplay', '--outdir',
+                          str(tmp_path), '--noverbose'])
     assert obj.transparency == pytest.approx(0.6)
 
 
@@ -253,6 +255,7 @@ def test_offline_keeps_going(velocity_file, monkeypatch, tmp_path, capsys):
                           '--dem-zoom', '8', '--nodisplay', '--outdir', str(tmp_path),
                           '--noverbose'])
     out = capsys.readouterr().out
+    assert 'no Copernicus GLO-30 DEM' in out                # first GLO-30, then
     assert 'no DEM for the map' in out and 'could not download any Terrain Tile' in out
     assert obj.dem_file is None and obj.topoxsect is None
     assert obj.sections[0].has_data                         # the profile still works
