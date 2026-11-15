@@ -4,6 +4,15 @@ All notable changes to viewinsar are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [0.5.1] - 2026-11-15
+
+### Removed
+- **The smoothed line through the GNSS on the swath profiles.** The stations
+  are drawn with their 1-sigma error bars, and nothing else. `swath
+  --gnss-nofit`, which only turned that line off, is gone; given anyway, it
+  is left out with a note. (`model` never drew such a line; its
+  `--gnss-nofit` - the GNSS shown, but not fitted - stays.)
+
 ## [0.5.0] - 2026-11-14
 
 0.4.3 was built but never released; its changes are part of this one.

@@ -572,9 +572,7 @@ class Section:
 
     def draw_gnss(self):
         """The GNSS in the swath: black triangles (3D stations) and circles (2D),
-        their 1-sigma as error bars, and a smoothed black line through them."""
-        from .gnss import smooth_curve
-
+        their 1-sigma as error bars - the stations only, no line through them."""
         v, ax, gin = self.v, self.ax_swath, self.gnss_in
         if gin is None or not gin['index'].size:
             return
@@ -586,10 +584,6 @@ class Section:
                 ax.errorbar(x[sel], y[sel], yerr=gin['sigma'][sel], fmt=marker, ms=8,
                             color='k', mfc='k', mec='w', mew=0.8, ecolor='k', elinewidth=1.4,
                             capsize=4, capthick=1.4, zorder=9, label=label)
-        if v.gnss_fit and x.size >= 2:
-            curve = smooth_curve(x, y, gin['sigma'], x_range=ax.get_xlim())
-            if curve is not None:
-                ax.plot(*curve, color='k', lw=1.8, zorder=8, label='GNSS (smoothed)')
         if not v.ylim:                               # keep every station in view
             lo, hi = ax.get_ylim()
             ylo = float(np.nanmin(y - gin['sigma']))

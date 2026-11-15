@@ -407,3 +407,14 @@ def test_old_and_new_spellings_parse_the_same(velocity_file):
                               '--noverbose'])
     assert (old.width, old.nlook, old.svg) == (new.width, new.nlook, new.svg) == (12.0, 2, True)
     assert old.argv == new.argv[:1] + ['--width', '12', '--nlook', '2', '--svg', '--noverbose']
+
+
+def test_swath_gnss_nofit_is_gone_but_harmless(capsys):
+    """0.5.1: swath draws no line through the GNSS, so --gnss-nofit is left out
+    there (with a note); model keeps its own - the GNSS shown, not fitted."""
+    assert '--gnss-nofit' not in cli.create_swath_parser()._option_string_actions
+    assert '--gnss-nofit' in cli.create_model_parser()._option_string_actions
+    assert cli.modern_options(['v.h5', '--gnss-nofit', '--width', '5'], 'swath') == [
+        'v.h5', '--width', '5']
+    assert 'not needed any more' in capsys.readouterr().out
+    assert cli.modern_options(['v.h5', '--gnss-nofit'], 'model') == ['v.h5', '--gnss-nofit']

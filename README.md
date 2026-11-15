@@ -327,12 +327,11 @@ headers (mm/yr, cm/yr, m/yr) or `--gnss-unit`, and is converted to the data's.
 Every station is drawn on the map - a **triangle** for a 3D station (one with
 `vu`), a **circle** for a 2D one, in black. The stations inside a swath (the
 same flat-capped buffer as the pixels) are drawn on its profile, in black with
-their 1-σ as error bars, and a **smoothed black line** goes through them (a
-smoothing spline weighted by 1/σ²), as a comparison with the InSAR. By default
+their 1-σ as error bars, as a comparison with the InSAR. By default
 they are shifted onto the InSAR (`--gnss-ref insar`): by the median, over the
 stations, of the InSAR within `--gnss-radius` km of a station minus the
 station; `--gnss-ref none` leaves them as read. `--gnss-label` writes the site
-names on the map, `--gnss-nofit` leaves the line out.
+names on the map.
 
 ---
 

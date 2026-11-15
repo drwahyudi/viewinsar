@@ -123,7 +123,7 @@ examples:
 
   # GNSS on the profiles (.csv .xlsx .shp .geojson .gpkg .kml, GMT psvelo ...):
   # the stations on the map, those inside a swath on its profile - black
-  # triangles 3D, circles 2D, 1-sigma error bars - and a smoothed black line
+  # triangles 3D, circles 2D, 1-sigma error bars
   viewinsar swath geo_velocity.h5 --gnss gnss.csv --vel los      # into the LOS
   viewinsar swath geo_vel_east.h5 --gnss gnss.xlsx --vel ve      # the east component
 
@@ -243,6 +243,8 @@ OLD_SPELLINGS = {
                 '-c': '--colormap', '-u': '--unit', '--vel': '--vel-file'},
     'list': {'-n': '--num'},
 }
+# options that are gone: left out, with a note (0.5.1: swath draws no GNSS line)
+DROPPED = {'swath': {'--gnss-nofit': 'the profiles draw no line through the GNSS any more'}}
 
 
 def modern_options(argv, command):
@@ -250,10 +252,13 @@ def modern_options(argv, command):
     ...) written as today (--fault, --gnss, --vel, --dem, --width ...), and a
     note that says which, once. A one-letter option glued to its value (-w15)
     is split as argparse would."""
-    table = OLD_SPELLINGS.get(command, {})
+    table, gone = OLD_SPELLINGS.get(command, {}), DROPPED.get(command, {})
     out, said = [], {}
     for tok in argv:
         head, eq, tail = str(tok).partition('=')
+        if tok in gone:
+            print(f'NOTE: {tok} is not needed any more - {gone[tok]}')
+            continue
         if tok in table:
             new, old = [table[tok]], tok
         elif eq and head in table:
@@ -667,8 +672,6 @@ def add_gnss_options(parser):
     grp.add_argument('--gnss-radius', dest='gnss_radius', type=float, default=1.0,
                      metavar='KM', help='the InSAR "at" a station: the pixels within this\n'
                                         'distance (default: %(default)s km).')
-    grp.add_argument('--gnss-nofit', dest='gnss_fit', action='store_false',
-                     help='no smoothed line through the GNSS on the profiles.')
     grp.add_argument('--gnss-label', dest='gnss_label', action='store_true',
                      help='write the site names on the map.')
     grp.add_argument('--geom', dest='geom_file', metavar='PATH',
@@ -1959,7 +1962,7 @@ swath - swath (buffered) profiles
                 --fault-color, --fault-lw)
   GNSS          --gnss FILE (.csv .xlsx .shp .geojson .gpkg .kml, GMT psvelo): on the
                 map and on every profile; --vel los|ve|vn|vu, --gnss-ref,
-                --gnss-radius, --gnss-nofit, --gnss-label, --geom / --los-inc
+                --gnss-radius, --gnss-label, --geom / --los-inc
   several files f1.h5 f2.h5 ... --labels: one density, a median line for each file
   time series   --timeseries ts.h5: right-click a pixel for its history (MintPy)
   keys          left click x2: draw | "=" new section | "n" redo the current one |

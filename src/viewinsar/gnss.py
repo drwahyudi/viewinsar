@@ -23,12 +23,11 @@ north, anti-clockwise positive) - positive LOS = motion towards the satellite.
 import json
 import os
 import re
-import warnings
 
 import numpy as np
 
 __all__ = ['GNSS', 'read_gnss', 'los_unit_vector', 'heading_to_azimuth', 'LOSGeometry',
-           'smooth_curve', 'COMPONENTS']
+           'COMPONENTS']
 
 COMPONENTS = ('ve', 'vn', 'vu', 'los')
 TO_MM = {'mm': 1.0, 'cm': 10.0, 'm': 1000.0}
@@ -865,56 +864,3 @@ class LOSGeometry:
 
     def unit_vector_at(self, lon, lat):
         return los_unit_vector(*self.at_lonlat(lon, lat))
-
-
-##############################################################################
-#                           the smoothed GNSS line                           #
-##############################################################################
-def smooth_curve(x, y, sigma=None, x_range=None, num=300):
-    """A smooth line through scattered points, as a comparison with the InSAR.
-
-    Five points or more: a cubic smoothing spline, its smoothing chosen by
-    generalized cross-validation and the points weighted by 1/sigma^2. Two to
-    four: a monotone-preserving PCHIP curve. The ends are held flat out to
-    x_range (the profile).
-    Returns (xs, ys), or None with fewer than two points.
-    """
-    x, y = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
-    good = np.isfinite(x) & np.isfinite(y)
-    sig = (np.asarray(sigma, dtype=np.float64) if sigma is not None
-           else np.ones_like(x))
-    x, y, sig = x[good], y[good], sig[good]
-    if x.size < 2:
-        return None
-    sig = np.where(np.isfinite(sig) & (sig > 0), sig, np.nan)
-    sig = np.where(np.isnan(sig), np.nanmedian(sig) if np.isfinite(sig).any() else 1.0, sig)
-    weight = 1.0 / sig ** 2
-    # merge stations at the same distance (weighted mean)
-    order = np.argsort(x)
-    x, y, weight = x[order], y[order], weight[order]
-    ux, inv = np.unique(np.round(x, 6), return_inverse=True)
-    if ux.size < x.size:
-        wsum = np.bincount(inv, weights=weight)
-        y = np.bincount(inv, weights=weight * y) / wsum
-        x, weight = ux, wsum
-    if x.size < 2:
-        return None
-    xs = np.linspace(x[0], x[-1], num)
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        try:
-            if x.size >= 5:
-                from scipy.interpolate import make_smoothing_spline
-                ys = make_smoothing_spline(x, y, w=weight / weight.mean())(xs)
-            else:
-                raise ImportError
-        except (ImportError, ValueError, np.linalg.LinAlgError):
-            from scipy.interpolate import PchipInterpolator
-            ys = PchipInterpolator(x, y)(xs)
-    if x_range is not None:
-        lo, hi = x_range
-        if lo < xs[0]:
-            xs, ys = np.r_[lo, xs], np.r_[ys[0], ys]
-        if hi > xs[-1]:
-            xs, ys = np.r_[xs, hi], np.r_[ys, ys[-1]]
-    return xs, ys

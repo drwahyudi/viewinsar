@@ -1,7 +1,7 @@
 """GNSS on the swath profiles, and several files in one swath.
 
 The readers (text with any header, GMT psvelo, .xlsx, GeoJSON, KML, shapefile),
-the components - the LOS against MintPy's own - the smoothed line; then
+the components - the LOS against MintPy's own; then
 `viewinsar swath -gnss` on the synthetic velocity (an arctan across the N-S
 fault at 130.45 E) and `viewinsar swath FILE1 FILE2` on two frames of it.
 """
@@ -182,18 +182,6 @@ def test_los_geometry_from_a_file_or_the_attributes(tmp_path):
     assert np.isnan(off[0])
 
 
-def test_smooth_curve():
-    x = np.linspace(-40, 40, 9)
-    y = 10 * np.arctan(x / 8.0)
-    xs, ys = gn.smooth_curve(x, y, np.full(x.size, 0.5), x_range=(-60, 60))
-    assert xs[0] == -60 and xs[-1] == 60
-    assert ys[0] == ys[1] and ys[-1] == ys[-2]                   # flat ends
-    assert np.interp(x, xs, ys) == pytest.approx(y, abs=1.5)
-    xs, ys = gn.smooth_curve([0, 1, 2], [0, 1, 4])               # few: PCHIP
-    assert ys[0] == pytest.approx(0) and ys[-1] == pytest.approx(4)
-    assert gn.smooth_curve([1.0], [2.0]) is None
-
-
 ##############################################################################
 #                         swath: GNSS, several files                         #
 ##############################################################################
@@ -202,7 +190,7 @@ matplotlib.use('Agg')
 
 from viewinsar import cli  # noqa: E402
 
-ALONG_30_3 = ['--start-lalo', '30.30', '130.15', '--end-lalo', '30.30', '130.75', '-w', '8']
+ALONG_30_3 = ['--start-lalo', '30.30', '130.15', '--end-lalo', '30.30', '130.75', '--width', '8']
 
 
 def _east_mm(lon):
@@ -237,9 +225,10 @@ def test_swath_with_gnss(velocity_file, gnss_csv, tmp_path):
         [_east_mm(lon) / 10 for lon in obj.gnss.lon[gin['index']]], abs=1e-3)
     # (the pixels carry 5 cm/yr of noise each: the shift is that of a few medians)
     assert gin['n_ref'] == 6 and abs(gin['offset']) < 0.7
-    # triangles for the 3D stations, circles for the 2D ones; the smoothed line
+    # triangles for the 3D stations, circles for the 2D ones - and no line through them
     labels = [t.get_text() for t in sec.ax_swath.get_legend().get_texts()]
-    assert {'GNSS (3D)', 'GNSS (2D)', 'GNSS (smoothed)'} <= set(labels)
+    assert {'GNSS (3D)', 'GNSS (2D)'} <= set(labels)
+    assert not any('GNSS' in lab and 'smooth' in lab for lab in labels)
     # all seven on the map (labelled), as triangles and circles
     markers = [c for c in obj.ax_img.collections if c.get_offsets().shape[0] in (3, 4)]
     assert sum(c.get_offsets().shape[0] for c in markers) == 7
