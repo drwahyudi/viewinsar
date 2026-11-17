@@ -719,16 +719,45 @@ def add_save_options(group, what):
     return group
 
 
+# options whose value may be left out: a file after them is an input instead
+BARE_BEFORE_A_FILE = {'--save': '', '--cmap-prof': 'viridis'}
+
+
 def _bare_save(argv):
     """`--save velocity.h5`: a data file after --save is an input, not the folder
-    to export into - keep --save bare then."""
+    to export into - keep --save bare then (and --cmap-prof: no colormap)."""
     if argv is None:
         argv = sys.argv[1:]
     argv = list(argv)
     for i, tok in enumerate(argv[:-1]):
-        if tok == '--save' and os.path.isfile(argv[i + 1]):
-            argv[i] = f'{tok}='
+        if tok in BARE_BEFORE_A_FILE and os.path.isfile(argv[i + 1]):
+            argv[i] = f'{tok}={BARE_BEFORE_A_FILE[tok]}'
     return argv
+
+
+def check_colormap(name, option):
+    """A colormap name matplotlib, MintPy or cmcrameri knows - else a clear error."""
+    import matplotlib
+
+    from .compat import have_mintpy
+
+    if name in matplotlib.colormaps:
+        return name
+    if have_mintpy():
+        try:
+            from mintpy.objects.colors import ColormapExt
+            ColormapExt(name)
+            return name
+        except Exception:        # noqa: BLE001 - a name MintPy does not know either
+            pass
+    try:
+        import cmcrameri.cm as scm
+        if hasattr(scm, name[:-2] if name.endswith('_r') else name):
+            return name
+    except ImportError:
+        pass
+    raise ValueError(f'{option}: no colormap called {name!r} (try viridis, magma, inferno, '
+                     'plasma, cividis, Greys, hot_r ...)')
 
 
 def check_save_options(inps):
@@ -1222,7 +1251,9 @@ binned medians, the GNSS (blue), the maximum a posteriori (MAP) model (bold
 dashes) and its 95 % range (grey), with the parameters and their 95 %
 ranges written on it; a second one the posterior distributions, as Hussain
 et al. (2016, Fig. 9): every pair of parameters as a 2D histogram (jet),
-the marginals as blue histograms along the bottom, the MAP in red.
+the marginals as blue histograms along the bottom, the MAP in red. With
+--cmap-prof CMAP the pixels are a point DENSITY in that colormap instead, as
+in swath (--nlook fills it in), under a red 95 % range and bigger medians.
 
 The fault: where the profile crosses a --fault trace, with the strike of the
 trace there - or --x0 and --strike. --comp says what the data are: par
@@ -1274,6 +1305,11 @@ examples:
   # two tracks at once, each with its own offset
   viewinsar model T014A/geo_velocity.h5 T123D/geo_velocity.h5 --comp los \\
       --fault faults.shp --labels T014A T123D
+
+  # the pixels as a point density (as swath), filled in for ml10 data; the
+  # 95 % range red, bigger medians
+  viewinsar model TS_GEOCml10GACOS/cum_filt.h5 --fault faults.shp --width 20 \\
+      --cmap-prof magma --nlook 10
 
   # as Hussain et al. (2016): rotation of the block south of the fault,
   # a Gaussian prior on the locking depth, a given noise covariance
@@ -1377,8 +1413,10 @@ def create_model_parser(prog=f'{PROG} model'):
     swath.add_argument('--decimate', dest='decimate', type=int, default=1, metavar='NUM',
                        help='use every NUMth pixel only (default: %(default)s).')
     swath.add_argument('--nlook', dest='nlook', type=int, default=1, metavar='NUM',
-                       help='oversample a coarse raster NUM times per axis\n'
-                            '(default: %(default)s).')
+                       help='oversample a coarse raster NUM times per axis for the\n'
+                            'picture - the points, or the --cmap-prof density, as in\n'
+                            'swath (default: %(default)s). The fit always takes the real\n'
+                            'pixels: interpolated samples are no new data.')
 
     flt = parser.add_argument_group('Fault', 'where the fault is, and its strike')
     flt.add_argument('--fault', dest='fault_file', nargs='+', metavar='FILE',
@@ -1499,10 +1537,16 @@ def create_model_parser(prog=f'{PROG} model'):
                       metavar=('YMIN', 'YMAX'), help='velocity range of the plot.')
     look.add_argument('--strain', dest='show_strain', action='store_true',
                       help='a panel with the shear strain rate dv/dx of the model.')
+    look.add_argument('--cmap-prof', dest='cmap_prof', nargs='?', const='viridis',
+                      metavar='CMAP',
+                      help='draw the pixels as a point DENSITY in this colormap, as\n'
+                           'swath does (alone: viridis) - with the 95 %% range in red\n'
+                           'and bigger medians, and no points. Default: the pixels\n'
+                           'as red points, the 95 %% range grey (Hussain et al.).')
     look.add_argument('--max-points', dest='max_points', type=int, default=200000,
                       metavar='NUM',
-                      help='draw at most NUM pixels, a random subset (default:\n'
-                           '%(default)s); all of them are fitted.')
+                      help='draw at most NUM pixels as points, a random subset\n'
+                           '(default: %(default)s); all of them are fitted.')
 
     topo = parser.add_argument_group('Topography', 'the map background, an elevation panel')
     topo.add_argument('--dem', dest='dem_file', nargs='?', const=AUTO_DEM, metavar='DEM',
@@ -1617,6 +1661,8 @@ def model_cmd_line_parse(iargs=None):
                          f'got {inps.burn}')
     if inps.max_points is not None and inps.max_points < 1:
         raise ValueError(f'--max-points must be positive, got {inps.max_points}')
+    if inps.cmap_prof:
+        check_colormap(inps.cmap_prof, '--cmap-prof')
     inps.noise = _parse_noise(inps.noise)
 
     # the GNSS component must match the data (--comp auto: once it is settled)
@@ -2148,7 +2194,9 @@ model - slip rate and locking depth from profiles across a fault
   figures       the fit: the pixels as points, binned medians, GNSS, the MAP model
                 and its 95 % range, the parameters written on it as Hussain et al.
                 ("slip rate = 20 mm/yr (11 - 29, 95% CI), right-lateral", locking
-                depth in km, strain rate in µstrain/yr); --strain: dv/dx below,
+                depth in km, strain rate in µstrain/yr); --cmap-prof [CMAP]: the
+                pixels as a density instead, as swath (--nlook fills it in), the
+                95 % range red, bigger medians; --strain: dv/dx below,
                 --topoxsect: elevation; the posteriors as Hussain et al. (2016,
                 Fig. 9): every pair a jet 2D histogram, the marginals in blue, the
                 MAP in red - one of each per section

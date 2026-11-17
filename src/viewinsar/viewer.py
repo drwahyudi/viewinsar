@@ -333,9 +333,13 @@ class Section:
         return
 
     ##---------- its data
-    def extract(self):
-        """Pull the swath (and the topography swath) for this line."""
+    def extract(self, nlook=None):
+        """Pull the swath (and the topography swath) for this line.
+
+        nlook - the oversampling, if not --nlook (model fits the real pixels)
+        """
         v = self.v
+        nlook = v.nlook if nlook is None else nlook
         self.swath_list = []
         for i, fname in enumerate(v.file):
             atr_i = v.atr_list[i]
@@ -345,7 +349,7 @@ class Section:
                 swath = swath_extract(v.data_list[i], atr_i, v.box_list[i], syx, eyx,
                                       v.width, mask=v.msk_list[i],
                                       keep_zero=v.keep_zero, decimate=v.decimate,
-                                      nlook=v.nlook)
+                                      nlook=nlook)
             except ValueError as err:
                 print(f'WARNING: {os.path.basename(fname)}: {err}')
                 continue

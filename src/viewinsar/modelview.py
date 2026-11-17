@@ -6,6 +6,12 @@ against the distance from the fault - their binned medians, the GNSS, and the
 maximum a posteriori (MAP) model with its 95 % range and the parameters
 written on the figure, after Hussain et al. (2016, 2018) and Ou et al. (2022);
 and a second window with the posterior distributions of the parameters.
+With --cmap-prof the pixels are a point density instead, as in swath, under a
+red 95 % range and bigger medians.
+
+The fit always takes the pixels as they are: --nlook oversamples what is
+drawn only - interpolated samples are no new data, and counted as such they
+would narrow the 95 % ranges.
 
     left click x2  the profile, across the fault     "="  another section
     "n"            redo the current section          "e"  export everything
@@ -16,6 +22,7 @@ import re
 import textwrap
 
 import numpy as np
+from matplotlib import colors as mcolors
 from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.offsetbox import AnchoredText
@@ -23,7 +30,15 @@ from matplotlib.offsetbox import AnchoredText
 from .model import NAMES, UNITS, describe, fit_profile, model_band, strain_rate
 from .radar import PIXEL_ATR
 from .raster import same_crs
-from .swath import EARTH_RADIUS, is_projected, line_geometry, project_points
+from .swath import (
+    EARTH_RADIUS,
+    is_projected,
+    line_geometry,
+    nice_step,
+    project_points,
+    swath_density,
+    swath_extract,
+)
 from .viewer import (
     GNSS_EDGE,
     NO_LOOKUP,
@@ -44,6 +59,8 @@ POINT_COLORS = ('#d62728', '#9467bd', '#2ca02c', '#ff7f0e', '#8c564b', '#e377c2'
 GNSS_COLOR = '#1f77b4'                           # blue, as Hussain et al.
 MAP_COLOR = 'k'                                  # the MAP model: bold black dashes
 BAND_COLOR = '0.62'                              # the 95 % range: light grey
+# --cmap-prof: the pixels as a density; the 95 % range red, as the points were
+DENSITY_BAND = '#d62728'
 POST_COLOR = '#d62728'                           # the MAP in the posterior plots
 HIST_COLOR, HIST_EDGE = '#1f4fd8', '#0a1f73'      # the marginal histograms, blue
 # names that mark a component of a decomposition, not a line of sight
@@ -66,6 +83,20 @@ COMP_LONG = {'as-is': 'the data as given, no conversion',
              'par': 'fault-parallel velocity, as given',
              've': 'east velocity / sin(strike)', 'vn': 'north velocity / cos(strike)',
              'los': 'LOS velocity / (LOS unit vector . strike direction), pixel by pixel'}
+
+
+def profile_cmap(name):
+    """The colormap of --cmap-prof: any MintPy or matplotlib name, its top end
+    white beyond the colour scale - as swath draws its density."""
+    from .tsviewer import get_cmap
+
+    cmap = get_cmap(name)
+    try:
+        return cmap.with_extremes(over='white')          # matplotlib >= 3.4
+    except AttributeError:
+        cmap = cmap.copy()
+        cmap.set_over('white')
+        return cmap
 
 
 ##############################################################################
@@ -256,7 +287,9 @@ class ModelSection(Section):
 
     def clear_model(self):
         self.result = None
-        self.fp = []                  # per file: x, v (fault-parallel), ...
+        self.fp = []                  # per file: x, v (fault-parallel), ... - what is fitted
+        self.fp_draw = None           # --nlook: the oversampled samples, drawn only
+        self.density = None           # --cmap-prof: the density drawn
         self.frame = None             # the local east/north frame, at the fault
         self.x_fault = None           # km along the profile
         self.fault_how = ''
@@ -285,8 +318,14 @@ class ModelSection(Section):
         height = v.fig_size[1] + 1.5 * (len(panels) - 1)
         self.fig = _new_figure(f'Model {self.name}', [v.fig_size[0], height])
         gsp = self.fig.add_gridspec(len(panels), 1, height_ratios=panels, hspace=0.08,
-                                    left=0.12, right=0.97, bottom=0.1, top=0.9)
+                                    left=0.12, right=0.86 if v.cmap_prof else 0.97,
+                                    bottom=0.1, top=0.9)
         self.ax_swath = self.fig.add_subplot(gsp[0])
+        self.ax_cbar = None
+        if v.cmap_prof:               # a fixed slot for the density's colour bar
+            pos = self.ax_swath.get_position()
+            self.ax_cbar = self.fig.add_axes([pos.x1 + 0.015, pos.y0, 0.016, pos.height])
+            self.ax_cbar.set_axis_off()
         k = 1
         self.ax_strain = self.ax_topo = None
         if v.show_strain:
@@ -308,6 +347,9 @@ class ModelSection(Section):
             ax.cla()
             ax.tick_params(which='both', direction='in', labelsize=v.font_size,
                            bottom=True, top=True, left=True, right=True)
+        if getattr(self, 'ax_cbar', None) is not None:
+            self.ax_cbar.cla()
+            self.ax_cbar.set_axis_off()
         for ax in axes[:-1]:
             ax.tick_params(labelbottom=False)
         axes[-1].set_xlabel('Distance from the fault [km]', fontsize=v.font_size + 1)
@@ -332,14 +374,33 @@ class ModelSection(Section):
 
     ##---------- the data
     def extract(self):
-        if not super().extract():
+        # the fit takes the real pixels; --nlook oversamples what is drawn only
+        if not super().extract(nlook=1):
             return False
         try:
             self.prepare()
         except ValueError as err:
             print(f'WARNING: section {self.name}: {err}')
             return False
+        self.fp_draw = self.oversampled() if self.v.nlook > 1 else None
         return True
+
+    def oversampled(self):
+        """--nlook: the swath of every file sampled NUM x NUM times as densely,
+        as fault-parallel velocity - for the points or the density drawn."""
+        v = self.v
+        dense = []
+        for sw in self.swath_list:
+            i = sw['file_idx']
+            try:
+                one = swath_extract(v.data_list[i], v.atr_list[i], v.box_list[i],
+                                    sw['start_yx'], sw['end_yx'], v.width, mask=v.msk_list[i],
+                                    keep_zero=v.keep_zero, nlook=v.nlook)
+            except ValueError:
+                continue
+            one['file_idx'] = i
+            dense.append(one)
+        return {f['file_idx']: f for f in self.fault_parallel(dense, warn=False)}
 
     def extract_gnss(self):
         """The GNSS inside the swath (--gnss-width, flat caps); their values
@@ -421,9 +482,32 @@ class ModelSection(Section):
                   'through the fault position, along the strike)')
 
         # 4. every pixel: distance from the fault, fault-parallel velocity
+        self.fp = self.fault_parallel(self.swath_list)
+        if not self.fp:
+            raise ValueError('no pixel left after the conversion to fault-parallel velocity')
+
+        # 5. the GNSS in the swath: the same component, the same distance
+        gin = self.gnss_in
+        if gin is not None and gin['index'].size:
+            idx = gin['index']
+            lon_g, lat_g = v.gnss.lon[idx], v.gnss.lat[idx]
+            if self.frame['kind'] == 'lonlat':
+                east, north = local_en(lon_g, lat_g, self.frame['lon0'], self.frame['lat0'])
+            else:
+                east = north = np.full(idx.size, np.nan)
+            gin['x'] = east * self.normal[0] + north * self.normal[1]
+            p_vec = (np.sin(np.radians(self.strike)), np.cos(np.radians(self.strike)))
+            value, sigma = v.gnss_values(v.gnss.subset(idx), p_vec)
+            gin['value'], gin['sigma'] = value, sigma
+        return
+
+    def fault_parallel(self, swaths, warn=True):
+        """Every pixel of some swaths as (distance from the fault, fault-parallel
+        velocity), one dict per file - the files with no pixel left out."""
+        v = self.v
         p_vec = (np.sin(np.radians(self.strike)), np.cos(np.radians(self.strike)))
-        self.fp = []
-        for sw in self.swath_list:
+        out = []
+        for sw in swaths:
             i = sw['file_idx']
             east, north, lon, lat = v.en_km(self.frame, i, sw['row'], sw['col'])
             x = east * self.normal[0] + north * self.normal[1]
@@ -442,32 +526,16 @@ class ModelSection(Section):
                 vpar = np.where(weak, np.nan, value * v.to_model / proj)
             good = np.isfinite(x) & np.isfinite(vpar)
             med_proj = float(np.nanmedian(np.abs(proj))) if np.isfinite(proj).any() else np.nan
-            if v.comp in ('los', 've', 'vn') and med_proj < 0.25:
+            if warn and v.comp in ('los', 've', 'vn') and med_proj < 0.25:
                 print(f'WARNING: {v.labels[i]}: the {v.comp.upper()} sees only '
                       f'{med_proj:.2f} of the fault-parallel motion (strike '
                       f'{self.strike:.0f} deg): its noise is amplified {1 / med_proj:.1f}x')
-            self.fp.append(dict(file_idx=i, x=x[good], v=vpar[good], dist=sw['dist'][good],
-                                perp=sw['perp'][good], value=value[good],
-                                row=np.asarray(sw['row'])[good], col=np.asarray(sw['col'])[good],
-                                lon=np.asarray(lon)[good], lat=np.asarray(lat)[good],
-                                proj=med_proj))
-        self.fp = [f for f in self.fp if f['x'].size]
-        if not self.fp:
-            raise ValueError('no pixel left after the conversion to fault-parallel velocity')
-
-        # 5. the GNSS in the swath: the same component, the same distance
-        gin = self.gnss_in
-        if gin is not None and gin['index'].size:
-            idx = gin['index']
-            lon_g, lat_g = v.gnss.lon[idx], v.gnss.lat[idx]
-            if self.frame['kind'] == 'lonlat':
-                east, north = local_en(lon_g, lat_g, self.frame['lon0'], self.frame['lat0'])
-            else:
-                east = north = np.full(idx.size, np.nan)
-            gin['x'] = east * self.normal[0] + north * self.normal[1]
-            value, sigma = v.gnss_values(v.gnss.subset(idx), p_vec)
-            gin['value'], gin['sigma'] = value, sigma
-        return
+            out.append(dict(file_idx=i, x=x[good], v=vpar[good], dist=sw['dist'][good],
+                            perp=sw['perp'][good], value=value[good],
+                            row=np.asarray(sw['row'])[good], col=np.asarray(sw['col'])[good],
+                            lon=np.asarray(lon)[good], lat=np.asarray(lat)[good],
+                            proj=med_proj))
+        return [f for f in out if f['x'].size]
 
     ##---------- the fit
     def fit(self):
@@ -546,36 +614,80 @@ class ModelSection(Section):
         self.fig.canvas.flush_events()
         return
 
-    def plot_points(self):
-        """(x, v) of the points to draw, per file of the fit - thinned to
-        --max-points in all."""
+    def drawn(self, k):
+        """What is drawn of file k of the fit: its oversampled samples with
+        --nlook, else its pixels."""
+        f = self.fp[k]
+        if self.fp_draw and f['file_idx'] in self.fp_draw:
+            return self.fp_draw[f['file_idx']]
+        return f
+
+    def plot_points(self, thin=True):
+        """(x, v) of the points to draw, per file of the fit, each brought onto
+        the offset of the first - thinned to --max-points in all (thin=True)."""
         res = self.result
-        total = sum(self.fp[k]['x'].size for k in res['sets'])
+        total = sum(self.drawn(k)['x'].size for k in res['sets'])
         keep = 1.0
-        if self.v.max_points and total > self.v.max_points:
+        if thin and self.v.max_points and total > self.v.max_points:
             keep = self.v.max_points / total
         rng = np.random.default_rng(0)
         out = []
         for j, k in enumerate(res['sets']):
-            f = self.fp[k]
+            f = self.drawn(k)
             sel = (rng.random(f['x'].size) < keep) if keep < 1 else slice(None)
             out.append((k, f['x'][sel], f['v'][sel] + self.offset_shift(j)))
         return out, total
+
+    def draw_density(self, ax):
+        """--cmap-prof: every pixel drawn (oversampled with --nlook) as a point
+        density, as swath draws it: a log colour scale up to the 98th
+        percentile of the occupied cells, the densest beyond it white."""
+        v = self.v
+        pts, _ = self.plot_points(thin=False)
+        x = np.concatenate([p[1] for p in pts])
+        y = np.concatenate([p[2] for p in pts])
+        # cells as swath's: ~55 over the data (not over the room left for the
+        # legend), half a --bin wide; the grid spans the whole plot
+        lo, hi = np.percentile(y, [0.5, 99.5])
+        den = self.density = swath_density(x, y, bin_x=self.result['bin_km'] / 2.0,
+                                       bin_y=nice_step(1.1 * (hi - lo)), ylim=ax.get_ylim())
+        cmap = profile_cmap(v.cmap_prof)
+        counts = np.ma.masked_where(den['counts'] == 0, den['counts'])
+        occupied = den['counts'][den['counts'] > 0]
+        cmax = max(float(np.percentile(occupied, 98)) if occupied.size else 10.0, 10.0)
+        pcm = ax.pcolormesh(den['x_edges'], den['y_edges'], counts.T, cmap=cmap,
+                            shading='flat', norm=mcolors.LogNorm(vmin=1.0, vmax=cmax),
+                            zorder=0.5, rasterized=True)
+        self.ax_cbar.set_axis_on()
+        cbar = self.fig.colorbar(pcm, cax=self.ax_cbar, extend='max')
+        unit = v.model_unit.split('/')[0] if _unit_text(v.model_unit).strip() else ''
+        cbar.set_label(f"Point density\n[count / {den['bin_x']:g} km x {den['bin_y']:.3g}"
+                       f"{' ' + unit if unit else ''} cell]", fontsize=max(v.font_size - 2, 6))
+        cbar.ax.tick_params(labelsize=max(v.font_size - 2, 6))
+        return pcm
 
     def draw_fit(self):
         v, ax, res = self.v, self.ax_swath, self.result
         model, summ = res['model'], res['summary']
         handles = []
+        density = bool(v.cmap_prof)
 
-        # the pixels, every file brought onto the offset of the first
-        pts, total = self.plot_points()
+        # the pixels, every file brought onto the offset of the first: red
+        # points (Hussain et al.), or - --cmap-prof - a density, drawn below
+        # once the limits are known
+        pts, _ = self.plot_points()
         n_drawn = sum(p[1].size for p in pts)
         alpha = float(np.clip(1.5e4 / max(n_drawn, 1), 0.05, 0.6))
         multi = len(pts) > 1
         for k, x, y in pts:
             color = POINT_COLORS[k % len(POINT_COLORS)]
-            ax.scatter(x, y, s=2.5, c=color, alpha=alpha, lw=0, zorder=1, rasterized=True)
             name = v.labels[self.fp[k]['file_idx']] if multi else 'InSAR'
+            if density:
+                if multi:             # the file of each median: its colour
+                    handles.append(Line2D([], [], ls='', marker='o', ms=6, mfc=color,
+                                          mec='k', mew=1.0, label=name))
+                continue
+            ax.scatter(x, y, s=2.5, c=color, alpha=alpha, lw=0, zorder=1, rasterized=True)
             handles.append(Line2D([], [], ls='', marker='o', ms=4, color=color, label=name))
 
         # the model: its 95 % range and the MAP
@@ -592,22 +704,30 @@ class ModelSection(Section):
         xx = np.unique(np.r_[xx, x0 - 1e-6, x0 + 1e-6]) if model.creep else xx
         best, band_lo, band_hi = model_band(res, xx)
 
-        # the binned medians, +/- one robust standard deviation
+        # the binned medians, +/- one robust standard deviation - bigger on a
+        # density, their error bars haloed in white
         bins_xy = []
+        big = dict(ms=6.5, mec='k', mew=1.1, ecolor='k', elinewidth=1.0) if density else \
+            dict(ms=3.2, mec='0.1', mew=0.7, ecolor='0.25', elinewidth=0.5)
         for j, k in enumerate(res['sets']):
             b = res['bins'][j]
             face = 'w' if not multi else POINT_COLORS[k % len(POINT_COLORS)]
-            ax.errorbar(b['x'], b['median'] + self.offset_shift(j), yerr=b['std'], fmt='o',
-                        ms=3.2, mfc=face, mec='0.1', mew=0.7, ecolor='0.25', elinewidth=0.5,
-                        capsize=0, zorder=4)
+            bars = ax.errorbar(b['x'], b['median'] + self.offset_shift(j), yerr=b['std'],
+                               fmt='o', mfc=face, capsize=0, zorder=4, **big)
+            if density:
+                white_halo(bars, width=2.6)
             bins_xy.append(np.c_[b['x'], b['median'] + self.offset_shift(j)])
-        handles.append(Line2D([], [], ls='', marker='o', ms=4.5, mfc='w', mec='0.1', mew=0.7,
-                              label=f'Median per {res["bin_km"]:g} km (±1σ)'))
+        handles.append(Line2D([], [], ls='', marker='o', mfc='w',
+                              label=f'Median per {res["bin_km"]:g} km (±1σ)',
+                              **(dict(ms=6.5, mec='k', mew=1.1) if density else
+                                 dict(ms=4.5, mec='0.1', mew=0.7))))
 
-        ax.fill_between(xx, band_lo, band_hi, color=BAND_COLOR, alpha=0.55, lw=0, zorder=2)
+        band = dict(color=DENSITY_BAND, alpha=0.4) if density else dict(color=BAND_COLOR,
+                                                                         alpha=0.55)
+        ax.fill_between(xx, band_lo, band_hi, lw=0, zorder=2, **band)
         ax.plot(xx, best, ls='--', color=MAP_COLOR, lw=2.2, zorder=6)
         handles.append(Line2D([], [], ls='--', color=MAP_COLOR, lw=2.2, label='MAP model'))
-        handles.append(plt.Rectangle((0, 0), 1, 1, fc=BAND_COLOR, alpha=0.55,
+        handles.append(plt.Rectangle((0, 0), 1, 1, fc=band['color'], alpha=band['alpha'],
                                      label='95% range'))
 
         # the GNSS
@@ -646,6 +766,8 @@ class ModelSection(Section):
                                                         + pad))
         span = hi_x - lo_x
         ax.set_xlim(lo_x - 0.01 * span, hi_x + 0.01 * span)
+        if density:
+            self.draw_density(ax)
 
         # the A / A' ends, inside the top corners
         kw = dict(xycoords='axes fraction', fontsize=v.font_size + 3, fontweight='bold',
@@ -687,8 +809,10 @@ class ModelSection(Section):
         placer.place(make_legend, room=room, max_grow=0.25)
 
         n_files = len(res['sets'])
+        total = sum(self.fp[k]['x'].size for k in res['sets'])    # fitted: the real pixels
         title = (f'{self.name}: swath ±{v.width:g} km, {total:,} pixels'
                  + (f' in {n_files} files' if n_files > 1 else '')
+                 + (f' (drawn {v.nlook}x oversampled)' if self.fp_draw else '')
                  + (f', {res["gnss"]["x"].size} GNSS' if res['gnss'] is not None else '')
                  + f'\nstrike {self.strike:.0f}°, {COMP_TEXT[v.comp]}')
         ax.set_title(title, fontsize=v.font_size - 1, pad=6)
@@ -972,9 +1096,8 @@ class ModelSection(Section):
             blocks.append(np.column_stack([
                 f['dist'], f['x'], f['perp'], f['value'], f['v'], f['v'] + self.offset_shift(j),
                 f['row'], f['col'], f['lon'], f['lat'], np.full(f['x'].size, f['file_idx'])]))
-        rc_fmt = '%.4f' if v.nlook > 1 else '%d'
         np.savetxt(out, np.vstack(blocks), delimiter=',', comments='',
-                   fmt=['%.5f', '%.5f', '%.5f', '%.6g', '%.6g', '%.6g', rc_fmt, rc_fmt,
+                   fmt=['%.5f', '%.5f', '%.5f', '%.6g', '%.6g', '%.6g', '%d', '%d',
                         '%.7f', '%.7f', '%d'],
                    header='dist_km,x_km,perp_km,value,v_model,v_shifted,row,col,lon,lat,'
                           'file_idx')
@@ -1060,7 +1183,9 @@ class ModelSection(Section):
             f'fault          : at {self.x_fault:.3f} km along the profile - {self.fault_how}',
             f'strike         : {self.strike:.2f} deg - {self.strike_how}; the profile is '
             f'{self.obliquity:.1f} deg off the fault normal',
-            f'bins           : {res["bin_km"]:g} km, the median of each (3+ pixels)',
+            f'bins           : {res["bin_km"]:g} km, the median of each (3+ pixels)'
+            + (f'; the real pixels - --nlook {v.nlook} oversampled what is drawn only'
+               if v.nlook > 1 else ''),
             'priors         : uniform, ' + ', '.join(
                 f'{n} {model.bounds[n][0]:.4g} to {model.bounds[n][1]:.4g}'
                 for n in res['names'] if n in ('S', 'd1', 'C', 'd2', 'x0'))

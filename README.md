@@ -688,6 +688,25 @@ the MAP as a red line, the 95 % range dashed and written above it; the
 section, `A - A'`, white on black in the corner. The trade-off between *S* and
 *d₁* shows there.
 
+**Two views of the pixels.** By default they are points, as above. With
+`--cmap-prof CMAP` (alone: `viridis`) they are a **point density** instead,
+drawn as `viewinsar swath` draws its own - log colour scale, the densest
+cells white, a colour bar, cells half a `--bin` wide - with the 95 % range in
+**red** over it, the medians **bigger** (white, a colour per file with
+several), and no points:
+
+```bash
+viewinsar model TS_GEOCml10GACOS/cum_filt.h5 --fault faults.shp --width 20 \
+    --cmap-prof magma --nlook 10
+```
+
+`--nlook N` fills in the picture of a multilooked raster, as in swath - the
+points or the density - with N × N samples per pixel. **The fit always takes
+the real pixels**: interpolated samples are no new data. Before 0.5.5 they went
+into the fit, which made the 95 % ranges too narrow (in a test, half as wide
+with `--nlook 3`). The title says when the drawing is oversampled, and so does
+`_params.txt`.
+
 | option | default | meaning |
 |---|---|---|
 | `--width` | `20` | half width of the swath, km |
@@ -704,6 +723,8 @@ section, `A - A'`, white on black in the corner. The trade-off between *S* and
 | `--noise` | `auto` | `auto`: exponential, fitted to the residuals of a least-squares fit, for each file; `white`: each bin's own scatter; `SILL LENGTH`: given, in (mm/yr)² and km |
 | `--walkers`, `--steps`, `--burn`, `--seed` | 64, 5000, a third, 0 | the sampler |
 | `--gnss`, `--vel`, `--gnss-width`, `--gnss-nofit` | - | GNSS |
+| `--cmap-prof [CMAP]` | off: points | the pixels as a point density in CMAP (above) |
+| `--nlook` | `1` | oversample the picture (points or density), not the fit |
 | `--strain`, `--ylim`, `--max-points` | off, auto, 200000 | the figure |
 
 The export (<kbd>e</kbd> or `--save [DIR]`, into `DIR` - made if it does not

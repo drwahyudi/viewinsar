@@ -377,6 +377,14 @@ def test_model_options(products):
         cli.model_cmd_line_parse([asc, '--nodisplay', '--noverbose'])
     with pytest.raises(ValueError, match='--geom'):
         cli.model_cmd_line_parse([asc, '--geom', 'nowhere.h5', '--noverbose'])
+    # --cmap-prof: a colormap, viridis when left out - a file after it is an input
+    assert cli.model_cmd_line_parse([asc, '--noverbose']).cmap_prof is None
+    assert cli.model_cmd_line_parse([asc, '--cmap-prof', '--noverbose']).cmap_prof == 'viridis'
+    assert cli.model_cmd_line_parse([asc, '--cmap-prof', 'magma_r']).cmap_prof == 'magma_r'
+    bare = cli.model_cmd_line_parse(['--cmap-prof', asc, '--noverbose'])
+    assert bare.cmap_prof == 'viridis' and bare.file == [asc]
+    with pytest.raises(ValueError, match='--cmap-prof: no colormap'):
+        cli.model_cmd_line_parse([asc, '--cmap-prof', 'no_such_map', '--noverbose'])
 
 
 def test_model_end_to_end(products, tmp_path):
@@ -486,6 +494,57 @@ def test_model_two_tracks(products, tmp_path):
     assert set(bins['file_idx']) == {0, 1}
     # the bins of both tracks, shifted, sit on the model
     assert np.median(np.abs(bins['residual'])) < 1.0
+
+
+def test_model_density_view(products, tmp_path):
+    """--cmap-prof: the pixels as a point density, as swath draws it - no points,
+    the 95 % range red, bigger medians, a colour bar; --nlook fills the density
+    in but the fit takes the real pixels, exactly as without it."""
+    from matplotlib import colors as mcolors
+    from matplotlib.collections import PathCollection, PolyCollection, QuadMesh
+
+    args = [products['asc'], products['desc'], '--labels', 'T1A', 'T2D', '--comp', 'los',
+            '-fault', products['fault'], *PROFILE, *FAST, '--nodisplay', '--noverbose']
+    plain = cli.model_main([*args, '--outdir', str(tmp_path / 'plain')])
+    dense = cli.model_main([*args, '--cmap-prof', 'magma', '--nlook', '3',
+                            '--outdir', str(tmp_path / 'dense')])
+    sp, sd = plain.sections[0], dense.sections[0]
+    assert sd.result['n_pixels'] == sp.result['n_pixels']
+    for name in ('S', 'd1', 'a', 'a2'):
+        for key in ('map', 'lo', 'hi'):
+            assert sd.result['summary'][name][key] == pytest.approx(
+                sp.result['summary'][name][key], rel=1e-9), (name, key)
+    drawn = sum(f['x'].size for f in sd.fp_draw.values())
+    assert drawn > 5 * sd.result['n_pixels'] and sp.fp_draw is None
+    assert '(drawn 3x oversampled)' in sd.ax_swath.get_title()
+    assert 'oversampled what is drawn only' in next(
+        (tmp_path / 'dense').glob('*_params.txt')).read_text()
+    pts = _csv(next((tmp_path / 'dense').glob('*_points.csv')))
+    assert len(pts) == sd.result['n_pixels'] and np.all(pts['row'] == np.round(pts['row']))
+
+    def bands(ax):
+        return [mcolors.to_hex(c.get_facecolor()[0]) for c in ax.collections
+                if isinstance(c, PolyCollection)]
+
+    def median_size(ax):
+        return [ln for ln in ax.get_lines() if ln.get_marker() == 'o'][0].get_markersize()
+
+    ax = sd.ax_swath
+    mesh = [c for c in ax.collections if isinstance(c, QuadMesh)]
+    assert len(mesh) == 1 and mesh[0].get_cmap().name.startswith('magma')
+    # every sample drawn, but for the few beyond the plot's limits
+    assert 0.99 * drawn < mesh[0].get_array().sum() <= drawn
+    assert not [c for c in ax.collections if isinstance(c, PathCollection)]
+    assert '#d62728' in bands(ax) and '#9e9e9e' in bands(sp.ax_swath)
+    assert median_size(ax) > 1.8 * median_size(sp.ax_swath)
+    assert sd.ax_cbar.get_ylabel().startswith('Point density')
+    labels = [t.get_text() for t in ax.get_legend().get_texts()]
+    assert labels[:3] == ['T1A', 'T2D', 'Median per 1 km (±1σ)'] and 'InSAR' not in labels
+    # the default view: the points, no density
+    assert [c for c in sp.ax_swath.collections if isinstance(c, PathCollection)]
+    assert not [c for c in sp.ax_swath.collections if isinstance(c, QuadMesh)]
+    plain.close()
+    dense.close()
 
 
 def test_model_several_profiles(products, tmp_path):
@@ -618,5 +677,5 @@ def test_help_mentions_model(capsys):
     out = capsys.readouterr().out
     for needle in ('--comp', '--creep', '--free-x0', '--d1-prior', '--noise', '--walkers',
                    '-gnss', '_posterior.png', '_samples.csv', 'Goodman & Weare',
-                   'Hussain et al.'):
+                   'Hussain et al.', '--cmap-prof', 'point DENSITY'):
         assert needle in out, needle

@@ -6,6 +6,29 @@ the project uses [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-11-17
+
+### Added
+- **`model --cmap-prof [CMAP]`: the pixels as a point density** instead of
+  points, drawn as `swath` draws its density (log colour scale up to the
+  98th percentile of the occupied cells, the densest white, a colour bar;
+  cells half a `--bin` wide, ~55 over the data). Under it the 95 % range is
+  red, the medians per bin are twice the size (white, or a colour per file
+  with several - each named in the legend), and no point is drawn. Alone,
+  `--cmap-prof` takes viridis; any matplotlib, MintPy or cmcrameri name works,
+  and an unknown one is refused. The default view - red points, a grey
+  range - is as before.
+
+### Fixed
+- **`model --nlook` no longer goes into the fit.** It oversamples what is drawn
+  (the points, or the density) and the fit takes the real pixels. Before, the
+  interpolated samples were fitted as data: the medians hardly moved, but each
+  bin seemed to hold N x N times more independent pixels, so the 95 % ranges
+  came out too narrow (half as wide with `--nlook 3` in a test). Fits made
+  with `--nlook` before 0.5.5 should be redone; without it nothing changes.
+  `_points.csv` lists the fitted pixels, `_params.txt` says when the drawing
+  was oversampled.
+
 ## [0.5.4] - 2026-11-17
 
 ### Added
