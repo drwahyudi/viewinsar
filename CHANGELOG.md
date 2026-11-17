@@ -4,6 +4,48 @@ All notable changes to viewinsar are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project uses [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [0.5.4] - 2026-11-17
+
+### Added
+- **`viewinsar tseries` takes several files** - adjacent frames of a track,
+  overlapping tracks, or versions of one time series
+  (`viewinsar tseries 061D_*/TS_GEOCml10GACOS/cum.h5 --radius 15`). They share
+  one map, each drawn where it lies, with its outline, reference area and
+  series in a colour of its own; a double click shows the series of every
+  file that covers the point (in an overlap, all of them). Each file keeps
+  its own dates and, until a right drag (or `--ref-geo`, `--ref-lalo`) gives
+  one where it has data, its own reference area: drag one into the overlap
+  of two frames and their series become comparable. The reference date is
+  common: `--ref-date`, else the latest of the files' first dates (a file
+  without it takes its nearest). The slider shows each file at its date
+  nearest the slider's. The files must be geocoded in one CRS, or
+  radar-coded on one grid (MintPy's `timeseries.h5` and
+  `timeseries_ERA5.h5`, as `tsview.py`); the options in pixels (`--ref`,
+  `--ref-yx`, `--yx`, `--point`) and `--mask` need one grid. The export is
+  named after the lat/lon of the point, and the `.csv` has every date of the
+  files, with columns `_1`, `_2` ... per file.
+- **`--labels`** for `tseries`: the names of the files in the legends.
+- Wildcards in quotes work for `tseries` too (`"061D_*/TS_GEOC*/cum.h5"`,
+  for a shell that does not expand them).
+
+### Changed
+- Files with the same name in folders of the same name
+  (`061D_09234_131313/TS_GEOCml10GACOS/cum.h5`, `061D_09012_161516/...`) are
+  named in legends by the folders that tell them apart (`061D_09234_131313`),
+  in `swath`, `stat` and `model` as in `tseries`; before, both were
+  `TS_GEOCml10GACOS/cum`.
+
+### Fixed
+- `tseries`: the map window's tick labels no longer hide behind the date
+  slider (a tall map) or the help text and buttons on the left (a wide one).
+  Its parts are placed in inches now, and the window is an inch wider, and
+  taller when the left column needs it (LiCSBAS's dozen noise indices).
+- Docs: the GLO-30 tiles have overviews at 1/2, 1/4 and 1/8 resolution (not
+  only 1/2 and 1/4). The reader always used whichever exist; checked bit for
+  bit against GDAL on a real tile.
+
 ## [0.5.3] - 2026-11-15
 
 ### Changed

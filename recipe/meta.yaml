@@ -1,5 +1,5 @@
 {% set name = "viewinsar" %}
-{% set version = "0.5.3" %}
+{% set version = "0.5.4" %}
 
 package:
   name: {{ name|lower }}
@@ -9,7 +9,7 @@ source:
   # For a conda-forge submission, point at the PyPI sdist and paste the sha256
   # printed by:  openssl dgst -sha256 dist/viewinsar-{{ version }}.tar.gz
   url: https://pypi.org/packages/source/{{ name[0] }}/{{ name }}/{{ name }}-{{ version }}.tar.gz
-  sha256: b287e4ef2549c659a94163c81904c0862139063477fa0b76a4a1ea605efa29f2
+  sha256: 2a537f69950add8f482a8a1fa3f4230d2ed7f7ae10bbabd32babe2c5cc183da4
   # To build straight from a local checkout instead, comment the two lines above
   # and uncomment:
   # path: ..

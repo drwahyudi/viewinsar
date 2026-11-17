@@ -112,11 +112,27 @@ def unit_label(unit):
 ##############################################################################
 def file_labels(files):
     """Short, distinct names for the input files: the base names, with the
-    parent folder where two of them share one."""
+    parent folder where two of them share one - or, where the parent folders
+    are alike too (061D_09234_131313/TS_GEOCml10GACOS/cum.h5 and
+    061D_09012_161516/TS_GEOCml10GACOS/cum.h5), the part of the paths that
+    tells them apart (061D_09234_131313, 061D_09012_161516)."""
     names = [os.path.splitext(os.path.basename(f))[0] for f in files]
     if len(set(names)) < len(names):
         names = [os.path.join(os.path.basename(os.path.dirname(os.path.abspath(f))), n)
                  for f, n in zip(files, names)]
+    if len(set(names)) < len(names):
+        parts = [os.path.abspath(f).split(os.sep) for f in files]
+        parts = [p[:-1] + [os.path.splitext(p[-1])[0]] for p in parts]
+        lead = 0                                 # the folders all of them start with
+        while all(len(p) > lead + 1 and p[lead] == parts[0][lead] for p in parts):
+            lead += 1
+        tail = 0                                 # ... and the names all of them end with
+        while all(len(p) > lead + tail + 1 and p[-1 - tail] == parts[0][-1 - tail]
+                  for p in parts):
+            tail += 1
+        middle = ['/'.join(p[lead:len(p) - tail]) for p in parts]
+        if len(set(middle)) == len(middle):
+            names = middle
     return names
 
 

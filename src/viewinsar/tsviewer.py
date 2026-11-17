@@ -83,6 +83,34 @@ def get_cmap(name):
     return plt.get_cmap('RdBu_r')
 
 
+# the map window, in inches: a column on the left (the help text, the layer
+# buttons, the mask box), the date slider along the bottom, the map in the rest
+COLUMN, TICKS, BOTTOM, TOP = 1.4, 0.6, 1.0, 0.45
+ITEM, LINE = 0.15, 0.135          # a layer button, a line of the help text
+
+
+def map_window_size(ratio, n_layers, help_lines, given=None):
+    """(width, height) of the map window in inches: the map at its shape on the
+    ground (ratio = height / width), and room for the left column."""
+    if given:
+        return list(given)
+    width = 7.0 if ratio > 1 else 10.0
+    height = 0.82 * (width - COLUMN - TICKS - 0.15) * ratio + BOTTOM + TOP   # 0.18: colour bar
+    column = 1.6 + ITEM * n_layers + 0.1 + 0.25 + LINE * help_lines + 0.1
+    return [width, float(min(max(height, column, 5.0), 11.0))]
+
+
+def place_map_window(fig, n_layers, right=0.15):
+    """Where the parts of the map window go, as figure fractions worked out in
+    inches - nothing overlaps, whatever the size of the window."""
+    w, h = fig.get_size_inches()
+    return dict(ax=[(COLUMN + TICKS) / w, BOTTOM / h, 1 - (COLUMN + TICKS + right) / w,
+                    1 - (BOTTOM + TOP) / h],
+                radio=[0.06 / w, 1.6 / h, (COLUMN - 0.1) / w, (ITEM * n_layers + 0.1) / h],
+                mask=[0.06 / w, BOTTOM / h, 0.9 / w, 0.45 / h],
+                slider=[0.75 / w, 0.25 / h, 1 - 1.15 / w, 0.25 / h])
+
+
 def _fmt(value, integer=False):
     if value is None or not np.isfinite(value):
         return 'nan'
@@ -122,6 +150,8 @@ class TimeSeriesViewer:
                                   scale=per_file(getattr(self, 'data_scale', None), 0))
         self.vprint(f'{ts.kind} time series {self.file}: {ts.n_date} dates '
                     f'{ts.dates[0]} - {ts.dates[-1]}, {ts.length} x {ts.width} pixels')
+        if getattr(self, 'labels', None):
+            ts.label = f'1: {self.labels[0]}'
         if self.file2:
             self.open_second()
 
@@ -324,12 +354,22 @@ class TimeSeriesViewer:
 
     def make_map_figure(self):
         ts = self.ts
-        fig_x = 6 if ts.length > ts.width else 9
-        fig_y = max((fig_x - 2) * ts.length * self.aspect / ts.width + 1, 5)
-        fig = self.fig_map = _new_figure('Velocity / Cumulative Displacement',
-                                         self.fig_size_map or [fig_x, fig_y])
-        ax = self.ax_map = fig.add_axes([0.15, 0.15, 0.83, 0.83])
-        self.ref_text = fig.text(0.01, 0.99, '', fontsize=8, va='top')
+        # what the map can show: the velocity, then the noise indices / layers
+        self.layers = {}
+        if self.ts2 is not None:
+            self.layers['vel(1)'] = (self.vel, 'vel')
+            self.layers['vel(2)'] = (self.vel2, 'vel')
+        else:
+            self.layers['vel'] = (self.vel, 'vel')
+        for name, (data, unit) in ts.layers.items():
+            self.layers[name] = (data, 'mask' if name == 'mask' else unit)
+
+        size = map_window_size(ts.length * self.aspect / ts.width, len(self.layers),
+                               self.ref_note().count('\n') + 1, self.fig_size_map)
+        fig = self.fig_map = _new_figure('Velocity / Cumulative Displacement', size)
+        place = place_map_window(fig, len(self.layers))
+        ax = self.ax_map = fig.add_axes(place['ax'])
+        self.ref_text = fig.text(0.06 / size[0], 1 - 0.06 / size[1], '', fontsize=8, va='top')
         self.ref_box, = ax.plot([], [], '--k', alpha=0.8, zorder=6)
         self.image = ax.imshow(np.full((ts.length, ts.width), np.nan), cmap=self.cmap,
                                aspect=self.aspect, interpolation='nearest')
@@ -341,28 +381,19 @@ class TimeSeriesViewer:
             elif orbit.startswith('d'):
                 ax.invert_xaxis()             # as MintPy: east right
 
-        # what the map can show: the velocity, then the noise indices / layers
-        self.layers = {}
-        if self.ts2 is not None:
-            self.layers['vel(1)'] = (self.vel, 'vel')
-            self.layers['vel(2)'] = (self.vel2, 'vel')
-        else:
-            self.layers['vel'] = (self.vel, 'vel')
-        for name, (data, unit) in ts.layers.items():
-            self.layers[name] = (data, 'mask' if name == 'mask' else unit)
-        rad_ax = fig.add_axes([0.01, 0.3, 0.13, len(self.layers) * 0.025 + 0.04])
+        rad_ax = fig.add_axes(place['radio'])
         self.radio = RadioButtons(rad_ax, tuple(self.layers))
         for label in self.radio.labels:
             label.set_fontsize(8)
         self.radio.on_clicked(self.show_layer)
         if self.has_mask:
-            box = fig.add_axes([0.01, 0.2, 0.1, 0.08])
+            box = fig.add_axes(place['mask'])
             self.mask_check = CheckButtons(box, ['mask'], [self.use_mask])
             self.mask_check.on_clicked(self.toggle_mask)
 
         # the date slider: the cumulative displacement at that date
         self.date_nums = mdates.date2num(ts.datetimes)
-        sax = fig.add_axes([0.1, 0.08, 0.8, 0.05], yticks=[])
+        sax = fig.add_axes(place['slider'], yticks=[])
         self.slider = Slider(sax, 'yr', self.date_nums[0] - 3, self.date_nums[-1] + 3,
                              valinit=self.date_nums[self.ix_ref], valfmt='')
         sax.bar(self.date_nums, np.ones(ts.n_date), facecolor='black', width=4)
@@ -457,15 +488,20 @@ class TimeSeriesViewer:
         else:
             self.show_layer(self.layer)
 
+    def ref_note(self):
+        """The text at the top left of the map window."""
+        x1, x2, y1, y2 = self.ref
+        note = f'{HELP_TEXT}\n\nRef area:\n X {x1}:{x2}\n Y {y1}:{y2}\n (start from 0)'
+        if self.radius:
+            note += f'\n\nCircle:\n r = {self.radius:g} km'
+        return note
+
     def draw_ref(self):
         x1, x2, y1, y2 = self.ref
         xs = [x1 - 0.5, x2 - 0.5, x2 - 0.5, x1 - 0.5, x1 - 0.5]
         ys = [y1 - 0.5, y1 - 0.5, y2 - 0.5, y2 - 0.5, y1 - 0.5]
         self.ref_box.set_data(xs, ys)
-        note = f'{HELP_TEXT}\n\nRef area:\n X {x1}:{x2}\n Y {y1}:{y2}\n (start from 0)'
-        if self.radius:
-            note += f'\n\nCircle:\n r = {self.radius:g} km'
-        self.ref_text.set_text(note)
+        self.ref_text.set_text(self.ref_note())
 
     def draw_marker(self):
         """The pixel (a square, as LiCSBAS) or the circle, on the map."""

@@ -36,8 +36,9 @@ with the block medians joined by dashed lines (see
 
 `viewinsar tseries` is LiCSBAS_plot_ts.py for LiCSBAS and MintPy time series,
 with circles: `--radius 2` and a double click gives, at every date, the median of
-all pixels within 2 km, with the 25th-75th percentiles as error bars (see
-[Time series](#time-series-viewinsar-tseries)).
+all pixels within 2 km, with the 25th-75th percentiles as error bars. Several
+files - the frames of a track, say - share one map, and a double click gives the
+series of each file there (see [Time series](#time-series-viewinsar-tseries)).
 
 Several files at once - the frames of a track, or several tracks - make one
 density with a median line for each, and are drawn together on the map; GNSS
@@ -149,6 +150,8 @@ viewinsar model geo_velocity.h5 --comp los --fault faults.shp --width 25
 # time series, LiCSBAS-style: the median of a 2 km circle at every date
 viewinsar tseries cum_filt.h5 --radius 2
 viewinsar tseries geo_timeseries_ERA5_demErr.h5 --radius 2
+# ... of every frame of a track, on one map
+viewinsar tseries 061D_*/TS_GEOCml10GACOS/cum.h5 --radius 15
 
 # list what is inside a file
 viewinsar list timeseries.h5
@@ -267,7 +270,7 @@ nothing.
 |------|------|
 | `--topoxsect` (the elevation profile) | 1″ pixels (30.9 m on a UTM grid), up to 8000 a side: full resolution over a map of up to ~2.2° |
 | `--dem` (the map background) | the same, up to 3000 a side (~0.8°): view.py shades every pixel it is given |
-| a bigger map | proportionally wider pixels, read from the tiles' own half- and quarter-resolution overviews, so the download shrinks with them |
+| a bigger map | proportionally wider pixels, read from the tiles' own overviews (1/2, 1/4 and 1/8 resolution), so the download shrinks with them |
 
 The sea has no tiles; it is 0 m, as the product specifies. So are the few
 countries not released (Armenia, Azerbaijan). A tile that cannot be
@@ -752,6 +755,9 @@ viewinsar tseries geo/geo_timeseries_ERA5_demErr.h5 --radius 2 --unit cm
 
 # no window: the time series of one circle, as .csv + figures
 viewinsar tseries cum_filt.h5 --radius 2 --p-geo 121.68/-2.51 --nodisplay
+
+# several files - frames of a track - on one map (see below)
+viewinsar tseries 061D_*/TS_GEOCml10GACOS/cum.h5 --radius 15
 ```
 
 Two windows, as in LiCSBAS. The **map** shows the velocity relative to the
@@ -782,7 +788,8 @@ error bars, which is the point: they show how uniform the area is.
 |--------|---------|---------|
 | `--radius` | one pixel | the radius of the circle, km |
 | `--i2` / `--no-i2` | `cum.h5` beside `cum_filt.h5` | a second time series, in red |
-| `--ref-date` | first date (MintPy: `REF_DATE`) | where every series is 0 |
+| `--labels` | the file names | names of the files in the legends |
+| `--ref-date` | first date (MintPy: `REF_DATE`; several files: the latest of theirs) | where every series is 0 |
 | `--ref X1:X2/Y1:Y2`, `--ref-geo`, `--ref-yx`, `--ref-lalo` | the file's | the reference area |
 | `--point X/Y`, `--p-geo LON/LAT`, `--yx`, `--lalo` | the reference area's centre | the first point shown |
 | `--results`, `--mask`, `--nomask`, `--vel`, `--lookup` | found | the noise indices, mask, velocity, radar lat/lon |
@@ -805,6 +812,47 @@ e.g. `tseries_Y156X144_r2km`:
 | `….csv` | `date`, `year`, then per file `median_mm` `q25_mm` `q75_mm` `n_px` (with `--radius`) or `disp_mm` (one pixel) |
 | `….png` / `…_map.png` | the time series / the map |
 | `…_info.txt` | the file(s), the point, the circle, the reference area and date, the velocity |
+
+### Several files: frames, tracks, versions of one series
+
+```bash
+# adjacent LiCSBAS frames of a track, on one map
+viewinsar tseries 061D_*/TS_GEOCml10GACOS/cum.h5 --radius 15
+
+# ... with names, and a reference area in their overlap from the start
+viewinsar tseries frameA/cum.h5 frameB/cum.h5 --labels A B --radius 15 \
+    --ref-geo 121.60/121.70/-2.60/-2.50
+```
+
+Several files share **one map**: each is drawn where it lies, with its outline,
+its reference area (dashed) and its time series in a colour of its own. A
+double click shows the series of **every file that covers the point** - in the
+overlap of two frames, both - and the side panel says which files are not
+there. The files must be geocoded in one CRS (LiCSBAS GEOC, MintPy `geo_*`),
+or radar-coded on one grid (the MintPy time series of one stack, e.g.
+`timeseries.h5` and `timeseries_ERA5.h5`, as `tsview.py` takes them).
+
+- **Reference area**: each file starts with its own, so two frames' series at
+  one point differ by the motion of their reference areas. Right-drag one in
+  their overlap (or give `--ref-geo` / `--ref-lalo`) and every file with data
+  there takes it - their series become comparable; a file without data in it
+  keeps its own, and says so.
+- **Reference date**: `--ref-date`, else the latest of the files' first dates
+  (MintPy: `REF_DATE`), so that all start together; a file without that date
+  takes its nearest one.
+- **Dates**: each file keeps its own. The slider shows each file at its date
+  nearest the slider's, and nothing before its first date or after its last.
+- `--ref X1:X2/Y1:Y2`, `--ref-yx`, `--yx`, `--point` and `--mask` are in
+  pixels: they work for files on one grid only. `--i2`, `--results` and
+  `--vel-file` are for one file - several files each bring their own.
+- `--labels` names the files in the legends; by default they are told apart by
+  their names, or by the folders that differ (`061D_09234_131313`).
+
+The export is named after the point's lat/lon (`tseries_lat-2.5100_lon121.6800_r15km`;
+`_N…_E…` on a projected grid). The `.csv` has every date of the files, with a set
+of columns per file (`median_mm_1` … `n_px_2`, `nan` where a file has no such
+date), and `_info.txt` a block per file: its pixel, circle, reference area (in
+pixels and lon/lat), reference date and velocity.
 
 ---
 

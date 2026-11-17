@@ -1,8 +1,8 @@
 """--dem / --topoxsect without a file: the Copernicus GLO-30 DEM.
 
 No network here: GLO-30-like Cloud Optimized GeoTIFFs - float32, tiled,
-DEFLATE, the floating-point predictor, half and quarter resolution overviews,
-PixelIsPoint at the cell's whole-degree corner, as the real ones are - are
+DEFLATE, the floating-point predictor, overviews (two here; the real ones have
+three), PixelIsPoint at the cell's whole-degree corner, as the real ones are - are
 written from a known height field (by numpy alone, or by GDAL where rasterio is
 installed) and served by byte range in place of the download. The test tiles
 are 360 pixels of 10" a side (the real ones 3600 of 1"). A steep plane on top

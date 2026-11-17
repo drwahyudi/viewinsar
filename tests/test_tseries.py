@@ -36,9 +36,13 @@ YEARS = np.array([(d - DATES[0]).days for d in DATES]) / 365.25
 REF = (60, 65, 10, 15)                                      # x1, x2, y1, y2
 
 
-def rate_field():
-    """mm/yr: 0.5 * (x - 40), so the reference area (x 60-64) moves at 11."""
-    return np.broadcast_to(0.5 * (np.arange(WIDTH) - 40.0), (LENGTH, WIDTH)).copy()
+def rate_field(shift=0):
+    """mm/yr: 0.5 * (x - 40), so the reference area (x 60-64) moves at 11.
+
+    shift - a frame whose column 0 is column `shift` of this grid: the same
+            ground moves at the same rate in both
+    """
+    return np.broadcast_to(0.5 * (np.arange(WIDTH) + shift - 40.0), (LENGTH, WIDTH)).copy()
 
 
 def common_signal():
@@ -47,25 +51,30 @@ def common_signal():
     return sig - sig[0]
 
 
-def make_cube():
-    cube = rate_field()[None] * YEARS[:, None, None] + common_signal()[:, None, None]
+def make_cube(shift=0, index=None):
+    """index - the dates (of DATES) the file has: all by default."""
+    index = np.arange(N_DATE) if index is None else np.asarray(index)
+    cube = (rate_field(shift)[None] * YEARS[index][:, None, None]
+            + common_signal()[index][:, None, None])
     cube[:, :, :5] = np.nan                                 # no data west of x = 5
     return cube.astype(np.float32)
 
 
-def write_licsbas(folder, name='cum.h5', filtered=False, gap=True):
+def write_licsbas(folder, name='cum.h5', filtered=False, gap=True, shift=0, index=None):
+    """A LiCSBAS cum*.h5 and its results/; shift and index as make_cube()."""
     os.makedirs(os.path.join(folder, 'results'), exist_ok=True)
-    cube = make_cube()
+    cube = make_cube(shift, index)
+    dates = DATES if index is None else [DATES[i] for i in index]
     with h5py.File(os.path.join(folder, name), 'w') as f:
         f.create_dataset('cum', data=cube)
-        f.create_dataset('vel', data=rate_field().astype(np.float32))
-        f.create_dataset('imdates', data=np.array([int(d.strftime('%Y%m%d')) for d in DATES]))
+        f.create_dataset('vel', data=rate_field(shift).astype(np.float32))
+        f.create_dataset('imdates', data=np.array([int(d.strftime('%Y%m%d')) for d in dates]))
         f.create_dataset('refarea', data='{}:{}/{}:{}'.format(*REF))
-        for key, val in (('corner_lat', LAT1), ('corner_lon', LON1), ('post_lat', DLAT),
-                         ('post_lon', DLON)):
+        for key, val in (('corner_lat', LAT1), ('corner_lon', LON1 + shift * DLON),
+                         ('post_lat', DLAT), ('post_lon', DLON)):
             f.create_dataset(key, data=val)
         if gap:
-            g = np.zeros((N_DATE - 1, LENGTH, WIDTH), dtype=np.int8)
+            g = np.zeros((len(dates) - 1, LENGTH, WIDTH), dtype=np.int8)
             g[10, :, 40:] = 1                               # a network gap, east half
             f.create_dataset('gap', data=g)
         if filtered:

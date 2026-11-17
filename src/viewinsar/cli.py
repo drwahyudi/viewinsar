@@ -1685,6 +1685,12 @@ With --radius KM a double click takes a CIRCLE of that radius: every pixel withi
 it, relative to the reference area and the reference date as LiCSBAS does a
 single pixel, and each date shows their MEDIAN, with the 25th - 75th
 percentiles as an error bar. The fits follow the medians.
+
+Several files - adjacent frames of a track, overlapping tracks, or versions of
+one time series - share ONE MAP, each drawn where it lies with its outline in a
+colour of its own. A double click shows the series of every file that covers
+the point, each relative to its own reference area: right-drag one where they
+overlap (or give --ref-geo) to put them on the same ground.
 """
 
 TSERIES_EXAMPLE = """\
@@ -1702,6 +1708,11 @@ examples:
   # no window: save the time series of one circle (.csv + figures)
   viewinsar tseries cum_filt.h5 --radius 2 --p-geo 121.68/-2.51 --nodisplay
 
+  # several files, one map: adjacent LiCSBAS frames of a track
+  viewinsar tseries 061D_*/TS_GEOCml10GACOS/cum.h5 --radius 15
+  viewinsar tseries frameA/cum.h5 frameB/cum.h5 --labels A B --radius 15 \\
+      --ref-geo 121.60/121.70/-2.60/-2.50
+
 mouse / keyboard:
   left double click : the time series of that pixel (of the circle, with --radius)
   right drag        : a new reference area
@@ -1716,6 +1727,26 @@ point, e.g. tseries_Y156X144_r2km:
   <name>.png        the time series (.svg with --svg); <name>_map.png the map
   <name>_info.txt   the file(s), the point, the circle, the reference area
                     and date, the velocity
+
+several files (one map):
+  the files       geocoded in one CRS (LiCSBAS GEOC, MintPy geo_*), or radar-coded
+                  on one grid (the MintPy time series of one stack)
+  reference area  each file's own, until a right drag (or --ref-geo, --ref-lalo)
+                  gives one: every file with data in it takes it, the others keep
+                  theirs. Drag one into the overlap of two frames: their series
+                  become comparable (dashed on the map, in the file's colour)
+  reference date  --ref-date, else the latest of the files' first dates (MintPy:
+                  REF_DATE), so that all start together; a file without that date
+                  takes its nearest one
+  dates           each file keeps its own; the slider shows each file at its
+                  date nearest the slider's, and none before its first or after
+                  its last
+  pixel options   --ref X1:X2/Y1:Y2, --ref-yx, --yx, --point and --mask: files on
+                  one grid only. --i2, --results and --vel-file: one file only
+  output          named after the point: tseries_lat-2.5100_lon121.6800_r15km
+                  (projected: _N.._E..); the .csv has every date of the files and
+                  a set of columns per file: median_mm_1 ... n_px_2 ("nan" where a
+                  file has no such date)
 
 LiCSBAS users: --radius here is the RADIUS of the circle; the reference area that
 LiCSBAS_plot_ts.py takes with -r is --ref X1:X2/Y1:Y2. LiCSBAS -p X/Y (here --point),
@@ -1752,9 +1783,14 @@ def create_tseries_parser(prog=f'{PROG} tseries'):
     parser = ViewinsarParser(
         prog=prog, description=TSERIES_DESCRIPTION, epilog=TSERIES_EXAMPLE,
         formatter_class=argparse.RawTextHelpFormatter, allow_abbrev=False)
-    parser.add_argument('file', nargs='?',
+    parser.add_argument('file', nargs='*',
                         help='the time series: LiCSBAS cum_filt.h5 / cum.h5, or MintPy\n'
-                             '(default: ./cum_filt.h5, ./cum.h5 or ./timeseries.h5).')
+                             '(default: ./cum_filt.h5, ./cum.h5 or ./timeseries.h5).\n'
+                             'Several files - frames of a track, tracks, versions of\n'
+                             'one time series - share one map: see "several files".')
+    parser.add_argument('--labels', dest='labels', nargs='+', metavar='NAME',
+                        help='names of the input files in the legends (default: the\n'
+                             'file names, or the folders that tell them apart).')
     parser.add_argument('--radius', dest='radius', type=_radius_km, metavar='KM',
                         help='a circle of that radius, in km: each date shows the\n'
                              'median of its pixels, with the 25th-75th percentiles\n'
@@ -1766,7 +1802,8 @@ def create_tseries_parser(prog=f'{PROG} tseries'):
                         help='no second time series.')
     parser.add_argument('--ref-date', dest='ref_date', metavar='YYYYMMDD',
                         help='reference date, where every series is 0 (default: the\n'
-                             'first date; MintPy: its REF_DATE).')
+                             'first date; MintPy: its REF_DATE; several files: the\n'
+                             'latest of theirs).')
     parser.add_argument('--noverbose', dest='print_msg', action='store_false',
                         help='disable the verbose message printing.')
 
@@ -1809,8 +1846,8 @@ def create_tseries_parser(prog=f'{PROG} tseries'):
     data.add_argument('--data-scale', dest='data_scale', type=float, nargs='+',
                       metavar='FACTOR',
                       help='multiply the time series (and its velocity) by FACTOR\n'
-                           'before anything, one for the file and one for --i2 (or\n'
-                           'one for both): 0.1 for a product 10x too large. A rule in\n'
+                           'before anything: one per file (and one for --i2), or\n'
+                           'one for all: 0.1 for a product 10x too large. A rule in\n'
                            '~/.config/viewinsar/viewinsar.ini does it for every file\n'
                            'of a mission: [data-scale] ALOS-2 = 0.1.')
     data.add_argument('--lookup', dest='lookup_file', metavar='FILE',
@@ -1855,8 +1892,27 @@ def create_tseries_parser(prog=f'{PROG} tseries'):
     return parser
 
 
+def _time_series_files(names):
+    """The input files, in the order given: names, or wildcards (quoted, or on
+    Windows) - each name once."""
+    import glob
+
+    files = []
+    for name in names:
+        hits = sorted(glob.glob(name)) if glob.has_magic(name) else (
+            [name] if os.path.isfile(name) else [])
+        if not hits:
+            raise ValueError(f'no such file: {name}')
+        files += [f for f in hits
+                  if os.path.abspath(f) not in {os.path.abspath(g) for g in files}]
+    return files
+
+
 def tseries_cmd_line_parse(iargs=None):
-    """Parse the `tseries` arguments."""
+    """Parse the `tseries` arguments.
+
+    inps.files is the list of input files; inps.file the first of them.
+    """
     from .tsdata import find_time_series
 
     iargs = _argv(iargs, 'tseries')
@@ -1865,13 +1921,28 @@ def tseries_cmd_line_parse(iargs=None):
     inps.argv = list(iargs)
 
     if not inps.file:
-        inps.file = find_time_series('.')
-        if not inps.file:
+        found = find_time_series('.')
+        if not found:
             raise ValueError('no time series given, and no cum_filt.h5, cum.h5 or '
                              'timeseries.h5 here')
-    elif not os.path.isfile(inps.file):
-        raise ValueError(f'no such file: {inps.file}')
-    if inps.no_i2:
+        inps.files = [found]
+    else:
+        inps.files = _time_series_files(inps.file)
+    inps.file = inps.files[0]
+    several = len(inps.files) > 1
+    if inps.labels and len(inps.labels) != len(inps.files):
+        raise ValueError(f'--labels: {len(inps.labels)} name(s) for {len(inps.files)} file(s)')
+    if several:
+        # what belongs to one file only; several files bring their own
+        for opt, value in (('--i2', inps.file2), ('--results', inps.results_dir),
+                           ('--vel-file', inps.vel_file)):
+            if value:
+                raise ValueError(f'{opt} is for one time series: with several files, each '
+                                 'brings its own (LiCSBAS results/, MintPy velocity.h5 ...)'
+                                 + (' - give every series as an input' if opt == '--i2'
+                                    else ''))
+        inps.file2 = None
+    elif inps.no_i2:
         inps.file2 = None
     elif inps.file2:
         if not os.path.isfile(inps.file2):
@@ -1879,7 +1950,7 @@ def tseries_cmd_line_parse(iargs=None):
     elif os.path.basename(inps.file) == 'cum_filt.h5':
         cand = os.path.join(os.path.dirname(os.path.abspath(inps.file)), 'cum.h5')
         inps.file2 = cand if os.path.isfile(cand) else None
-    check_data_scale(inps, files=[inps.file] + ([inps.file2] if inps.file2 else []))
+    check_data_scale(inps, files=inps.files + ([inps.file2] if inps.file2 else []))
     for opt, path in (('--mask', inps.mask_file), ('--vel-file', inps.vel_file),
                       ('--lookup', inps.lookup_file)):
         if path and not os.path.isfile(path):
@@ -1910,11 +1981,14 @@ def tseries_cmd_line_parse(iargs=None):
 
 
 def tseries_main(iargs=None):
-    """Entry point of `viewinsar tseries`."""
-    from .tsviewer import TimeSeriesViewer
-
+    """Entry point of `viewinsar tseries`: one file, or several on one map."""
     inps = tseries_cmd_line_parse(iargs)
-    obj = TimeSeriesViewer(inps)
+    if len(inps.files) > 1:
+        from .tsmulti import MultiTimeSeriesViewer
+        obj = MultiTimeSeriesViewer(inps)
+    else:
+        from .tsviewer import TimeSeriesViewer
+        obj = TimeSeriesViewer(inps)
     obj.open()
     obj.plot()
     if not obj.disp_fig:
@@ -2098,6 +2172,10 @@ tseries - time series, after LiCSBAS_plot_ts.py
   the data      LiCSBAS cum_filt.h5 / cum.h5 (results/: mask, noise indices; --i2 a
                 second series), MintPy timeseries*.h5 / .he5 (its mask and velocity
                 found beside it); --mask, --nomask, --vel-file, --results, --lookup
+  several files frames of a track, tracks, versions of one series: ONE MAP, a colour
+                each; a double click gives the series of every file there, each on
+                its own reference area until a right drag puts them on one;
+                --labels NAME ...
   reference     --ref X1:X2/Y1:Y2, --ref-geo, --ref-yx, --ref-lalo; --ref-date YYYYMMDD
   the point     --yx, --lalo, --point X/Y, --p-geo LON/LAT (as LiCSBAS)
   display       --colormap CMAP, --unit mm|cm|m, --vlim, --dlim, --auto-crange,
@@ -2108,6 +2186,7 @@ tseries - time series, after LiCSBAS_plot_ts.py
   examples      {prog} tseries cum_filt.h5 --radius 2
                 {prog} tseries timeseries_ERA5_demErr.h5 --radius 2 --unit cm \\
                     --lalo -2.51 121.68
+                {prog} tseries 061D_*/TS_GEOCml10GACOS/cum.h5 --radius 15
 
 {rule}
 common options (swath, stat, model, tseries)

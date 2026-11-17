@@ -11,8 +11,8 @@ south-west corner:
     name = Copernicus_DSM_COG_10_S01_00_E119_00_DEM   (lat -1..0, lon 119..120)
 
 Each is 3600 rows of 1"; the columns widen with latitude (3600 below 50 deg, 2400
-to 60, 1800 to 70 ...), in 1024 x 1024 DEFLATE tiles with half- and quarter-
-resolution overviews. Only the parts over the map are read - by HTTP byte
+to 60, 1800 to 70 ...), in 1024 x 1024 DEFLATE tiles with overviews at 1/2,
+1/4 and 1/8 resolution. Only the parts over the map are read - by HTTP byte
 range, at the overview nearest the grid being made - so no GDAL is needed and a
 big map downloads its relief at the resolution it is drawn at. The sea has no
 tiles: 0 m there, as the product specifies (so do the few countries not

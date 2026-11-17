@@ -149,9 +149,7 @@ class TimeSeries:
         self.datetimes = [dt.datetime.strptime(d, '%Y%m%d') for d in self.dates]
         self.years = np.array([(d - self.datetimes[0]).days for d in self.datetimes]) / 365.25
         if mask_file:
-            self.keep = self._read_mask(mask_file)
-            self.mask_source = mask_file
-            self.layers['mask'] = (self.keep.astype(np.float64), '')
+            self.set_mask_file(mask_file)
         if vel_file:
             self.vel = self._read_velocity(vel_file)
             self.vel_source = vel_file
@@ -312,6 +310,12 @@ class TimeSeries:
             raise ValueError(f'{fname} is {data.shape[0]} x {data.shape[1]}, the time series '
                              f'{self.length} x {self.width}')
         return data, atr
+
+    def set_mask_file(self, fname):
+        """--mask: this mask instead of the file's own."""
+        self.keep = self._read_mask(fname)
+        self.mask_source = fname
+        self.layers['mask'] = (self.keep.astype(np.float64), '')
 
     def _read_mask(self, fname):
         if not fname.endswith(('.h5', '.he5')):
