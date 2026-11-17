@@ -107,6 +107,42 @@ def test_every_example_parses(cmd):
         assert not still, f'example uses unknown option(s) {still}:\n  {cmd}'
 
 
+def _model_examples():
+    """Every `viewinsar model ...` command in its help epilog, joined across \\."""
+    cmds, buf = [], ''
+    for raw in cli.MODEL_EXAMPLE.splitlines():
+        line = raw.strip()
+        if buf:
+            buf += ' ' + line.rstrip('\\').strip()
+            if not line.endswith('\\'):
+                cmds.append(buf)
+                buf = ''
+        elif line.startswith('viewinsar model '):
+            if line.endswith('\\'):
+                buf = line.rstrip('\\').strip()
+            else:
+                cmds.append(line)
+    return cmds
+
+
+@pytest.mark.parametrize('cmd', _model_examples())
+def test_every_model_example_parses(cmd):
+    """Every example of `viewinsar model -h` - its fault type, its options, its
+    --comp and --dip - is one the command takes."""
+    args = shlex.split(cmd, comments=True)[2:]   # drop "viewinsar model"
+    fault, rest, _ = cli.split_fault_type(args)
+    inps, unknown = cli.create_model_parser().parse_known_args(cli.model_argv(rest))
+    assert not unknown, f'example uses unknown option(s) {unknown}:\n  {cmd}'
+    inps.fault_type = fault
+    cli.check_model_comps(inps, rest)
+    assert all(not f.startswith('-') for f in inps.file), cmd
+
+
+def test_model_examples_cover_every_fault_type():
+    faults = {cli.split_fault_type(shlex.split(cmd)[2:])[0] for cmd in _model_examples()}
+    assert faults == {'strike', 'reverse', 'normal'}
+
+
 def test_help_lines_fit_a_terminal():
     """RawTextHelpFormatter does not wrap, so keep every line readable."""
     helps = [('swath -h', _swath_help()), ('-h', cli.top_level_help())]

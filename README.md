@@ -48,10 +48,14 @@ a swath, on its profile with their error bars (see
 turns the two sides of a fault into the rate across it.
 
 `viewinsar model` fits the **slip rate and locking depth** of an elastic
-dislocation - and shallow creep - to a profile across a fault, by ensemble
-MCMC, as Hussain et al. (2016, 2018) did for the North Anatolian Fault: the
-pixels of the swath as points, the maximum a posteriori model with its 95 %
-range, and the posterior distributions (see
+dislocation - and the rate and depth of shallow creep - to a profile across a
+fault, by ensemble MCMC, as Hussain et al. (2016, 2018) did for the North
+Anatolian Fault: the pixels of the swath as points, the maximum a posteriori
+model with its 95 % range, and the posterior distributions; `--creep-offset`
+measures the creep rate straight from the offset at the fault too. `viewinsar
+model reverse` and `viewinsar model normal` fit a fault that dips - its slip
+rate along the dip, locking depth and dip - to the vertical velocity, the
+motion across the fault or a line of sight, a panel each (see
 [Fault slip models](#fault-slip-models-viewinsar-model)).
 
 ---
@@ -146,6 +150,8 @@ viewinsar stat geo_ve.h5 geo_vu.h5 --rate --spacing 5 --radius 2 --line-file fau
 
 # slip rate and locking depth of a fault, by MCMC, from a profile across it
 viewinsar model geo_velocity.h5 --comp los --fault faults.shp --width 25
+# ... of a reverse fault, from the vertical velocity: slip rate, depth and dip
+viewinsar model reverse geo_vu.h5 --comp vu --fault faults.shp --width 25
 
 # time series, LiCSBAS-style: the median of a 2 km circle at every date
 viewinsar tseries cum_filt.h5 --radius 2
@@ -539,6 +545,20 @@ and `…_2_values.csv`.
 
 ## Fault slip models: `viewinsar model`
 
+Three kinds of fault, named by the first word:
+
+```bash
+viewinsar model strike geo_ve.h5 --comp ve ...                 # strike-slip (the default)
+viewinsar model reverse geo_vu.h5 --comp vu ...                # reverse (thrust)
+viewinsar model normal geo_ve.h5 geo_vu.h5 --comp ve vu ...    # normal
+```
+
+A **strike-slip** fault (`strike`, or no word) is fitted to the velocity along
+it; a **reverse** or **normal** one to the vertical velocity, the motion
+across it or a line of sight - see [Reverse and normal
+faults](#reverse-and-normal-faults) below. The rest of this section holds for
+all three.
+
 The interseismic velocity across a strike-slip fault, after Savage & Burford
 (1973) and Hussain et al. (2016, 2018):
 
@@ -603,11 +623,18 @@ to it still gives the right locking depth. `--comp` says what the data are:
 
 | `--comp` | the velocity fitted |
 |---|---|
-| `auto` (default) | `los` when the line of sight of every file is known (below; nominal angles do not count) and no file is named as a component of a decomposition (`hz`, `up`, `east`, `ve` …); `as-is` otherwise, with the GNSS in the LOS (`--vel los`) - the run says which |
+| `auto` (default) | `los` when the line of sight of every file is known (below; nominal angles do not count) and no file is named as a component of a decomposition (`hz`, `east`, `ve` …); `as-is` otherwise, with the GNSS in the LOS (`--vel los`) - the run says which. A file named as the vertical (`up`, `vu`, `vertical`) is a reverse or normal fault's: the run says so |
 | `los` | LOS velocity, divided by (LOS unit vector · strike direction), pixel by pixel |
 | `par` | fault-parallel velocity, positive along `--strike` |
 | `ve`, `vn` | east / north velocity, divided by sin / cos of the strike |
-| `as-is` | the data as they are - e.g. the LOS itself; *S* is then the rate seen in the LOS ("slip rate in the LOS" when `auto` chose it for LOS data) |
+| `as-is` | the data as they are - e.g. the LOS itself; *S* is then the rate seen in the LOS ("slip rate in the LOS" for LOS data) |
+
+One `--comp` for all the files: they all become fault-parallel velocity. The
+y axis says what is plotted: `Fault-parallel velocity (mm/yr)` for `par`,
+`ve`, `vn` and `los` - all turned into it - and with `as-is` the data as they
+are: `LOS velocity (mm/yr)`, or a component by the name of its file (`East
+velocity` for `geo_ve.h5` …). `--comp vu` - the vertical - is for a reverse or
+a normal fault.
 
 **The line of sight** of every pixel is found next to the data - nothing to
 type:
@@ -669,19 +696,39 @@ with their 1-σ and an offset of their own (`ag`): their fault-parallel
 component, from `ve` and `vn` (`--vel` picks another one, to match
 `--comp as-is`). `--gnss-nofit` shows them without fitting them.
 
-**The figures**, after Hussain et al.: the pixels as points (red; a colour per
-file), the median of each bin with ±1σ (its robust spread), the GNSS in blue
-with their error bars (outlined in white), the MAP model as a bold dashed line
-and its 95 % range in grey, the fault dotted, and the parameters written as Hussain et al. do -
-`slip rate = 20.3 mm/yr (18.4 – 34.0, 95% CI), right-lateral`, `locking depth
-= 12.7 km (…)`, `creep rate` in mm/yr, `creep depth` in km, and the `strain
-rate` at the fault in µstrain/yr - placed where they hide the fewest points.
-The slip rate is given as a rate with its sense; when its 95 % range crosses
-zero it keeps its sign (S > 0 right-lateral). Every file is shifted
-onto the offset of the first, the GNSS onto the InSAR. `--strain` adds the
-shear strain rate of the model, `dv/dx`, below; `--topoxsect` the topography.
+**The profile** is drawn as Hussain et al. (2016, Izmit) drew theirs (their
+Fig. 9):
+
+- the pixels as **light red points** (a colour per file);
+- the MAP model as a **black line**, in its **95 %** (dark grey, 25 %
+  transparent) and **68 %** (light grey, 40 % transparent) ranges - 68 % being
+  ±1σ, as Hussain et al.; `--bands 95 65` shades others;
+- the **GNSS black**, with their error bars, outlined in white;
+- the fault as a **blue arrow** from below, `Fault location` under it;
+- the section, `A-A'`, boxed top left, and the sides of the fault named at
+  the bottom corners (`North`, `South` …: the direction of the fault normal);
+- the parameters **in italics**, top right if they hide nothing there, as
+  Hussain et al. write them - `slip rate = 19 mm/yr ( 9 – 28, 95% c.i. ),
+  right-lateral`, `locking depth = 18 km ( 9 – 28, 95% c.i. )`, the offset
+  (one file), `creep rate`, `creep depth`, and the `strain rate` at the fault
+  in µstrain/yr, each rounded to the first digit of its range's half width.
+
+The **legend** goes inside the plot where it hides nothing; when the plot is
+too full for it, it goes **outside, on the right** (beyond the colour bar of
+a density), and the figure grows to hold it, so the plot keeps its size.
+`--legend in` keeps it inside anyway (making room for it), `--legend out`
+puts it outside always, `--legend off` leaves it out, as in Hussain et al.'s
+figure; on the profile, <kbd>l</kbd> moves it - inside, outside, off, in
+turn - without fitting again. There is no title: the window's title says what it used to (the
+pixels, the files, the strike). `--medians` draws the median of each bin
+with ±1σ (its robust spread) over the points. The slip rate is given as a rate with its sense; when its 95 %
+range crosses zero it keeps its sign (S > 0 right-lateral). Every file is
+shifted onto the offset of the first, the GNSS onto the InSAR. `--strain`
+adds the shear strain rate of the model, `dv/dx`, below; `--topoxsect` the
+topography.
+
 A second window holds the **posterior**, drawn as Hussain et al. (2016,
-Fig. 9): every pair of parameters (*S*, *d₁*, the offset *a*, and *C*, *d₂*,
+central NAF, Fig. 9): every pair of parameters (*S*, *d₁*, the offset *a*, and *C*, *d₂*,
 *x₀* when fitted) as a 2D histogram in `jet`, each scaled to its own peak, the
 MAP as a red dot; along the bottom the histogram of each parameter in blue,
 the MAP as a red line, the 95 % range dashed and written above it; the
@@ -691,9 +738,10 @@ section, `A - A'`, white on black in the corner. The trade-off between *S* and
 **Two views of the pixels.** By default they are points, as above. With
 `--cmap-prof CMAP` (alone: `viridis`) they are a **point density** instead,
 drawn as `viewinsar swath` draws its own - log colour scale, the densest
-cells white, a colour bar, cells half a `--bin` wide - with the 95 % range in
-**red** over it, the medians **bigger** (white, a colour per file with
-several), and no points:
+cells white, a colour bar, cells half a `--bin` wide - with the 95 % and 68 %
+ranges in **red** over it (the 68 % darker), the medians drawn and **big**
+(white, a colour per file with several), the **GNSS red**, outlined in white,
+and no points:
 
 ```bash
 viewinsar model TS_GEOCml10GACOS/cum_filt.h5 --fault faults.shp --width 20 \
@@ -704,26 +752,154 @@ viewinsar model TS_GEOCml10GACOS/cum_filt.h5 --fault faults.shp --width 20 \
 points or the density - with N × N samples per pixel. **The fit always takes
 the real pixels**: interpolated samples are no new data. Before 0.5.5 they went
 into the fit, which made the 95 % ranges too narrow (in a test, half as wide
-with `--nlook 3`). The title says when the drawing is oversampled, and so does
-`_params.txt`.
+with `--nlook 3`). The window's title says when the drawing is oversampled,
+and so does `_params.txt`.
+
+**Creep: its rate and its depth.** Hussain et al. (2016) constrained the
+creep two ways, and `model` does both:
+
+- **In the model, `--creep`**: the creep rate *C* and the depth it reaches,
+  *d₂*, are fitted with *S* and *d₁* - creep in the sense of the slip, from
+  the surface down to *d₂* ≤ *d₁*, under uniform priors (0 ≤ *C* ≤ 30 mm/yr,
+  *d₂* ≤ 40 km: `--c-max`, `--d2-max`; Hussain et al.: 0-15 and 0-40 km at
+  Izmit, 0-30 and 0-40 km in the centre). The profile says
+  `creep rate = 5.6 mm/yr ( 4.8 – 6.2, 95% c.i. )` and `creep depth = 5 km
+  ( 4 – 17, 95% c.i. )`, and draws the MAP model without the creep, dotted. The depth is the
+  weakly resolved one: Hussain et al. found 6-9 km at the MAP but 95 % ranges
+  of ~0-25 km, and creep down to 4, 8 or 12 km fitted Izmit within the noise.
+  A prior on *d₁* (`--d1-prior 17 5`, theirs at Izmit) narrows it a little.
+- **Straight from the data, `--creep-offset [KM [WIDTH]]`**: a straight line
+  through the pixels on each side of the fault, within KM (5) of it and WIDTH
+  (2.5) km of the profile line, each with its own slope; their offset at the
+  fault is the creep rate, its 95 % range from 2000 bootstrap draws that
+  resample each side on its own (Hussain et al. after Bekaert et al. 2015).
+  Drawn as two orange lines either side of the fault, and written with the
+  parameters.
+  With an **ascending and a descending track** the LOS offsets are also
+  **split into fault-parallel and vertical**, by least squares and draw by
+  draw: Hussain et al. did this at Izmit, where the subsidence of the
+  Adapazari basin added to the LOS step and had made an earlier creep rate
+  too high. The parameters then say `creep offset, fault-parallel = …` and
+  `vertical offset = +1.6 mm/yr (…), A' side up`.
+
+```bash
+viewinsar model T014A/geo_velocity.h5 T123D/geo_velocity.h5 --comp los \
+    --fault faults.shp --labels T014A T123D --creep --creep-offset
+```
+
+The offset is model-free, but mind three things. The pixels are taken as
+independent, so with spatially correlated noise its range is too narrow. The
+lines are straight, while creep that stops a few km down dies away within a
+few km of the fault: with *d₂* < KM the offset comes out below *C* (6 mm/yr
+down to 4 km gave ~4 mm/yr with ±5 km lines in a test) - a shorter KM
+lessens that, with fewer pixels. And the split assumes no fault-normal
+motion, with the line of sight of each track its median near the fault.
+`--creep-offset` works with or without `--creep`; the two agree when the
+creep reaches deeper than KM.
+
+### Reverse and normal faults
+
+`viewinsar model reverse` (or `thrust`) and `viewinsar model normal` fit a
+fault that **dips**: locked from the surface down to *d₁*, slipping at *S*
+**along its dip** below it - up the dip for a reverse fault, down it for a
+normal one. This is the back-slip model of Savage (1983), a 2D edge
+dislocation as Segall (2010, eqs. 3.71-3.72) writes it (checked against
+Okada 1992 in the tests). With *u* = *t* (*x* − *x₀*) the distance from the
+trace towards the dip and *z* = *u*/*d₁* − cot δ:
+
+```
+across the fault (+ towards A'):  h(x) = −t·s·S/π · [cos δ · atan z + (sin δ − z cos δ)/(1 + z²)] + a
+vertical (+ up):                   v(x) =    s·S/π · [sin δ · atan z + (cos δ + z sin δ)/(1 + z²)] + a
+a line of sight:                   ph · h(x) + pu · v(x) + a
+```
+
+*s* = +1 for a reverse fault, −1 for a normal one; *t* = +1 when the fault
+dips towards `A'` (the end of the profile), −1 towards `A`. Far off, the
+hanging wall moves *S* cos δ across the fault (**shortening**, or
+**extension**) and *S* sin δ up (**uplift**) or down (**subsidence**). The
+free parameters are *S* ≥ 0, *d₁*, the dip δ (and *x₀* with `--free-x0`), an
+offset per file and the GNSS's.
+
+```bash
+# a reverse fault, from the vertical velocity of an asc + desc decomposition:
+# the dip free between 10 and 45 degrees, dipping towards A' (the end of the line)
+viewinsar model reverse geo_vu.h5 --comp vu --fault faults.shp --dip 10 45
+
+# a normal fault, from the east and the vertical velocity together - a panel
+# each - dipping towards A; the GNSS across the fault
+viewinsar model normal geo_ve.h5 geo_vu.h5 --comp ve vu --fault faults.shp \
+    --dip-toward start --gnss gnss.csv
+
+# a thrust seen by two tracks, each LOS as it is, the dip fixed at 25 degrees
+viewinsar model thrust T014A/geo_velocity.h5 T123D/geo_velocity.h5 --comp los \
+    --fault faults.shp --labels T014A T123D --dip 25
+```
+
+**The data**, one `--comp` per file (or one for all):
+
+| `--comp` | the velocity fitted | its panel |
+|---|---|---|
+| `vu` | the vertical velocity, as it is | `Fault vertical velocity (mm/yr)` |
+| `ve`, `vn` | the east / north velocity divided by the east / north component of the fault normal: the motion across the fault, + towards `A'`, assuming none along it (the run warns when the component sees less than a quarter of it) | `Fault-normal velocity (mm/yr)` |
+| `los` | a line of sight as it is, the model seen through it - *ph* and *pu*, what the LOS sees of the horizontal across the fault and of the vertical, are the medians over the swath; the line of sight must be known (not nominal angles) | `LOS velocity, T014A (mm/yr)`, one per file |
+| `auto` (default) | by the file's name: `up` / `vu` / `vertical` → `vu`, `east` / `ve` → `ve`, `north` / `vn` → `vn`; else `los` | |
+
+Each component gets **a panel of its own**, stacked over one distance axis,
+with the model in each - the vertical and the horizontal of one fault, fitted
+together, pin the dip down; one component alone leaves *S* and the dip trading
+off (the posterior shows by how much). The parameters are written on the top
+panel, as Hussain et al. write them: `slip rate = 8.2 mm/yr ( 7.6 – 9.5, 95%
+c.i. ), reverse`, `locking depth`, `dip = 30° ( 27 – 33, 95% c.i. ), towards
+A'` (`(fixed)` with one `--dip`), the offset (one file), then `shortening
+rate` and `uplift rate` - `extension rate` and `subsidence rate` for a normal
+fault. The sides of the fault are named under the bottom panel, the fault
+marked in each.
+
+**The dip.** `--dip 30` fixes it; `--dip 10 45` is the range of its uniform
+prior (default 5 85). `--dip-toward end` (the default) has the fault dip
+towards `A'` - the hanging wall on that side - and `start` towards `A`: draw
+the profile, or choose the word, so it matches the fault. The strike is then
+given by the right-hand rule (the fault dips to its right).
+
+**GNSS** of a dipping fault are `--vel perp` - across the fault, from `ve`
+and `vn` (the default when a file is `ve` / `vn`, or all are LOS) - or
+`--vel vu` (the default when the files are all `vu`). When no file has their
+component they get a panel of their own, with the model: GNSS horizontals
+with InSAR verticals constrain the dip.
+
+What belongs to a strike-slip fault - `--creep`, `--creep-offset`, `--rot`,
+`--strain`, `--c-max`, `--d2-max` - is refused here, and `--dip` /
+`--dip-toward` with a strike-slip fault. `_params.csv` gives `h_rate` and
+`v_rate` - *S* cos δ and *S* sin δ - instead of the strain rate (and the dip
+when it is fixed); `_samples.csv` both per sample; `model_sections_ABC.csv`
+the fault type, *S*, *d₁*, the dip, *x₀* and both rates.
+
+### Options
 
 | option | default | meaning |
 |---|---|---|
+| `strike`, `reverse` (`thrust`), `normal` | `strike` | the fault type, the first word |
 | `--width` | `20` | half width of the swath, km |
 | `--bin` | `1` | bin size along the profile, km |
-| `--comp` | `auto` | what the data are (above) |
+| `--comp` | `auto` | what the data are (above): one for all (strike), or one per file (reverse, normal) |
 | `--geom`, `--los-inc`, `--los-az` | found | the line of sight (above), one per file |
 | `--data-unit` | the file's own; LiCSBAS: mm/yr | the unit the files are really in, when they say none or a wrong one |
 | `--x0`, `--strike` | from the trace | the fault position (km along the profile) and its strike |
+| `--dip DEG [DEG]` | `5 85` | reverse / normal: the dip, fixed (one value) or the range of its prior |
+| `--dip-toward` | `end` | reverse / normal: the fault dips towards `A'` (`end`) or `A` (`start`) |
 | `--creep` | off | fit *C* and *d₂* too |
+| `--creep-offset [KM [WIDTH]]` | off; 5, 2.5 | the creep rate from the offset of two lines either side of the fault (above) |
 | `--free-x0 [KM]` | off | fit the fault position within ±KM (default 5) |
 | `--rot RATE`, `--rot-side` | none, `end` | a fixed linear term on one side, mm/yr per km |
-| `--s-max`, `--d1-max`, `--c-max`, `--d2-max` | 60, 60, 30, 40 | the uniform priors: \|S\| ≤, 0.1 ≤ d₁ ≤, 0 ≤ C ≤, d₂ ≤ |
+| `--s-max`, `--d1-max`, `--c-max`, `--d2-max` | 60, 60, 30, 40 | the uniform priors: \|S\| ≤ (reverse, normal: 0 ≤ S ≤), 0.1 ≤ d₁ ≤, 0 ≤ C ≤, d₂ ≤ |
 | `--d1-prior MEAN SIGMA` | none | a Gaussian prior on *d₁* (Hussain et al. 2016, Izmit: 17 5) |
 | `--noise` | `auto` | `auto`: exponential, fitted to the residuals of a least-squares fit, for each file; `white`: each bin's own scatter; `SILL LENGTH`: given, in (mm/yr)² and km |
 | `--walkers`, `--steps`, `--burn`, `--seed` | 64, 5000, a third, 0 | the sampler |
-| `--gnss`, `--vel`, `--gnss-width`, `--gnss-nofit` | - | GNSS |
+| `--gnss`, `--vel`, `--gnss-width`, `--gnss-nofit` | - | GNSS (`--vel perp` / `vu` for reverse and normal faults) |
 | `--cmap-prof [CMAP]` | off: points | the pixels as a point density in CMAP (above) |
+| `--legend [WHERE]` | `auto` | the legend: `auto` inside where it hides nothing, else outside on the right; `in`, `out`, `off` (<kbd>l</kbd> on the profile) |
+| `--bands OUTER INNER` | `95 68` | the two ranges of the model shaded, % |
+| `--medians` | off | the median of each bin, ±1σ, over the points (always on a density) |
 | `--nlook` | `1` | oversample the picture (points or density), not the fit |
 | `--strain`, `--ylim`, `--max-points` | off, auto, 200000 | the figure |
 
@@ -734,14 +910,14 @@ exist), named after the line, e.g. `model_A_Y470X150_Y130X700_w25km`:
 |---|---|
 | `….png` | the fit |
 | `…_posterior.png` | the posterior distributions |
-| `…_params.csv` | every parameter: `map`, `median`, `lower_95`, `upper_95`; and the strain rate at the fault |
+| `…_params.csv` | every parameter: `map`, `median`, `lower_95`, `upper_95`; and the strain rate at the fault (reverse, normal: `h_rate`, `v_rate`); with `--creep-offset`, `C_offset` (per file `C_offset_1`, `C_offset_2` …; split, `C_offset_par` and `U_offset`): the offset of the lines as `map`, the bootstrap's median and 95 % range |
 | `…_params.txt` | the same, readable, with the sense of slip, the fault position and strike, the noise, the priors, and the sampler and its diagnostics |
 | `…_samples.csv` | posterior samples (up to 20 000), for plots of your own |
 | `…_bins.csv` | the bins: `x_km`, `median`, `std`, quartiles, `count`, the MAP model at each and the residual |
 | `…_points.csv` | every pixel: `dist_km` along the profile, `x_km` from the fault, `perp_km`, `value` as read, `v_model` (the velocity fitted), `v_shifted` (as drawn), row / col, lon / lat, `file_idx` |
 | `…_gnss.csv` | the GNSS in the swath, and whether they were fitted |
 | `model_map_AB.png` | the map with every section, the fault position of each marked ◇ |
-| `model_sections_AB.csv` | two sections or more: one row each - its ends (`start_lat` … `end_lon`), where it crosses the fault (`fault_km`, `fault_lat`, `fault_lon`), `strike_deg`, `sense`, `pixels`, and `S`, `d1` (`C`, `d2`, `x0`) and `strain` as `_map`, `_lower_95`, `_upper_95` |
+| `model_sections_AB.csv` | two sections or more: one row each - its ends (`start_lat` … `end_lon`), where it crosses the fault (`fault_km`, `fault_lat`, `fault_lon`), `strike_deg`, `sense`, `pixels`, and `S`, `d1` (`C`, `d2`, `x0`), `strain` (and the creep offsets) as `_map`, `_lower_95`, `_upper_95`; reverse, normal: `fault_type`, `S`, `d1`, `dip`, `x0`, `h_rate`, `v_rate` |
 
 **Reading the results.**
 
@@ -974,6 +1150,13 @@ best, lo, hi = model_band(res, np.linspace(-80, 80, 401))
 
 gnss = read_gnss('gnss.xlsx')                               # any table or point file
 value, sigma = gnss.component('ve')
+
+# a reverse fault dipping 30 degrees towards x > 0: the motion across it and up
+from viewinsar.model import dip_slip
+h = dip_slip(x, 8.0, 12.0, 30.0, kind='h') + np.random.normal(0, 1, x.size)
+z = dip_slip(x, 8.0, 12.0, 30.0, kind='z') + np.random.normal(0, 1, x.size)
+res = fit_profile([(x, h), (x, z)], fault='reverse', kinds=['h', 'z'], dip=(5, 85))
+res['summary']['dip'], res['derived']['h_rate'], res['derived']['v_rate']
 ```
 
 `viewinsar.swathProfileViewer`, `viewinsar.StatViewer`,

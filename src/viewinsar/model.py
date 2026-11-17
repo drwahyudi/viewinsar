@@ -1,7 +1,7 @@
 """Elastic dislocation models of interseismic velocity profiles - the core of
 `viewinsar model`.
 
-The fault-parallel velocity across a strike-slip fault, at distance x along a
+Strike-slip faults. The fault-parallel velocity at distance x along a
 fault-normal profile (Savage & Burford 1973), with optional shallow creep
 from the surface down to d2 and a rotation term (Hussain et al. 2016, 2018):
 
@@ -14,6 +14,22 @@ S is the slip rate below the locking depth d1, C the creep rate on the fault
 above d2 - in the same sense as S, so 0 <= C - a the offset and x0 the fault
 position. Every input file (frame, track) has an offset of its own, a, a2,
 a3 ..., and the GNSS one more, ag: each is referenced on its own.
+
+Reverse and normal faults. A fault dipping at dip, locked from the surface to
+d1 and slipping steadily at S (along its dip) below: the 2D edge dislocation
+of Freund & Barnett (1976), the back-slip model of Savage (1983) - Segall
+(2010, eqs. 3.71-3.72). With u the distance from the trace towards the side
+the fault dips to (the hanging wall) and z = u / d1 - cot(dip), at the
+surface:
+
+    horizontal (+ towards the dip)  -S/pi [cos(dip) atan z + (sin(dip) - z cos(dip)) / (1 + z^2)]
+    vertical   (+ up)               +S/pi [sin(dip) atan z + (cos(dip) + z sin(dip)) / (1 + z^2)]
+
+for a reverse fault (the hanging wall moving up the dip); a normal fault is
+the opposite. Far from the fault the hanging wall moves S cos(dip) towards
+the footwall and S sin(dip) up, relative to it: the shortening and uplift
+rates (extension and subsidence for a normal fault). Checked against Okada
+(1992) for a long, deep fault.
 
 Each file's swath is binned along the profile (the median of every bin, as
 Ou et al. 2022 do before fitting). The bins are fitted under uniform priors
@@ -31,14 +47,18 @@ import warnings
 
 import numpy as np
 
-__all__ = ['ProfileModel', 'forward', 'bin_profile', 'exponential_covariance',
+__all__ = ['ProfileModel', 'DipSlipModel', 'forward', 'dip_slip', 'bin_profile',
+           'exponential_covariance',
            'fit_noise_covariance', 'ensemble_sample', 'autocorr_time', 'fit_profile',
-           'summarize_samples', 'model_band', 'strain_rate', 'describe', 'NAMES', 'UNITS']
+           'summarize_samples', 'model_band', 'model_bands', 'strain_rate', 'fault_offset',
+           'split_offsets',
+           'describe', 'NAMES', 'UNITS']
 
 NAMES = {'S': 'slip rate', 'd1': 'locking depth', 'C': 'creep rate', 'd2': 'creep depth',
-         'x0': 'fault position', 'a': 'offset', 'ag': 'GNSS offset'}
+         'x0': 'fault position', 'a': 'offset', 'ag': 'GNSS offset', 'dip': 'dip'}
 UNITS = {'S': 'mm/yr', 'd1': 'km', 'C': 'mm/yr', 'd2': 'km', 'x0': 'km', 'a': 'mm/yr',
-         'ag': 'mm/yr'}
+         'ag': 'mm/yr', 'dip': 'deg'}
+FAULTS = ('strike', 'reverse', 'normal')
 
 
 def describe(name):
@@ -90,6 +110,8 @@ class ProfileModel:
         self.bounds.update({k: tuple(map(float, v)) for k, v in (bounds or {}).items()
                             if k in self.names})
         self.d1_prior = d1_prior
+        self.fault = 'strike'
+        self.kinds, self.gnss_kind = [None] * self.n_sets, None   # one component: no kinds
 
     @property
     def ndim(self):
@@ -110,9 +132,9 @@ class ProfileModel:
         out.setdefault('x0', np.zeros(theta.shape[:-1]))
         return out
 
-    def predict(self, theta, x, offset='a'):
+    def predict(self, theta, x, offset='a', kind=None):
         """The model at x (km): (x.size,) for one parameter vector, (K, x.size)
-        for K of them."""
+        for K of them (kind: for the models of dip-slip faults)."""
         par = self.unpack(theta)
         return forward(x, par['S'], par['d1'], par[offset], x0=par['x0'],
                        creep=par['C'] if self.creep else None,
@@ -130,6 +152,131 @@ class ProfileModel:
             mean, sig = self.d1_prior
             out = out - 0.5 * ((theta[:, self.index('d1')] - mean) / sig) ** 2
         return out
+
+
+class DipSlipModel:
+    """The model of a reverse or a normal fault: its parameters, bounds, priors.
+
+    sense    - +1: reverse (the hanging wall moves up the dip), -1: normal
+    kinds    - per data set (file): 'h' (the horizontal velocity across the
+               fault, + towards the end of the profile), 'z' (vertical, + up)
+               or (ph, pu): a line of sight, ph h + pu z
+    dip      - (lo, hi): the bounds of the dip (deg), or one value: fixed
+    toward   - +1: the fault dips towards x > 0 (the end of the profile), -1
+    free_x0  - (lo, hi) in km: fit the position of the trace; None: at 0
+    gnss     - add the offset of the GNSS, ag; gnss_kind: their kind
+    bounds, d1_prior - as ProfileModel; S >= 0, its sense given by `sense`
+    """
+
+    def __init__(self, sense=1, kinds=('z',), dip=(5.0, 85.0), toward=1, free_x0=None,
+                 gnss=False, gnss_kind='z', bounds=None, d1_prior=None):
+        self.sense = 1 if sense >= 0 else -1
+        self.fault = 'reverse' if self.sense > 0 else 'normal'
+        self.toward = 1 if toward >= 0 else -1
+        self.kinds = list(kinds)
+        self.n_sets = len(self.kinds)
+        self.free_x0, self.gnss, self.gnss_kind = free_x0, gnss, gnss_kind
+        self.creep, self.rot, self.rot_side = False, 0.0, 1    # strike-slip only
+        dip = np.atleast_1d(np.asarray(dip, dtype=np.float64))
+        self.dip_fixed = float(dip[0]) if dip.size == 1 or dip[0] == dip[-1] else None
+        self.offsets = ['a'] + [f'a{k + 1}' for k in range(1, self.n_sets)]
+        self.names = ['S', 'd1'] + (['dip'] if self.dip_fixed is None else [])
+        if free_x0 is not None:
+            self.names.append('x0')
+        self.names += self.offsets
+        if gnss:
+            self.names.append('ag')
+        self.bounds = {'S': (0.0, 60.0), 'd1': (0.1, 60.0)}
+        if self.dip_fixed is None:
+            self.bounds['dip'] = (float(dip[0]), float(dip[-1]))
+        if free_x0 is not None:
+            self.bounds['x0'] = (float(free_x0[0]), float(free_x0[1]))
+        for name in self.offsets + (['ag'] if gnss else []):
+            self.bounds[name] = (-1e3, 1e3)
+        self.bounds.update({k: tuple(map(float, v)) for k, v in (bounds or {}).items()
+                            if k in self.names})
+        self.d1_prior = d1_prior
+
+    @property
+    def ndim(self):
+        return len(self.names)
+
+    def index(self, name):
+        return self.names.index(name)
+
+    def lo_hi(self):
+        lo = np.array([self.bounds[n][0] for n in self.names], dtype=np.float64)
+        hi = np.array([self.bounds[n][1] for n in self.names], dtype=np.float64)
+        return lo, hi
+
+    def unpack(self, theta):
+        """{name: array}; x0 = 0 when it is fixed, dip the fixed one."""
+        theta = np.asarray(theta, dtype=np.float64)
+        out = {n: theta[..., i] for i, n in enumerate(self.names)}
+        out.setdefault('x0', np.zeros(theta.shape[:-1]))
+        if self.dip_fixed is not None:
+            out['dip'] = np.full(theta.shape[:-1], self.dip_fixed)
+        return out
+
+    def predict(self, theta, x, offset='a', kind=None):
+        """The model at x (km), of a kind ('h', 'z', (ph, pu)) - by default
+        that of the first data set."""
+        par = self.unpack(theta)
+        return dip_slip(x, par['S'], par['d1'], par['dip'], par[offset], x0=par['x0'],
+                        kind=self.kinds[0] if kind is None else kind, toward=self.toward,
+                        sense=self.sense)
+
+    def log_prior(self, theta):
+        theta = np.atleast_2d(theta)
+        lo, hi = self.lo_hi()
+        ok = np.all((theta >= lo) & (theta <= hi), axis=1)
+        out = np.where(ok, 0.0, -np.inf)
+        if self.d1_prior is not None:
+            mean, sig = self.d1_prior
+            out = out - 0.5 * ((theta[:, self.index('d1')] - mean) / sig) ** 2
+        return out
+
+    def rates(self, theta):
+        """The far-field rates of the hanging wall relative to the footwall:
+        horizontal S cos(dip) (shortening, or extension) and vertical S
+        sin(dip) (uplift, or subsidence)."""
+        par = self.unpack(theta)
+        dip = np.radians(par['dip'])
+        return par['S'] * np.cos(dip), par['S'] * np.sin(dip)
+
+
+def dip_slip(x, S, d1, dip, a=0.0, x0=0.0, kind='z', toward=1, sense=1):
+    """The surface velocity across a dip-slip fault locked from the surface to
+    d1, slipping at S along its dip below (see the module's docstring).
+
+    kind   - 'h': horizontal, across the fault (+ towards x > 0); 'z': up;
+             (ph, pu): the line of sight that sees ph of h and pu of z
+    toward - +1: the fault dips towards x > 0, -1: towards x < 0
+    sense  - +1: reverse, -1: normal
+    Scalar parameters give an array shaped like x; arrays of K parameters give
+    (K, x.size).
+    """
+    x = np.asarray(x, dtype=np.float64)
+    pars = [np.asarray(p, dtype=np.float64) for p in (S, d1, dip, a, x0)]
+    if any(p.ndim for p in pars):
+        pars = [p[..., None] for p in pars]
+    S, d1, dip, a, x0 = pars
+    rad = np.radians(dip)
+    cos, sin = np.cos(rad), np.sin(rad)
+    u = (x - x0) * toward                     # from the trace, + towards the dip
+    z = u / d1 - cos / sin                    # from above the deep end of the locked part
+    atz, den = np.arctan(z), 1.0 + z * z
+    amp = sense * S / np.pi
+    if isinstance(kind, str):
+        if kind == 'h':
+            return -amp * (cos * atz + (sin - z * cos) / den) * toward + a
+        if kind == 'z':
+            return amp * (sin * atz + (cos + z * sin) / den) + a
+        raise ValueError(f'unknown kind {kind!r}: h, z or (ph, pu)')
+    ph, pu = (float(c) for c in kind)
+    horizontal = -amp * (cos * atz + (sin - z * cos) / den) * toward
+    vertical = amp * (sin * atz + (cos + z * sin) / den)
+    return ph * horizontal + pu * vertical + a
 
 
 def forward(x, S, d1, a=0.0, x0=0.0, creep=None, d2=None, rot=0.0, rot_side=1):
@@ -393,9 +540,61 @@ def _grid_start(model, sets, gnss):
     return np.clip(theta, lo + margin, hi - margin)
 
 
+def _grid_start_dip(model, sets, gnss):
+    """The start of a dip-slip fit: for a grid of d1, dip (and x0), S and the
+    offsets are linear - solved by least squares, S >= 0, the best kept."""
+    lo, hi = model.lo_hi()
+    d1_lo, d1_hi = model.bounds['d1']
+    d1_lo = max(d1_lo, 0.3)
+    d1_grid = np.geomspace(d1_lo, max(min(d1_hi, 60.0), d1_lo * 1.01), 12)
+    dip_grid = ([model.dip_fixed] if model.dip_fixed is not None
+                else np.linspace(*model.bounds['dip'], 9)[1:-1])
+    x0_grid = (np.linspace(*model.bounds['x0'], 7) if model.free_x0 is not None else [0.0])
+    n_off = len(model.offsets) + (1 if gnss is not None else 0)
+    scatter = float(np.median(np.concatenate([b['std'] for b in sets]))) or 1.0
+    best = None
+    for d1 in d1_grid:
+        for dip in dip_grid:
+            for x0 in x0_grid:
+                rows, rhs = [], []
+                for k, b in enumerate(sets):
+                    col = np.zeros((b['x'].size, 1 + n_off))
+                    col[:, 0] = dip_slip(b['x'], 1.0, d1, dip, 0.0, x0=x0, kind=model.kinds[k],
+                                         toward=model.toward, sense=model.sense)
+                    col[:, 1 + k] = 1.0
+                    rows.append(col)
+                    rhs.append(b['median'])
+                if gnss is not None:
+                    w = scatter / gnss['sigma']
+                    col = np.zeros((gnss['x'].size, 1 + n_off))
+                    col[:, 0] = dip_slip(gnss['x'], 1.0, d1, dip, 0.0, x0=x0,
+                                         kind=model.gnss_kind, toward=model.toward,
+                                         sense=model.sense)
+                    col[:, -1] = 1.0
+                    rows.append(col * w[:, None])
+                    rhs.append(gnss['v'] * w)
+                amat, bvec = np.vstack(rows), np.concatenate(rhs)
+                sol = np.linalg.lstsq(amat, bvec, rcond=None)[0]
+                if sol[0] < 0:                 # the wrong sense: S = 0, the offsets alone
+                    sol = np.r_[0.0, np.linalg.lstsq(amat[:, 1:], bvec, rcond=None)[0]]
+                rss = float(np.sum((amat @ sol - bvec) ** 2))
+                if best is None or rss < best[0]:
+                    best = (rss, d1, dip, x0, sol)
+    _, d1, dip, x0, sol = best
+    start = {'S': max(sol[0], 0.05 * hi[model.index('S')]), 'd1': d1, 'dip': dip, 'x0': x0}
+    for k, name in enumerate(model.offsets):
+        start[name] = sol[1 + k]
+    if gnss is not None:
+        start['ag'] = sol[-1]
+    theta = np.array([start[n] for n in model.names], dtype=np.float64)
+    margin = 1e-4 * (hi - lo)
+    return np.clip(theta, lo + margin, hi - margin)
+
+
 def fit_profile(data, bin_km=1.0, gnss=None, noise='auto', walkers=64, steps=5000, burn=None,
                 seed=0, max_samples=48000, creep=False, free_x0=None, rot=0.0, rot_side=1,
-                bounds=None, d1_prior=None, min_bins=3, verbose=True):
+                bounds=None, d1_prior=None, min_bins=3, verbose=True, fault='strike', kinds=None,
+                gnss_kind='z', dip=(5.0, 85.0), toward=1):
     """Fit the dislocation model to fault-parallel velocity profiles.
 
     data   - (x, v), or a list of them - one per input file, each with its
@@ -406,10 +605,14 @@ def fit_profile(data, bin_km=1.0, gnss=None, noise='auto', walkers=64, steps=500
              or (sill, length) in (mm/yr)^2 and km, for every file
     walkers, steps, burn, seed - the ensemble sampler (burn: default steps / 3)
     creep, free_x0, rot, rot_side, bounds, d1_prior - see ProfileModel
+    fault  - 'strike' (the default: ProfileModel), or 'reverse' / 'normal':
+             DipSlipModel, with kinds (one per file: 'h', 'z' or (ph, pu)),
+             gnss_kind, dip and toward - see DipSlipModel
     Returns dict: model, names, sets (indices of the files used), bins (one
     dict per file used), noise [(sill, length) per file], samples, log_prob,
-    best (the MAP), summary, derived (the strain rate at the fault),
-    acceptance, tau, lsq, n_pixels, walkers, steps, burn, gnss
+    best (the MAP), summary, derived (strike-slip: the strain rate at the
+    fault; dip-slip: the horizontal and vertical rates), acceptance, tau,
+    lsq, n_pixels, walkers, steps, burn, gnss
     """
     from scipy.linalg import solve_triangular
     from scipy.optimize import least_squares, minimize
@@ -434,9 +637,18 @@ def fit_profile(data, bin_km=1.0, gnss=None, noise='auto', walkers=64, steps=500
         keep = np.isfinite(gnss['x']) & np.isfinite(gnss['v'])
         gnss = {k: val[keep] for k, val in gnss.items()} if keep.any() else None
 
-    model = ProfileModel(n_sets=len(bins), creep=creep, free_x0=free_x0, rot=rot,
-                         rot_side=rot_side, gnss=gnss is not None, bounds=bounds,
-                         d1_prior=d1_prior)
+    if fault not in FAULTS:
+        raise ValueError(f'unknown fault type {fault!r}: one of {", ".join(FAULTS)}')
+    if fault == 'strike':
+        model = ProfileModel(n_sets=len(bins), creep=creep, free_x0=free_x0, rot=rot,
+                             rot_side=rot_side, gnss=gnss is not None, bounds=bounds,
+                             d1_prior=d1_prior)
+    else:
+        kinds = list(kinds) if kinds is not None else ['z'] * len(data)
+        model = DipSlipModel(sense=1 if fault == 'reverse' else -1,
+                             kinds=[kinds[k] for k in used], dip=dip, toward=toward,
+                             free_x0=free_x0, gnss=gnss is not None, gnss_kind=gnss_kind,
+                             bounds=bounds, d1_prior=d1_prior)
     # the offsets: anywhere the data could put them (unless given)
     s_lim = max(abs(model.bounds['S'][0]), abs(model.bounds['S'][1]))
     for name, b in zip(model.offsets, bins):
@@ -451,15 +663,15 @@ def fit_profile(data, bin_km=1.0, gnss=None, noise='auto', walkers=64, steps=500
     lo, hi = model.lo_hi()
 
     # 1. least squares, from the best of a grid
-    theta0 = _grid_start(model, bins, gnss)
+    theta0 = (_grid_start if fault == 'strike' else _grid_start_dip)(model, bins, gnss)
     scatter = float(np.median(np.concatenate([b['std'] for b in bins]))) or 1.0
 
     def resid_lsq(theta):
-        out = [model.predict(theta, b['x'], offset=name) - b['median']
-               for name, b in zip(model.offsets, bins)]
+        out = [model.predict(theta, b['x'], offset=name, kind=kind) - b['median']
+               for name, b, kind in zip(model.offsets, bins, model.kinds)]
         if gnss is not None:
-            out.append((model.predict(theta, gnss['x'], offset='ag') - gnss['v'])
-                       / gnss['sigma'] * scatter)
+            out.append((model.predict(theta, gnss['x'], offset='ag', kind=model.gnss_kind)
+                        - gnss['v']) / gnss['sigma'] * scatter)
         return np.concatenate(out)
 
     with warnings.catch_warnings():
@@ -472,14 +684,14 @@ def fit_profile(data, bin_km=1.0, gnss=None, noise='auto', walkers=64, steps=500
 
     # 2. the noise of each file, applied by whitening through its Cholesky factor
     noises, whiten = [], []
-    for name, b in zip(model.offsets, bins):
+    for name, b, kind in zip(model.offsets, bins, model.kinds):
         if isinstance(noise, (tuple, list)):
             sill, length = float(noise[0]), float(noise[1])
             nugget = b['sem'] ** 2
         elif noise == 'white':
             sill, length, nugget = 0.0, bin_km * 0.1, b['std'] ** 2
         else:
-            resid = b['median'] - model.predict(theta_lsq, b['x'], offset=name)
+            resid = b['median'] - model.predict(theta_lsq, b['x'], offset=name, kind=kind)
             sill, length = fit_noise_covariance(b['x'], resid, bin_km)
             nugget = b['sem'] ** 2
         cov = exponential_covariance(b['x'], sill, length, nugget + 1e-8)
@@ -506,12 +718,12 @@ def fit_profile(data, bin_km=1.0, gnss=None, noise='auto', walkers=64, steps=500
             return out
         th = theta[ok]
         ll = np.zeros(th.shape[0])
-        for name, b, winv in zip(model.offsets, bins, whiten):
-            pred = np.atleast_2d(model.predict(th, b['x'], offset=name))
+        for name, b, winv, kind in zip(model.offsets, bins, whiten, model.kinds):
+            pred = np.atleast_2d(model.predict(th, b['x'], offset=name, kind=kind))
             z = (b['median'][None, :] - pred) @ winv.T
             ll -= 0.5 * np.sum(z ** 2, axis=1)
         if gnss is not None:
-            gp = np.atleast_2d(model.predict(th, gnss['x'], offset='ag'))
+            gp = np.atleast_2d(model.predict(th, gnss['x'], offset='ag', kind=model.gnss_kind))
             ll -= 0.5 * np.sum(((gnss['v'][None, :] - gp) / gnss['sigma'][None, :]) ** 2,
                                axis=1)
         out[ok] = lp[ok] + ll
@@ -564,12 +776,20 @@ def fit_profile(data, bin_km=1.0, gnss=None, noise='auto', walkers=64, steps=500
         best = opt.x
     summary = summarize_samples(samples, best, model.names)
 
-    # the shear strain rate at the fault, dv/dx at x = 0 = |S| / (pi d1)
-    i_s, i_d = model.index('S'), model.index('d1')
-    gam = np.abs(samples[:, i_s]) / (np.pi * samples[:, i_d])
-    lo_g, med_g, hi_g = np.percentile(gam, [2.5, 50, 97.5])
-    derived = {'strain': dict(map=float(abs(best[i_s]) / (np.pi * best[i_d])),
-                              median=float(med_g), lo=float(lo_g), hi=float(hi_g))}
+    def spread(values, at_map):
+        lo_v, med_v, hi_v = np.percentile(values, [2.5, 50, 97.5])
+        return dict(map=float(at_map), median=float(med_v), lo=float(lo_v), hi=float(hi_v))
+
+    if fault == 'strike':
+        # the shear strain rate at the fault, dv/dx at x = 0 = |S| / (pi d1)
+        i_s, i_d = model.index('S'), model.index('d1')
+        derived = {'strain': spread(np.abs(samples[:, i_s]) / (np.pi * samples[:, i_d]),
+                                    abs(best[i_s]) / (np.pi * best[i_d]))}
+    else:
+        # the hanging wall against the footwall, far off: horizontal and vertical
+        h_all, v_all = model.rates(samples)
+        h_map, v_map = model.rates(best)
+        derived = {'h_rate': spread(h_all, h_map), 'v_rate': spread(v_all, v_map)}
 
     say(f'   acceptance {accept:.2f}, autocorrelation time {np.max(tau):.0f} steps')
     for name in model.names:
@@ -587,18 +807,103 @@ def fit_profile(data, bin_km=1.0, gnss=None, noise='auto', walkers=64, steps=500
                 gnss=gnss, bin_km=bin_km)
 
 
+##############################################################################
+#                the creep rate straight from the data                       #
+##############################################################################
+def _lines(x, v):
+    """Least-squares slope and intercept of v(x) along the last axis."""
+    mx, mv = x.mean(axis=-1), v.mean(axis=-1)
+    dx = x - mx[..., None]
+    sxx = (dx * dx).sum(axis=-1)
+    sxv = (dx * (v - mv[..., None])).sum(axis=-1)
+    slope = np.where(sxx > 0, sxv / np.where(sxx > 0, sxx, 1.0), 0.0)
+    return slope, mv - slope * mx
+
+
+def fault_offset(x_a, v_a, x_b, v_b, n_boot=2000, seed=0, min_points=3):
+    """The step at x = 0 between two straight lines, as Hussain et al. (2016)
+    measure fault creep: one line through the points on one side (x < 0), one
+    through those on the other (x > 0), each with its own slope; the offset is
+    the second line minus the first at x = 0. Its spread: a percentile
+    bootstrap that resamples each side on its own, n_a of n_a and n_b of n_b
+    (Hussain et al. 2016, after Bekaert et al. 2015) - the points taken as
+    independent.
+
+    Returns dict(offset, lo, hi, std, boot, line_a, line_b, n_a, n_b), the
+    lines as (slope, intercept); None with fewer than min_points a side.
+    """
+    x_a, v_a = np.asarray(x_a, dtype=np.float64), np.asarray(v_a, dtype=np.float64)
+    x_b, v_b = np.asarray(x_b, dtype=np.float64), np.asarray(v_b, dtype=np.float64)
+    n_a, n_b = x_a.size, x_b.size
+    if min(n_a, n_b) < min_points:
+        return None
+    line_a, line_b = _lines(x_a, v_a), _lines(x_b, v_b)
+    rng = np.random.default_rng(seed)
+    boot = np.empty(n_boot)
+    chunk = max(1, min(n_boot, 1_000_000 // max(n_a, n_b)))
+    for start in range(0, n_boot, chunk):
+        m = min(chunk, n_boot - start)
+        ia, ib = rng.integers(0, n_a, (m, n_a)), rng.integers(0, n_b, (m, n_b))
+        boot[start:start + m] = _lines(x_b[ib], v_b[ib])[1] - _lines(x_a[ia], v_a[ia])[1]
+    lo, hi = np.percentile(boot, [2.5, 97.5])
+    return dict(offset=float(line_b[1] - line_a[1]), lo=float(lo), hi=float(hi),
+                std=float(boot.std(ddof=1)), boot=boot, n_a=n_a, n_b=n_b,
+                line_a=(float(line_a[0]), float(line_a[1])),
+                line_b=(float(line_b[0]), float(line_b[1])))
+
+
+def split_offsets(los_offsets, horizontal, up, min_angle=10.0):
+    """LOS offsets of several geometries (ascending, descending) as one
+    horizontal and one vertical offset, as Hussain et al. (2016) split creep:
+    los_k = P * horizontal_k + U * up_k, by least squares - draw by draw when
+    the offsets are bootstrap draws, (n_geometries, n_draw).
+
+    horizontal - per geometry, the LOS unit vector . the horizontal direction
+    up         - per geometry, the LOS unit vector's up component
+    Returns (P, U), arrays like a row of los_offsets - or None when the
+    geometries are too alike (their (horizontal, up) less than min_angle
+    degrees apart) to tell the two apart.
+    """
+    g = np.column_stack([np.asarray(horizontal, dtype=np.float64),
+                         np.asarray(up, dtype=np.float64)])
+    if g.shape[0] < 2 or not np.all(np.isfinite(g)):
+        return None
+    unit = g / np.linalg.norm(g, axis=1)[:, None]
+    cos = np.clip(np.abs(unit @ unit.T), 0.0, 1.0)
+    if np.degrees(np.arccos(cos.min())) < min_angle:
+        return None
+    sol = np.linalg.lstsq(g, np.asarray(los_offsets, dtype=np.float64).reshape(len(g), -1),
+                          rcond=None)[0]
+    return sol[0], sol[1]
+
+
 def _draws(result, n_draw, seed):
     samples = result['samples']
     rng = np.random.default_rng(seed)
     return samples[rng.choice(samples.shape[0], min(n_draw, samples.shape[0]), replace=False)]
 
 
+def model_bands(result, x, levels=(95.0, 68.0), n_draw=1000, seed=1, offset='a', kind=None):
+    """The MAP curve and, for each level, the central level % envelope of the
+    posterior curves at x - {95.0: (lo, hi), 68.0: (lo, hi)}: the 95 % and
+    68 % confidence bounds that Hussain et al. (2016, Fig. 9) shade. kind:
+    the component of a dip-slip model ('h', 'z', (ph, pu))."""
+    model = result['model']
+    curves = np.atleast_2d(model.predict(_draws(result, n_draw, seed), x, offset=offset,
+                                         kind=kind))
+    bands = {}
+    for level in levels:
+        tail = (100.0 - float(level)) / 2.0
+        lo, hi = np.percentile(curves, [tail, 100.0 - tail], axis=0)
+        bands[float(level)] = (lo, hi)
+    return np.asarray(model.predict(result['best'], x, offset=offset, kind=kind)), bands
+
+
 def model_band(result, x, n_draw=1000, seed=1, offset='a'):
     """The MAP curve and the 2.5 / 97.5 % envelope of the posterior curves at x."""
-    model = result['model']
-    curves = np.atleast_2d(model.predict(_draws(result, n_draw, seed), x, offset=offset))
-    lo, hi = np.percentile(curves, [2.5, 97.5], axis=0)
-    return np.asarray(model.predict(result['best'], x, offset=offset)), lo, hi
+    best, bands = model_bands(result, x, levels=(95.0,), n_draw=n_draw, seed=seed,
+                              offset=offset)
+    return (best, *bands[95.0])
 
 
 def strain_rate(result, x, n_draw=1000, seed=1):

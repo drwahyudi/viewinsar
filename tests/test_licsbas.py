@@ -283,13 +283,13 @@ def test_model_on_a_licsbas_folder(tmp_path):
     # along the oriented strike (290 deg) the left-lateral motion is -v_s
     assert np.median(pts['v_model'] + want) == pytest.approx(-offset, abs=0.5)
 
-    # the parameters as Hussain et al. write them
+    # the parameters as Hussain et al. (2016, Izmit, Fig. 9) write them
     lines = sec.parameter_lines()
-    assert lines[0].startswith('slip rate = 2') and ' mm/yr (' in lines[0]
-    assert lines[0].endswith('95% CI), left-lateral')
-    assert lines[1].startswith('locking depth = ') and ' km (' in lines[1]
+    assert lines[0].startswith('slip rate = 2') and ' mm/yr ( ' in lines[0]
+    assert lines[0].endswith('95% c.i. ), left-lateral')
+    assert lines[1].startswith('locking depth = ') and ' km ( ' in lines[1]
     assert lines[-1].startswith('strain rate = ') and 'µstrain/yr' in lines[-1]
-    assert sec.ax_swath.get_ylabel() == 'Fault-parallel velocity [mm/yr]'
+    assert sec.ax_swath.get_ylabel() == 'Fault-parallel velocity (mm/yr)'
     assert 'µstrain/yr' in sec.ax_strain.get_ylabel()
     obj.close()
 

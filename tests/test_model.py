@@ -12,11 +12,14 @@ import os
 
 import numpy as np
 import pytest
+from matplotlib import colors as mcolors
 
 from viewinsar import cli
 from viewinsar import model as mdl
 from viewinsar.modelview import (
     azimuth_of,
+    ci_text,
+    compass_word,
     fault_normal,
     local_en,
     orient_strike,
@@ -70,8 +73,19 @@ def _attrs(lat0, lon0, length, width, step, **extra):
     return atr
 
 
-def make_track(folder, inc0, az, offset, lat0=30.60, lon0=130.0, seed=0, heading=-12.0):
-    """A LOS velocity (m/year) and its geometryGeo.h5, in `folder`."""
+def _creep_n80e(x, rate, depth):
+    """Shallow creep, in the sense of the slip, along N80E (mm/yr)."""
+    return -rate * (np.heaviside(x, 0.5) - 0.5 - np.arctan(x / depth) / np.pi)
+
+
+def make_track(folder, inc0, az, offset, lat0=30.60, lon0=130.0, seed=0, heading=-12.0,
+               creep=None, up_step=0.0):
+    """A LOS velocity (m/year) and its geometryGeo.h5, in `folder`.
+
+    creep   - (rate, depth): shallow creep on the fault, mm/yr and km
+    up_step - mm/yr: the SSE side moves up by that much relative to the NNW
+              side - a vertical step at the fault, which the LOS sees
+    """
     length, width, step = 150, 250, 0.004
     lon = lon0 + (np.arange(width) + 0.5) * step
     lat = lat0 - (np.arange(length) + 0.5) * step
@@ -80,7 +94,10 @@ def make_track(folder, inc0, az, offset, lat0=30.60, lon0=130.0, seed=0, heading
     ue = -np.sin(np.radians(inc)) * np.sin(np.radians(az))
     un = np.sin(np.radians(inc)) * np.cos(np.radians(az))
     p_e, p_n = np.sin(np.radians(STRIKE)), np.cos(np.radians(STRIKE))
-    los = _vpar_n80e(_fault_frame(lon2, lat2)) * (ue * p_e + un * p_n) + offset
+    x = _fault_frame(lon2, lat2)
+    vpar = _vpar_n80e(x) + (_creep_n80e(x, *creep) if creep else 0.0)
+    los = (vpar * (ue * p_e + un * p_n) + up_step * (np.heaviside(x, 0.5) - 0.5)
+           * np.cos(np.radians(inc)) + offset)
     los += np.random.default_rng(seed).normal(0, 1.0, los.shape)
     atr = _attrs(lat0, lon0, length, width, step, HEADING=heading,
                  CENTER_INCIDENCE_ANGLE=inc0,
@@ -329,6 +346,57 @@ def test_fit_prior_noise_modes_and_errors():
 ##############################################################################
 #                               the geometry                                 #
 ##############################################################################
+def test_fault_offset_of_two_lines():
+    """Hussain et al. (2016): a line each side, each with its own slope, and
+    their offset at the fault - its spread the standard error of the two
+    intercepts (2 sigma / sqrt(n) each, for x uniform over one side)."""
+    rng = np.random.default_rng(4)
+    x_a, x_b = rng.uniform(-5, 0, 3000), rng.uniform(0, 5, 3000)
+    v_a = -1.0 + 0.4 * x_a + rng.normal(0, 1.0, x_a.size)
+    v_b = 6.0 + 0.1 * x_b + rng.normal(0, 1.0, x_b.size)
+    fit = mdl.fault_offset(x_a, v_a, x_b, v_b, n_boot=1000, seed=1)
+    assert fit['offset'] == pytest.approx(7.0, abs=0.2)
+    assert fit['lo'] < 7.0 < fit['hi'] and fit['lo'] < fit['offset'] < fit['hi']
+    assert fit['line_a'][0] == pytest.approx(0.4, abs=0.06)
+    assert fit['line_b'][0] == pytest.approx(0.1, abs=0.06)
+    assert fit['boot'].shape == (1000,) and fit['n_a'] == fit['n_b'] == 3000
+    assert fit['std'] == pytest.approx(np.hypot(2 / np.sqrt(3000), 2 / np.sqrt(3000)), rel=0.15)
+    # the same seed, the same draws - in chunks or not
+    again = mdl.fault_offset(x_a, v_a, x_b, v_b, n_boot=1000, seed=1)
+    assert np.array_equal(again['boot'], fit['boot'])
+    # too few points on a side
+    assert mdl.fault_offset(x_a[:2], v_a[:2], x_b, v_b) is None
+
+
+def test_split_offsets_into_horizontal_and_vertical():
+    """The LOS offsets of an ascending and a descending track as one fault-
+    parallel and one vertical offset - draw by draw too; none from two alike."""
+    h, u = np.array([-0.63, 0.56]), np.array([0.78, 0.80])
+    los = h * 4.0 + u * 1.5
+    par, up = mdl.split_offsets(los, h, u)
+    assert par[0] == pytest.approx(4.0) and up[0] == pytest.approx(1.5)
+    draws = np.vstack([los[0] + np.arange(5.0) * h[0], los[1] + np.arange(5.0) * h[1]])
+    par, up = mdl.split_offsets(draws, h, u)
+    assert par == pytest.approx(4.0 + np.arange(5.0)) and up == pytest.approx(np.full(5, 1.5))
+    assert mdl.split_offsets(los, [0.60, 0.62], [0.78, 0.79]) is None
+    assert mdl.split_offsets(los[:1], h[:1], u[:1]) is None
+
+
+def test_parameters_written_as_hussain():
+    """Hussain et al. (2016, Izmit, Fig. 9): '19 mm/yr ( 9 – 28, 95% c.i. )' -
+    rounded to the first digit of the half width of the range."""
+    assert ci_text(19.2, 9.1, 28.4, 'mm/yr') == '19 mm/yr ( 9 – 28, 95% c.i. )'
+    assert ci_text(-12.3, -16.2, -8.9, 'mm/yr') == \
+        '\u221212 mm/yr ( \u221216 – \u22129, 95% c.i. )'
+    assert ci_text(5.62, 4.71, 6.18, 'mm/yr') == '5.6 mm/yr ( 4.7 – 6.2, 95% c.i. )'
+    assert ci_text(0.514, 0.371, 0.549, 'µstrain/yr') == \
+        '0.51 µstrain/yr ( 0.37 – 0.55, 95% c.i. )'
+    assert ci_text(-0.3, -1.6, 1.2, 'km') == '0 km ( \u22122 – 1, 95% c.i. )'
+    assert ci_text(3.0, 3.0, 3.0, '') == '3.0 ( 3.0 – 3.0, 95% c.i. )'
+    assert [compass_word(a) for a in (0, 44, 91, 170, 200, 350)] == \
+        ['North', 'North-east', 'East', 'South', 'South', 'North']
+
+
 def test_geometry_helpers():
     assert azimuth_of(1, 0) == pytest.approx(90.0) and azimuth_of(0, -1) == pytest.approx(180.0)
     assert azimuth_of(-1, 1) == pytest.approx(315.0)
@@ -385,6 +453,45 @@ def test_model_options(products):
     assert bare.cmap_prof == 'viridis' and bare.file == [asc]
     with pytest.raises(ValueError, match='--cmap-prof: no colormap'):
         cli.model_cmd_line_parse([asc, '--cmap-prof', 'no_such_map', '--noverbose'])
+    # --creep-offset [KM [WIDTH]]: 5 and 2.5 km when left out - a file after it is an input
+    assert cli.model_cmd_line_parse([asc, '--noverbose']).creep_offset is None
+    assert cli.model_cmd_line_parse([asc, '--creep-offset']).creep_offset == (5.0, 2.5)
+    assert cli.model_cmd_line_parse([asc, '--creep-offset', '4']).creep_offset == (4.0, 2.5)
+    assert cli.model_cmd_line_parse([asc, '--creep-offset', '4', '1.5',
+                                     '--noverbose']).creep_offset == (4.0, 1.5)
+    bare = cli.model_cmd_line_parse(['--creep-offset', asc, '--comp', 'los', '--noverbose'])
+    assert bare.creep_offset == (5.0, 2.5) and bare.file == [asc] and bare.comp == 'los'
+    with pytest.raises(ValueError, match='KM and WIDTH at most'):
+        cli.model_cmd_line_parse([asc, '--creep-offset', '4', '2', '1', '--noverbose'])
+    with pytest.raises(ValueError, match='must be positive'):
+        cli.model_cmd_line_parse([asc, '--creep-offset', '0', '--noverbose'])
+    # the legend: inside where it hides nothing, else beside (auto); no medians
+    # over the points unless asked
+    plain = cli.model_cmd_line_parse([asc, '--noverbose'])
+    assert plain.model_legend == 'auto' and not plain.show_medians
+    asked = cli.model_cmd_line_parse([asc, '--legend', 'out', '--medians', '--noverbose'])
+    assert asked.model_legend == 'out' and asked.show_medians
+    assert cli.model_cmd_line_parse([asc, '--legend', '--noverbose']).model_legend == 'auto'
+    bare = cli.model_cmd_line_parse(['--legend', asc, '--noverbose'])
+    assert bare.model_legend == 'auto' and bare.file == [asc]
+    with pytest.raises(SystemExit):
+        cli.model_cmd_line_parse([asc, '--legend', 'above', '--noverbose'])
+    # --comp vu: the vertical is a reverse or a normal fault's (viewinsar model
+    # reverse|normal), not a strike-slip one's; one --comp for all the files
+    with pytest.raises(ValueError, match='reverse or a normal'):
+        cli.model_cmd_line_parse([asc, '--comp', 'vu', '-gnss', products['gnss'],
+                                  '--noverbose'])
+    with pytest.raises(ValueError, match='ONE --comp'):
+        cli.model_cmd_line_parse([asc, products['desc'], '--comp', 'los', 'as-is',
+                                  '--noverbose'])
+    two = cli.model_cmd_line_parse([asc, products['desc'], '--comp', 'los', '--noverbose'])
+    assert two.comps == ['los', 'los'] and two.fault_type == 'strike'
+    # --bands OUTER INNER: 95 68 (1 sigma), or as asked
+    assert cli.model_cmd_line_parse([asc, '--noverbose']).bands == [95.0, 68.0]
+    assert cli.model_cmd_line_parse([asc, '--bands', '95', '65', '--noverbose']).bands == \
+        [95.0, 65.0]
+    with pytest.raises(ValueError, match='--bands'):
+        cli.model_cmd_line_parse([asc, '--bands', '60', '70', '--noverbose'])
 
 
 def test_model_end_to_end(products, tmp_path):
@@ -438,14 +545,74 @@ def test_model_end_to_end(products, tmp_path):
     samples = _csv(out / f'{base}_samples.csv')
     assert samples.dtype.names == ('S', 'd1', 'a', 'ag', 'strain')
 
-    # the window: points, bins, the dashed MAP model, the GNSS; the strain panel
+    # the window, as Hussain et al. (2016, Izmit, Fig. 9): light red points, the
+    # MAP a black line in its 95 % (dark grey) and 68 % (light grey) ranges, the
+    # GNSS black, A-A' boxed top left, North / South at the bottom corners, a blue
+    # arrow at the fault, the parameters in italics - no legend, no medians,
+    # no title (the window's title says what it did)
+    _check_hussain_look(sec)
     ax = sec.ax_swath
-    assert any(ln.get_linestyle() == '--' for ln in ax.get_lines())
+    assert ax.get_title() == ''
     labels = [t.get_text() for t in ax.get_legend().get_texts()]
-    assert labels[:3] == ['InSAR', 'Median per 1 km (±1σ)', 'MAP model']
-    assert 'GNSS' in labels and 'Fault' in labels
+    for label in ('InSAR', 'MAP model', '95% range', '68% range', 'GNSS', 'Fault location'):
+        assert label in labels, label
+    _check_legend_clear(sec)
+    assert not [ln for ln in ax.get_lines() if ln.get_marker() == 'o' and ln.get_mfc() == 'w']
+    gnss = [ln for ln in ax.get_lines() if ln.get_marker() == 'o']
+    assert gnss and all(mcolors.to_hex(ln.get_mfc()) == '#000000' for ln in gnss)
+    assert all(ln.get_mec() == 'w' for ln in gnss)
+    assert sec.info.startswith("A-A': swath ±15 km") and 'GNSS' in sec.info
+    assert ax.get_ylabel() == 'Fault-parallel velocity (mm/yr)'
+    assert sec.ax_strain.get_xlabel() == 'Distance from fault (km)'
     assert sec.ax_strain is not None and sec.fig_post is not None
     _check_posterior(sec, ['S', 'd1', 'a'])
+
+
+def _check_hussain_look(sec, density=False):
+    """The profile as Hussain et al. (2016, Izmit, Fig. 9) draw it."""
+    from matplotlib.collections import PolyCollection
+    from matplotlib.offsetbox import AnchoredText
+    from matplotlib.text import Annotation
+
+    ax = sec.ax_swath
+    notes = {a.get_text(): a for a in ax.texts if isinstance(a, Annotation)}
+    assert "A-A'" in notes and notes["A-A'"].get_bbox_patch() is not None
+    assert {'North', 'South'} <= set(notes)                    # the profile runs NNW-SSE
+    arrow = notes.get('Fault location') or notes.get('Fault location, fitted')
+    assert arrow is not None and arrow.arrow_patch is not None
+    texts = [a for a in ax.artists if isinstance(a, AnchoredText)]
+    assert len(texts) == 1
+    text = texts[0].txt._text
+    assert text.get_style() == 'italic' and '95% c.i. )' in text.get_text()
+    assert text.get_text().startswith('slip rate = ')
+    model = [ln for ln in ax.get_lines() if ln.get_linestyle() == '-' and ln.get_color() == 'k'
+             and len(ln.get_xdata()) > 100]
+    assert len(model) == 1                                      # the MAP: a black line
+    polys = [c for c in ax.collections if isinstance(c, PolyCollection)]
+    shades = [mcolors.to_hex(c.get_facecolor()[0]) for c in polys]
+    assert shades == (['#d62728', '#d62728'] if density else ['#9e9e9e', '#dbdbdb'])
+    # 25 % and 40 % transparent (lighter on a density, so that it shows)
+    assert [c.get_alpha() for c in polys] == ([0.4, 0.3] if density else [0.75, 0.6])
+
+
+def _check_legend_clear(sec):
+    """The legend hides neither the parameters nor the marks: inside the plot,
+    or beside it on the right."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.offsetbox import AnchoredText
+
+    ax = sec.ax_swath
+    renderer = FigureCanvasAgg(ax.figure).get_renderer()     # the run closed its figures
+    leg = ax.get_legend().get_window_extent(renderer)
+    box = ax.get_window_extent(renderer)
+    others = [a.get_window_extent(renderer) for a in ax.artists if isinstance(a, AnchoredText)]
+    others += [a.get_window_extent(renderer) for a in ax.texts]
+    for other in others:
+        assert not leg.overlaps(other)
+    inside = leg.x0 >= box.x0 - 1 and leg.x1 <= box.x1 + 1 and leg.y0 >= box.y0 - 1 \
+        and leg.y1 <= box.y1 + 1
+    assert inside or leg.x0 >= box.x1, (leg, box)
+    return inside
 
 
 def _check_posterior(sec, names):
@@ -496,27 +663,92 @@ def test_model_two_tracks(products, tmp_path):
     assert np.median(np.abs(bins['residual'])) < 1.0
 
 
+def test_model_creep_offset(tmp_path):
+    """--creep --creep-offset on an ascending and a descending track with 6 mm/yr
+    of creep down to 4 km and the A' (SSE) side rising 2 mm/yr: the offset of
+    each track, biased each its own way by the vertical step; the two split into
+    the fault-parallel creep and the vertical - as Hussain et al. (2016) found
+    at Izmit; on the profile, in _params.csv / .txt and the box."""
+    pytest.importorskip('h5py')
+    tracks = dict(creep=(6.0, 4.0), up_step=2.0)
+    asc = make_track(str(tmp_path / 'asc'), 39.0, 102.0, 2.0, seed=1, **tracks)
+    desc = make_track(str(tmp_path / 'desc'), 37.0, -102.0, -3.0, lat0=30.62, lon0=130.10,
+                      seed=2, heading=-168.0, **tracks)
+    out = tmp_path / 'out'
+    obj = cli.model_main([asc, desc, '--labels', 'asc', 'desc', '--comp', 'los', *PROFILE,
+                          '--creep', '--creep-offset', '--legend', 'out', '--bands', '95',
+                          '65', *FAST, '--nodisplay', '--noverbose', '--outdir', str(out)])
+    sec = obj.sections[0]
+    off = sec.offset
+    assert off['km'] == 5.0 and off['width'] == 2.5
+    f_asc, f_desc = off['files']
+    assert f_asc['label'] == 'asc' and f_asc['n_a'] > 100 and f_asc['n_b'] > 100
+    # the step up adds to the creep in the ascending LOS, takes from it in the descending
+    assert f_asc['rate'] > f_desc['rate'] + 2.0
+    for one in (f_asc, f_desc):
+        assert one['lo'] < one['rate'] < one['hi']
+    # split: the creep (less than 6 - the lines' 5 km span a creep that dies away
+    # within 4 km) and the A' side up
+    sp = off['split']
+    assert sp is not None and sp['n'] == 2
+    assert 2.5 < sp['par'] < 6.0 and sp['par_lo'] < sp['par'] < sp['par_hi']
+    assert 0.5 < sp['up'] < 3.5 and sp['up_lo'] > 0.0
+
+    base = os.path.basename(sec.outfile_base)
+    par = _csv(out / f'{base}_params.csv')
+    names = list(par['name'])
+    for name in ('C', 'd2', 'C_offset_1', 'C_offset_2', 'C_offset_par', 'U_offset'):
+        assert name in names, name
+    row = names.index('C_offset_par')
+    assert par['map'][row] == pytest.approx(sp['par'], rel=1e-5)
+    assert par['lower_95'][row] == pytest.approx(sp['par_lo'], rel=1e-5)
+    text = (out / f'{base}_params.txt').read_text()
+    for needle in ('creep offset   : as Hussain et al. (2016)', 'split of the 2 LOS offsets',
+                   "+ = the A' side up"):
+        assert needle in text, needle
+
+    # the profile: the box, the lines either side, the model without the creep
+    ax = sec.ax_swath
+    box = '\n'.join(sec.parameter_lines())
+    for needle in ('creep rate = ', 'creep depth = ', 'creep offset, fault-parallel = ',
+                   "A' side up"):
+        assert needle in box, needle
+    # --legend out: everything, beside the plot - the figure grown for it, the
+    # plot as wide (in inches) as ever
+    labels = [t.get_text() for t in ax.get_legend().get_texts()]
+    for label in ('asc', 'desc', 'MAP model', '95% range', '65% range', 'MAP without creep',
+                  'Offset lines, ±5 km', 'Fault location'):
+        assert label in labels, label
+    assert not _check_legend_clear(sec)                       # beside, not inside
+    (_, home), = [(a, box) for a, box in sec.home if a is ax]
+    narrow, wide = sec._narrow[0], ax.figure.get_size_inches()[0]
+    assert wide > narrow
+    assert ax.get_position().width * wide == pytest.approx(home.width * narrow, rel=1e-6)
+    assert sum(ln.get_color() == '#ff7f0e' for ln in ax.get_lines()) == 4
+    obj.close()
+
+
 def test_model_density_view(products, tmp_path):
     """--cmap-prof: the pixels as a point density, as swath draws it - no points,
     the 95 % range red, bigger medians, a colour bar; --nlook fills the density
     in but the fit takes the real pixels, exactly as without it."""
-    from matplotlib import colors as mcolors
     from matplotlib.collections import PathCollection, PolyCollection, QuadMesh
 
     args = [products['asc'], products['desc'], '--labels', 'T1A', 'T2D', '--comp', 'los',
-            '-fault', products['fault'], *PROFILE, *FAST, '--nodisplay', '--noverbose']
-    plain = cli.model_main([*args, '--outdir', str(tmp_path / 'plain')])
+            '-fault', products['fault'], '-gnss', products['gnss'], *PROFILE, *FAST,
+            '--nodisplay', '--noverbose']
+    plain = cli.model_main([*args, '--medians', '--outdir', str(tmp_path / 'plain')])
     dense = cli.model_main([*args, '--cmap-prof', 'magma', '--nlook', '3',
                             '--outdir', str(tmp_path / 'dense')])
     sp, sd = plain.sections[0], dense.sections[0]
     assert sd.result['n_pixels'] == sp.result['n_pixels']
-    for name in ('S', 'd1', 'a', 'a2'):
+    for name in ('S', 'd1', 'a', 'a2', 'ag'):
         for key in ('map', 'lo', 'hi'):
             assert sd.result['summary'][name][key] == pytest.approx(
                 sp.result['summary'][name][key], rel=1e-9), (name, key)
     drawn = sum(f['x'].size for f in sd.fp_draw.values())
     assert drawn > 5 * sd.result['n_pixels'] and sp.fp_draw is None
-    assert '(drawn 3x oversampled)' in sd.ax_swath.get_title()
+    assert '(drawn 3x oversampled)' in sd.info
     assert 'oversampled what is drawn only' in next(
         (tmp_path / 'dense').glob('*_params.txt')).read_text()
     pts = _csv(next((tmp_path / 'dense').glob('*_points.csv')))
@@ -527,7 +759,12 @@ def test_model_density_view(products, tmp_path):
                 if isinstance(c, PolyCollection)]
 
     def median_size(ax):
-        return [ln for ln in ax.get_lines() if ln.get_marker() == 'o'][0].get_markersize()
+        return [ln for ln in ax.get_lines() if ln.get_marker() == 'o'
+                and ln.get_mfc() != 'k' and ln.get_mec() != 'w'][0].get_markersize()
+
+    def gnss_face(ax):
+        return {mcolors.to_hex(ln.get_mfc()) for ln in ax.get_lines()
+                if ln.get_marker() == 'o' and ln.get_mec() == 'w'}
 
     ax = sd.ax_swath
     mesh = [c for c in ax.collections if isinstance(c, QuadMesh)]
@@ -535,11 +772,18 @@ def test_model_density_view(products, tmp_path):
     # every sample drawn, but for the few beyond the plot's limits
     assert 0.99 * drawn < mesh[0].get_array().sum() <= drawn
     assert not [c for c in ax.collections if isinstance(c, PathCollection)]
-    assert '#d62728' in bands(ax) and '#9e9e9e' in bands(sp.ax_swath)
+    assert bands(ax) == ['#d62728', '#d62728'] and bands(sp.ax_swath) == ['#9e9e9e', '#dbdbdb']
+    _check_hussain_look(sd, density=True)
+    _check_hussain_look(sp)
+    # --medians over the points; on a density they are twice the size
     assert median_size(ax) > 1.8 * median_size(sp.ax_swath)
+    # the GNSS: red on a density, black on the points - outlined in white either way
+    assert gnss_face(ax) == {'#d62728'} and gnss_face(sp.ax_swath) == {'#000000'}
     assert sd.ax_cbar.get_ylabel().startswith('Point density')
+    # the legend: the files first, the GNSS red in it too
     labels = [t.get_text() for t in ax.get_legend().get_texts()]
-    assert labels[:3] == ['T1A', 'T2D', 'Median per 1 km (±1σ)'] and 'InSAR' not in labels
+    assert labels[:3] == ['T1A', 'T2D', 'Median per 1 km (±1σ)'] and 'GNSS' in labels
+    _check_legend_clear(sd)
     # the default view: the points, no density
     assert [c for c in sp.ax_swath.collections if isinstance(c, PathCollection)]
     assert not [c for c in sp.ax_swath.collections if isinstance(c, QuadMesh)]
@@ -588,9 +832,10 @@ def test_model_east_velocity_given_fault(products, tmp_path):
     """No trace: --x0 and --strike place the fault; the east velocity is divided
     by sin(strike)."""
     obj = cli.model_main([products['east'], '--comp', 've', '--x0', '31.45', '--strike', '80',
-                          *PROFILE, *FAST, '--nodisplay', '--noverbose',
+                          *PROFILE, *FAST, '--legend', 'off', '--nodisplay', '--noverbose',
                           '--outdir', str(tmp_path)])
     sec = obj.sections[0]
+    assert sec.ax_swath.get_legend() is None                  # --legend off: none
     assert sec.fault_how == '--x0' and sec.strike_how == '--strike'
     assert sec.strike == pytest.approx(260.0)            # turned: S > 0 is right-lateral
     s = sec.result['summary']
@@ -606,7 +851,41 @@ def test_model_as_is_needs_no_strike(products, tmp_path):
     assert sec.fault_how.startswith('the middle')
     # the LOS as it is: the slip rate seen in the LOS (x ~0.63)
     assert abs(sec.result['summary']['S']['map']) == pytest.approx(S_TRUE * 0.63, abs=2.0)
-    assert 'Velocity [mm/yr]' == sec.ax_swath.get_ylabel()
+    # what is plotted: the LOS, as it is - and the rates are those it sees
+    assert sec.ax_swath.get_ylabel() == 'LOS velocity (mm/yr)'
+    assert sec.parameter_lines()[0].startswith('slip rate in the LOS = ')
+
+
+def test_model_names_the_data(products, tmp_path):
+    """The y axis says what is plotted: fault-parallel velocity once the data
+    are turned into it; a component as it is, by the name of its file; the
+    LOS as it is. A file named as the vertical is a reverse or a normal
+    fault's (test_dipslip)."""
+    import shutil
+
+    from viewinsar.modelview import VEL_LABEL, ModelViewer
+
+    up = tmp_path / 'geo_up.h5'
+    shutil.copy(products['east'], up)
+    cases = ((products['east'], 'auto', 'as-is', 'east'), (products['east'], 've', 've', 'par'),
+             (products['asc'], 'as-is', 'as-is', 'los'), (products['asc'], 'auto', 'los', 'par'))
+    for fname, comp, resolved, plotted in cases:
+        inps = cli.model_cmd_line_parse([fname, '--comp', comp, '--noverbose'])
+        inps.disp_fig = False
+        obj = ModelViewer(inps, cli.get_view_cmd(inps))
+        obj.open()
+        assert (obj.comp, obj.plotted) == (resolved, plotted), (fname, comp)
+        assert obj.comps == [resolved]
+        obj.close()
+    inps = cli.model_cmd_line_parse([str(up), '--noverbose'])
+    inps.disp_fig = False
+    obj = ModelViewer(inps, cli.get_view_cmd(inps))
+    with pytest.raises(ValueError, match='reverse or a normal'):
+        obj.open()
+    obj.close()
+    assert VEL_LABEL['z'] == 'Fault vertical velocity' and VEL_LABEL['par'] == \
+        'Fault-parallel velocity' and VEL_LABEL['los'] == 'LOS velocity'
+    assert VEL_LABEL['h'] == 'Fault-normal velocity'
 
 
 def test_model_interactive(products, tmp_path):
@@ -636,6 +915,21 @@ def test_model_interactive(products, tmp_path):
     sec = obj.sections[0]
     assert sec.has_data and sec.result['summary']['S']['map'] == pytest.approx(S_TRUE, abs=2.5)
     assert len(sec.map_marks) == 1                       # the fault on the map
+    # "l" on the profile: the legend in, out, off, in turn - drawn again, not
+    # fitted again, and not the log y axis of matplotlib's own "l"
+    result = sec.result
+    sec.fig.canvas.draw()
+    seen = [sec.legend_at]
+    for _ in range(3):
+        # the mouse over the plot: where matplotlib's "l" would act
+        x, y = sec.ax_swath.transAxes.transform((0.5, 0.5))
+        sec.fig.canvas.callbacks.process('key_press_event', KeyEvent(
+            'key_press_event', sec.fig.canvas, key='l', x=x, y=y))
+        seen.append(sec.legend_at)
+    order = ['in', 'out', 'off']
+    assert seen[1:] == [order[(order.index(seen[0]) + k) % 3] for k in (1, 2, 3)]
+    assert sec.result is result and sec.ax_swath.get_yscale() == 'linear'
+    assert (sec.ax_swath.get_legend() is None) == (sec.legend_at == 'off')
     key('e')
     assert any(p.name.endswith('_params.csv') for p in tmp_path.iterdir())
     key('=')
@@ -677,5 +971,6 @@ def test_help_mentions_model(capsys):
     out = capsys.readouterr().out
     for needle in ('--comp', '--creep', '--free-x0', '--d1-prior', '--noise', '--walkers',
                    '-gnss', '_posterior.png', '_samples.csv', 'Goodman & Weare',
-                   'Hussain et al.', '--cmap-prof', 'point DENSITY'):
+                   'Hussain et al.', '--cmap-prof', 'point DENSITY', '--creep-offset',
+                   'bootstrap', '--legend', '--medians', 'Fault location'):
         assert needle in out, needle

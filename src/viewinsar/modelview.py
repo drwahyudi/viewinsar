@@ -23,11 +23,22 @@ import textwrap
 
 import numpy as np
 from matplotlib import colors as mcolors
+from matplotlib import patheffects
 from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.offsetbox import AnchoredText
 
-from .model import NAMES, UNITS, describe, fit_profile, model_band, strain_rate
+from .model import (
+    NAMES,
+    UNITS,
+    describe,
+    fault_offset,
+    fit_profile,
+    forward,
+    model_bands,
+    split_offsets,
+    strain_rate,
+)
 from .radar import PIXEL_ATR
 from .raster import same_crs
 from .swath import (
@@ -54,13 +65,44 @@ from .viewer import (
 __all__ = ['ModelViewer', 'ModelSection', 'azimuth_of', 'local_en', 'strike_of_points',
            'orient_strike', 'slip_sense', 'fault_normal']
 
+# The profile as Hussain et al. (2016, Izmit, Fig. 9) draw theirs
 POINT_COLORS = ('#d62728', '#9467bd', '#2ca02c', '#ff7f0e', '#8c564b', '#e377c2',
-                '#bcbd22', '#17becf')            # the pixels of each file, red first
-GNSS_COLOR = '#1f77b4'                           # blue, as Hussain et al.
-MAP_COLOR = 'k'                                  # the MAP model: bold black dashes
-BAND_COLOR = '0.62'                              # the 95 % range: light grey
+                '#bcbd22', '#17becf')            # the pixels of each file, red first ...
+POINT_TINT = 0.4                                 # ... lightened: the cloud stays behind
+GNSS_COLOR = 'k'                                 # the GNSS black, outlined in white
+GNSS_ON_DENSITY = '#d62728'                      # --cmap-prof: red, outlined in white
+MAP_COLOR = 'k'                                  # the MAP model: a black line
+BAND_COLOR = '0.62'                              # the 95 % range: dark grey ...
+BAND_68 = '0.86'                                 # ... the 68 % range: light grey
+BAND_ALPHA = (0.75, 0.6)                         # ... 25 % and 40 % transparent
+# the y axis says what is plotted: fault-parallel velocity once the data are
+# turned into it; else what they are, as they are (a component by its name);
+# for reverse and normal faults: across the fault (h), vertical (z), a LOS
+VEL_LABEL = {'par': 'Fault-parallel velocity', 'vu': 'Fault vertical velocity',
+             'los': 'LOS velocity', 'east': 'East velocity', 'north': 'North velocity',
+             'horizontal': 'Horizontal velocity', 'h': 'Fault-normal velocity',
+             'z': 'Fault vertical velocity'}
+# the far-field rates of a dip-slip fault: the hanging wall against the footwall
+RATE_WORDS = {'reverse': ('shortening rate', 'uplift rate'),
+              'normal': ('extension rate', 'subsidence rate')}
+DIP_COMPS = ('vu', 've', 'vn', 'los')            # the data of a reverse or normal fault
+NAMED_AS = {'up': 'vu', 'vert': 'vu', 'vertical': 'vu', 'vu': 'vu', 'east': 'east',
+            'ew': 'east', 've': 'east', 'north': 'north', 'ns': 'north', 'vn': 'north',
+            'hz': 'horizontal', 'horz': 'horizontal', 'horizontal': 'horizontal'}
+LEGEND_CYCLE = ('in', 'out', 'off')              # the "l" key, in turn
+FAULT_COLOR = '#1f4fe0'                          # the arrow under the fault, blue
+ARROW_TIP = 0.235                                # ... its tip, in axes fraction
+ARROW_SHORT = 0.13                               # ... over a panel without the words
+LABEL_FACE = '0.86'                              # the A-A' box, top left
 # --cmap-prof: the pixels as a density; the 95 % range red, as the points were
 DENSITY_BAND = '#d62728'
+# Times-like faces for the parameters (italic) and "Fault location" (bold), as
+# Hussain et al. set them: the first one installed - matplotlib ships STIX
+SERIF_FONTS = ('Times New Roman', 'Times', 'Nimbus Roman', 'Nimbus Roman No9 L',
+               'TeX Gyre Termes', 'Liberation Serif', 'STIXGeneral', 'DejaVu Serif')
+COMPASS = ('North', 'North-east', 'East', 'South-east', 'South', 'South-west', 'West',
+           'North-west')
+OFFSET_COLOR = '#ff7f0e'                         # --creep-offset: the two lines, orange
 POST_COLOR = '#d62728'                           # the MAP in the posterior plots
 HIST_COLOR, HIST_EDGE = '#1f4fd8', '#0a1f73'      # the marginal histograms, blue
 # names that mark a component of a decomposition, not a line of sight
@@ -69,20 +111,25 @@ DECOMPOSED = {'hz', 'horz', 'horizontal', 'up', 'vert', 'vertical', 'east', 'nor
 # the GNSS component that matches a file named as one (horizontal: unknown direction)
 DECOMPOSED_GNSS = {'up': 'vu', 'vert': 'vu', 'vertical': 'vu', 'vu': 'vu', 'east': 've',
                    'ew': 've', 've': 've', 'north': 'vn', 'ns': 'vn', 'vn': 'vn'}
-POSTERIOR_ORDER = ('S', 'd1', 'a', 'C', 'd2', 'x0')   # as Hussain et al. (2016)
-POSTERIOR_LABEL = {'S': 'Slip rate', 'd1': 'Locking depth', 'a': 'Offset',
+POSTERIOR_ORDER = ('S', 'd1', 'dip', 'a', 'C', 'd2', 'x0')   # as Hussain et al. (2016)
+POSTERIOR_LABEL = {'S': 'Slip rate', 'd1': 'Locking depth', 'a': 'Offset', 'dip': 'Dip',
                    'C': 'Creep rate', 'd2': 'Creep depth', 'x0': 'Fault position'}
 KM_PER_DEG = np.pi / 180.0 * EARTH_RADIUS / 1000.0
-PHYSICAL = ('S', 'd1', 'C', 'd2', 'x0')          # what the posterior figure shows
-SYMBOL = {'S': '$S$', 'd1': '$d_1$', 'C': '$C$', 'd2': '$d_2$', 'x0': '$x_0$',
+PHYSICAL = ('S', 'd1', 'dip', 'C', 'd2', 'x0')   # what the posterior figure shows
+SYMBOL = {'S': '$S$', 'd1': '$d_1$', 'C': '$C$', 'd2': '$d_2$', 'x0': '$x_0$', 'dip': r'$\delta$',
           'a': '$a$', 'ag': '$a_{GNSS}$'}
 COMP_TEXT = {'as-is': 'the data as given', 'par': 'fault-parallel data',
              've': 'from the east velocity', 'vn': 'from the north velocity',
-             'los': 'from the LOS velocity'}
+             'los': 'from the LOS velocity', 'vu': 'the vertical velocity',
+             'mixed': 'several components'}
+DIP_COMP_TEXT = {'vu': 'the vertical velocity', 've': 'the east velocity, across the fault',
+                 'vn': 'the north velocity, across the fault',
+                 'los': 'the LOS velocity, as it is'}
 COMP_LONG = {'as-is': 'the data as given, no conversion',
              'par': 'fault-parallel velocity, as given',
              've': 'east velocity / sin(strike)', 'vn': 'north velocity / cos(strike)',
-             'los': 'LOS velocity / (LOS unit vector . strike direction), pixel by pixel'}
+             'los': 'LOS velocity / (LOS unit vector . strike direction), pixel by pixel',
+             'vu': 'vertical velocity, as given'}
 
 
 def profile_cmap(name):
@@ -159,9 +206,74 @@ def _fmt(value):
     return f'{value:.2f}' if abs(value) < 1 else f'{value:.1f}'
 
 
-def _num(value):
-    """_fmt with a true minus sign, so a range reads (−10.7 – −2.7)."""
-    return _fmt(value).replace('-', '\u2212')
+def _decimals(lo, hi):
+    """The decimals that suit a 95 % range: to the first digit of its half
+    width, as Hussain et al. (2016) round - 19 (9 - 28), 5.6 (4.7 - 6.2)."""
+    half = abs(float(hi) - float(lo)) / 2.0
+    if not np.isfinite(half) or half <= 0:
+        return None
+    return int(np.clip(np.ceil(-np.log10(half)), 0, 4))
+
+
+def _val(value, decimals):
+    """A value to `decimals` (None: _fmt), with a true minus sign."""
+    if not np.isfinite(value):
+        return 'nan'
+    text = _fmt(value) if decimals is None else f'{value:.{decimals}f}'
+    if text.startswith('-') and float(text) == 0.0:
+        text = text[1:]
+    return text.replace('-', '\u2212')
+
+
+def ci_text(value, lo, hi, unit=''):
+    """'19 mm/yr ( 9 – 28, 95% c.i. )' - a value and its 95 % range, written
+    as Hussain et al. (2016, Fig. 9) write them."""
+    dec = _decimals(lo, hi)
+    unit = '°' if unit in ('deg', '°') else (_unit_text(unit) if unit else '')
+    return f'{_val(value, dec)}{unit} ( {_val(lo, dec)} – {_val(hi, dec)}, 95% c.i. )'
+
+
+def serif_family():
+    """The first of SERIF_FONTS that is installed."""
+    global _SERIF
+    if _SERIF is None:
+        from matplotlib import font_manager
+
+        have = {f.name for f in font_manager.fontManager.ttflist}
+        _SERIF = next((name for name in SERIF_FONTS if name in have), 'serif')
+    return _SERIF
+
+
+_SERIF = None
+
+
+def keep_default_keys(fig, keys):
+    """matplotlib's own shortcuts on a figure (s to save, o to zoom ...), but
+    for `keys`, which are ours - "l" would otherwise set a log y axis."""
+    from matplotlib.backend_bases import key_press_handler
+
+    manager = getattr(fig.canvas, 'manager', None)
+    handler_id = getattr(manager, 'key_press_handler_id', None)
+    if handler_id is None:
+        return
+
+    def handler(event):
+        if event.key not in keys:
+            key_press_handler(event)
+
+    fig.canvas.mpl_disconnect(handler_id)
+    manager.key_press_handler_id = fig.canvas.mpl_connect('key_press_event', handler)
+
+
+def compass_word(azimuth):
+    """'North', 'South-east' ... for an azimuth in degrees."""
+    return COMPASS[int(np.round((float(azimuth) % 360.0) / 45.0)) % 8]
+
+
+def _tint(color, amount):
+    """`color` mixed with white: amount 0 is the colour, 1 white."""
+    rgb = np.asarray(mcolors.to_rgb(color))
+    return tuple(rgb + (1.0 - rgb) * amount)
 
 
 def _unit_text(unit):
@@ -180,13 +292,18 @@ def strain_unit(model_unit):
 
 class _Placer:
     """Puts boxes (the parameters, the legend) inside an axes where they hide
-    the fewest weighted points, clear of the A / A' labels and of each other -
-    making room above or below the data when every spot would hide some."""
+    the fewest weighted points, clear of the marks already there (the A-A'
+    box, the sides of the fault, the fault arrow) and of each other - making
+    room above or below the data when every spot would hide some.
 
-    SPOTS = (('upper left', 0.012, None), ('upper right', 0.988, None),
-             ('lower left', 0.012, 0.015), ('lower right', 0.988, 0.015),
-             ('upper center', 0.5, 0.985), ('lower center', 0.5, 0.015),
-             ('center left', 0.012, 0.5), ('center right', 0.988, 0.5))
+    An upper spot is tried at the top of the axes and under each mark at the
+    top, a lower one at the bottom and over each mark at the bottom. On a tie
+    the first spot wins: the upper right, where Hussain et al. (2016, Izmit,
+    Fig. 9) write their parameters."""
+
+    SPOTS = (('upper right', 0.988), ('upper left', 0.012), ('upper center', 0.5),
+             ('lower right', 0.988), ('lower left', 0.012), ('lower center', 0.5),
+             ('center left', 0.012), ('center right', 0.988))
 
     def __init__(self, ax, xy, weights, labels=()):
         self.ax = ax
@@ -199,8 +316,11 @@ class _Placer:
             pass
         self.refresh()
         self.taken = [r for r in (self._rect_of(a) for a in labels) if r is not None]
-        tops = [r[1] for r in self.taken]
-        self.top = (min(tops) - 0.03) if tops else 0.86
+        tops = sorted({r[1] - 0.03 for r in self.taken if r[1] + r[3] > 1.0}, reverse=True)
+        floors = sorted({r[3] + 0.02 for r in self.taken if r[1] + r[3] <= 1.0})
+        self.top = tops[-1] if tops else 0.985
+        # the heights a box may hang from (upper) or stand on (lower)
+        self.anchors = {'upper': [0.985] + tops, 'lower': [0.015] + floors, 'center': [0.5]}
 
     def refresh(self):
         """The points in axes fraction, after a change of the axis limits."""
@@ -239,37 +359,67 @@ class _Placer:
             return artist, None
         width, height = rect[2] - rect[0], rect[3] - rect[1]
         best = None
-        for loc, ax_x, ax_y in self.SPOTS:
-            ax_y = self.top if ax_y is None else ax_y
-            x0 = {'left': ax_x, 'right': ax_x - width}.get(loc.split()[-1], ax_x - width / 2)
-            y0 = {'upper': ax_y - height, 'lower': ax_y}.get(loc.split()[0], ax_y - height / 2)
-            cand = (x0, y0, x0 + width, y0 + height)
-            cost = self._cost(cand)
-            if best is None or cost < best[0]:
-                best = (cost, loc, (ax_x, ax_y), cand)
+        for loc, ax_x in self.SPOTS:
+            vertical, horizontal = loc.split()
+            for ax_y in self.anchors[vertical]:
+                x0 = {'left': ax_x, 'right': ax_x - width}.get(horizontal, ax_x - width / 2)
+                y0 = {'upper': ax_y - height, 'lower': ax_y}.get(vertical, ax_y - height / 2)
+                cand = (x0, y0, x0 + width, y0 + height)
+                cost = self._cost(cand)
+                if best is None or cost < best[0]:
+                    best = (cost, loc, (ax_x, ax_y), cand)
         artist.remove()
         return make(best[1], best[2]), best
 
-    def place(self, make, room=True, budget=0.005, max_grow=0.4):
+    budget = 0.005                            # a box may hide this much of the points
+
+    def place(self, make, room=True, budget=None, max_grow=0.4):
         """Draw a box - make(loc, anchor) - at the best spot. With room, a box
         that would hide more than `budget` of the points makes room for itself
         above (or below) the data: at most max_grow of the y-range, so the
         data keep most of the panel."""
+        budget = self.budget if budget is None else budget
         artist, best = self._best(make)
         if best is None:
             self.taken.append((0.0, self.top - 0.3, 0.5, self.top))
             return artist
-        vertical = best[1].split()[0]
-        if (room and np.isfinite(best[0]) and best[0] > budget * self.w.sum()
-                and vertical in ('upper', 'lower')):
-            cand = best[3]
-            height = cand[3] - cand[1] + ((1 - self.top) if vertical == 'upper' else 0.015)
+        if room and not np.isfinite(best[0]):
+            # no spot clear of the boxes already drawn: room below the data - kept
+            # only when it frees a spot
+            height = best[3][3] - best[3][1] + 0.03
             lo, hi = self.ax.get_ylim()
-            grow = min((hi - lo) * height / max(1.0 - height, 0.4) * 1.05, max_grow * (hi - lo))
-            self.ax.set_ylim((lo, hi + grow) if vertical == 'upper' else (lo - grow, hi))
+            grow = min((hi - lo) * height / max(1.0 - height, 0.4) * 1.05,
+                       max(max_grow, 0.5) * (hi - lo))
+            self.ax.set_ylim(lo - grow, hi)
             artist.remove()
             self.refresh()
             artist, best = self._best(make)
+            if not np.isfinite(best[0]):
+                artist.remove()
+                self.ax.set_ylim(lo, hi)
+                self.refresh()
+                artist, best = self._best(make)
+        if room and np.isfinite(best[0]) and best[0] > budget * self.w.sum():
+            # the best spot hides points: room above the data (an upper spot) or
+            # below it (a lower or a centre one) - kept only when it hides fewer
+            vertical = best[1].split()[0]
+            up = vertical == 'upper'
+            cand, anchor = best[3], best[2][1]
+            height = cand[3] - cand[1] + ((1 - anchor) if up else
+                                          anchor if vertical == 'lower' else 0.015)
+            lo, hi = self.ax.get_ylim()
+            grow = min((hi - lo) * height / max(1.0 - height, 0.4) * 1.05, max_grow * (hi - lo))
+            self.ax.set_ylim((lo, hi + grow) if up else (lo - grow, hi))
+            artist.remove()
+            self.refresh()
+            grown, then = self._best(make)
+            if then[0] < best[0]:
+                artist, best = grown, then
+            else:
+                grown.remove()
+                self.ax.set_ylim(lo, hi)
+                self.refresh()
+                artist, best = self._best(make)
         self.taken.append(best[3])
         return artist
 
@@ -283,13 +433,17 @@ class ModelSection(Section):
         self.ax_strain = None
         self.fig_post = None
         self.map_marks = []
+        self.legend_where = None      # the "l" key: in / out / off (else --legend)
+        self.legend_at = None         # where the legend went: in / out / off
         self.clear_model()
 
     def clear_model(self):
         self.result = None
         self.fp = []                  # per file: x, v (fault-parallel), ... - what is fitted
+        self.info = ''                # the window's title: pixels, files, strike ...
         self.fp_draw = None           # --nlook: the oversampled samples, drawn only
         self.density = None           # --cmap-prof: the density drawn
+        self.offset = None            # --creep-offset: the creep rate from the step
         self.frame = None             # the local east/north frame, at the fault
         self.x_fault = None           # km along the profile
         self.fault_how = ''
@@ -310,30 +464,67 @@ class ModelSection(Section):
         return self.result is not None
 
     ##---------- the windows
+    def panel_specs(self):
+        """The panels of the profile: one for a strike-slip fault; for a reverse
+        or normal fault one per component - across the fault (ve, vn), vertical
+        (vu), and each line of sight on its own - as dict(key, kind, files)."""
+        v = self.v
+        if getattr(v, 'fault_type', 'strike') == 'strike':
+            return [dict(key='main', kind=None, files=list(range(len(v.file))))]
+        comps = list(v.comps)
+        specs = []
+        horizontal = [i for i, c in enumerate(comps) if c in ('ve', 'vn')]
+        vertical = [i for i, c in enumerate(comps) if c == 'vu']
+        if horizontal:
+            specs.append(dict(key='h', kind='h', files=horizontal))
+        if vertical:
+            specs.append(dict(key='z', kind='z', files=vertical))
+        for i, c in enumerate(comps):
+            if c == 'los':
+                specs.append(dict(key=f'los{i}', kind='los', files=[i]))
+        kind = 'z' if v.gnss_comp == 'vu' else 'h'
+        if getattr(v, 'gnss', None) is not None and all(sp['kind'] != kind for sp in specs):
+            specs.append(dict(key='gnss', kind=kind, files=[]))   # the GNSS, on their own
+        return specs
+
     def create_figure(self):
         v = self.v
         if self.fig is not None and plt.fignum_exists(self.fig.number):
             return self.fig
-        panels = [3.2] + ([1.2] if v.show_strain else []) + ([1.1] if v.topoxsect else [])
-        height = v.fig_size[1] + 1.5 * (len(panels) - 1)
+        self.specs = self.panel_specs()
+        n_data = len(self.specs)
+        panels = ([3.2] * n_data + ([1.2] if v.show_strain else [])
+                  + ([1.1] if v.topoxsect else []))
+        height = v.fig_size[1] + 3.0 * (n_data - 1) + 1.5 * (len(panels) - n_data)
         self.fig = _new_figure(f'Model {self.name}', [v.fig_size[0], height])
         gsp = self.fig.add_gridspec(len(panels), 1, height_ratios=panels, hspace=0.08,
                                     left=0.12, right=0.86 if v.cmap_prof else 0.97,
-                                    bottom=0.1, top=0.9)
-        self.ax_swath = self.fig.add_subplot(gsp[0])
-        self.ax_cbar = None
-        if v.cmap_prof:               # a fixed slot for the density's colour bar
-            pos = self.ax_swath.get_position()
-            self.ax_cbar = self.fig.add_axes([pos.x1 + 0.015, pos.y0, 0.016, pos.height])
-            self.ax_cbar.set_axis_off()
-        k = 1
+                                    bottom=0.1, top=0.95)
+        self.ax_panels = [self.fig.add_subplot(gsp[0])]
+        self.ax_swath = self.ax_panels[0]
+        for k in range(1, n_data):
+            self.ax_panels.append(self.fig.add_subplot(gsp[k], sharex=self.ax_swath))
+        self.ax_cbars = []
+        if v.cmap_prof:               # a fixed slot for each density's colour bar
+            for ax in self.ax_panels:
+                pos = ax.get_position()
+                cax = self.fig.add_axes([pos.x1 + 0.015, pos.y0, 0.016, pos.height])
+                cax.set_axis_off()
+                self.ax_cbars.append(cax)
+        self.ax_cbar = self.ax_cbars[0] if self.ax_cbars else None
+        k = n_data
         self.ax_strain = self.ax_topo = None
         if v.show_strain:
             self.ax_strain = self.fig.add_subplot(gsp[k], sharex=self.ax_swath)
             k += 1
         if v.topoxsect:
             self.ax_topo = self.fig.add_subplot(gsp[k], sharex=self.ax_swath)
+        # where the panels sit: a legend beside the plot narrows them, each draw anew
+        self.home = [(ax, ax.get_position().frozen()) for ax in
+                     (*self.ax_panels, self.ax_strain, self.ax_topo, *self.ax_cbars)
+                     if ax is not None]
         self.fig.canvas.mpl_connect('key_press_event', v.on_key)
+        keep_default_keys(self.fig, ('l', 'L'))
         self.reset_axes()
         self.ax_swath.text(0.5, 0.5, f'section {self.name}\nclick 2 points on the map,\n'
                            'across the fault', ha='center', va='center', color='0.55',
@@ -342,25 +533,38 @@ class ModelSection(Section):
 
     def reset_axes(self):
         v = self.v
-        axes = [ax for ax in (self.ax_swath, self.ax_strain, self.ax_topo) if ax is not None]
+        panels = getattr(self, 'ax_panels', None) or [self.ax_swath]
+        axes = [ax for ax in (*panels, self.ax_strain, self.ax_topo) if ax is not None]
+        if getattr(self, '_narrow', None) is not None:     # widened for a legend beside
+            self.fig.set_size_inches(*self._narrow, forward=True)
+        self._narrow = None
+        for ax, box in getattr(self, 'home', []):
+            ax.set_position(box)
         for ax in axes:
             ax.cla()
             ax.tick_params(which='both', direction='in', labelsize=v.font_size,
                            bottom=True, top=True, left=True, right=True)
-        if getattr(self, 'ax_cbar', None) is not None:
-            self.ax_cbar.cla()
-            self.ax_cbar.set_axis_off()
+        for cax in getattr(self, 'ax_cbars', []):
+            cax.cla()
+            cax.set_axis_off()
         for ax in axes[:-1]:
             ax.tick_params(labelbottom=False)
-        axes[-1].set_xlabel('Distance from the fault [km]', fontsize=v.font_size + 1)
-        what = 'Velocity' if v.comp in ('as-is', 'auto') else 'Fault-parallel velocity'
+        axes[-1].set_xlabel('Distance from fault (km)', fontsize=v.font_size + 1)
         unit = _unit_text(v.model_unit).strip()
-        self.ax_swath.set_ylabel(what + (f' [{unit}]' if unit else ''), fontsize=v.font_size + 1)
+        for ax, spec in zip(panels, getattr(self, 'specs', None) or self.panel_specs()):
+            if spec['kind'] is None:
+                what = VEL_LABEL.get(getattr(v, 'plotted', None), 'Velocity')
+            elif spec['kind'] == 'los':
+                what = f"{VEL_LABEL['los']}, {v.labels[spec['files'][0]]}"
+            else:
+                what = VEL_LABEL[spec['kind']]
+            gap = '\n' if len(panels) > 1 else ' '      # stacked panels: two lines
+            ax.set_ylabel(what + (f'{gap}({unit})' if unit else ''), fontsize=v.font_size + 1)
         if self.ax_strain is not None:
-            self.ax_strain.set_ylabel(f'dv/dx\n[{strain_unit(v.model_unit)}]',
+            self.ax_strain.set_ylabel(f'dv/dx\n({strain_unit(v.model_unit)})',
                                       fontsize=v.font_size)
         if self.ax_topo is not None:
-            self.ax_topo.set_ylabel('Elevation\n[m]', fontsize=v.font_size)
+            self.ax_topo.set_ylabel('Elevation\n(m)', fontsize=v.font_size)
         return
 
     def clear_map_artists(self):
@@ -469,11 +673,16 @@ class ModelSection(Section):
         if strike is None:
             strike = (self.prof_az + 90.0) % 360.0
             self.strike_how = 'perpendicular to the profile'
-        given_sign = v.comp in ('as-is', 'par') and v.strike is not None
+        given_sign = v.comp in ('as-is', 'par', 'vu') and v.strike is not None
         self.strike = strike if given_sign else orient_strike(strike, self.prof_az)
-        self.sense_known = v.comp in ('los', 've', 'vn') or (v.comp == 'par'
-                                                             and v.strike is not None)
+        self.sense_known = (v.comp in ('los', 've', 'vn') or (v.comp == 'par'
+                                                              and v.strike is not None))
+        if self.dip_slip:             # the sense is the fault type's
+            self.sense_known = False
         self.normal, self.obliquity = fault_normal(self.strike, self.prof_az)
+        if self.dip_slip:             # the right-hand rule: the fault dips to its right
+            dip_az = azimuth_of(*self.normal) + (0.0 if v.dip_toward == 'end' else 180.0)
+            self.strike = (dip_az - 90.0) % 360.0
         prof = np.array([np.sin(np.radians(self.prof_az)), np.cos(np.radians(self.prof_az))])
         self.along_scale = float(self.normal @ prof)
         if self.obliquity > 30:
@@ -481,8 +690,10 @@ class ModelSection(Section):
                   'normal: distances are taken perpendicular to the fault (a straight line '
                   'through the fault position, along the strike)')
 
-        # 4. every pixel: distance from the fault, fault-parallel velocity
-        self.fp = self.fault_parallel(self.swath_list)
+        # 4. every pixel: distance from the fault, fault-parallel velocity - or,
+        #    across a reverse or normal fault, its component of the motion
+        self.fp = (self.dip_slip_data(self.swath_list) if self.dip_slip
+                   else self.fault_parallel(self.swath_list))
         if not self.fp:
             raise ValueError('no pixel left after the conversion to fault-parallel velocity')
 
@@ -496,10 +707,64 @@ class ModelSection(Section):
             else:
                 east = north = np.full(idx.size, np.nan)
             gin['x'] = east * self.normal[0] + north * self.normal[1]
-            p_vec = (np.sin(np.radians(self.strike)), np.cos(np.radians(self.strike)))
+            p_vec = (tuple(self.normal) if v.gnss_comp == 'perp' else
+                     (np.sin(np.radians(self.strike)), np.cos(np.radians(self.strike))))
             value, sigma = v.gnss_values(v.gnss.subset(idx), p_vec)
             gin['value'], gin['sigma'] = value, sigma
         return
+
+    @property
+    def dip_slip(self):
+        """A reverse or a normal fault (`viewinsar model reverse|normal`)."""
+        return getattr(self.v, 'fault_type', 'strike') != 'strike'
+
+    def dip_slip_data(self, swaths, warn=True):
+        """Every pixel across a reverse or normal fault as (distance from the
+        fault, velocity), one dict per file, each with its kind: vertical (vu:
+        z); across the fault, + towards the end of the profile (ve, vn: the
+        east / north velocity divided by the fault normal's east / north,
+        assuming no motion along the fault: h); or the LOS as it is, the model
+        seen through it (ph of h, pu of z: the medians over the swath)."""
+        v = self.v
+        n_e, n_n = (float(c) for c in self.normal)
+        out = []
+        for sw in swaths:
+            i = sw['file_idx']
+            comp = v.comps[i]
+            east, north, lon, lat = v.en_km(self.frame, i, sw['row'], sw['col'])
+            x = east * n_e + north * n_n
+            value = np.asarray(sw['value'], dtype=np.float64)
+            kind, proj, med_proj = 'z', np.ones(value.size), 1.0
+            if comp in ('ve', 'vn'):
+                kind = 'h'
+                proj = np.full(value.size, n_e if comp == 've' else n_n)
+                med_proj = float(proj[0]) if proj.size else np.nan
+                if warn and abs(med_proj) < 0.25:
+                    print(f'WARNING: {v.labels[i]}: the {"east" if comp == "ve" else "north"} '
+                          f'velocity sees only {abs(med_proj):.2f} of the motion across the '
+                          f'fault (strike {self.strike:.0f} deg): its noise is amplified '
+                          f'{1 / max(abs(med_proj), 1e-3):.1f}x - the '
+                          f'{"north" if comp == "ve" else "east"} velocity sees more of it')
+            elif comp == 'los':
+                ue, un, up = v.los_vectors(i, sw['row'], sw['col'], lon, lat)
+                ph = np.broadcast_to(ue * n_e + un * n_n, value.shape)
+                pu = np.broadcast_to(up, value.shape)
+                ok = np.isfinite(ph) & np.isfinite(pu)
+                kind = ((float(np.median(ph[ok])), float(np.median(pu[ok]))) if ok.any()
+                        else (np.nan, np.nan))
+                med_proj = kind[0]
+            weak = ~np.isfinite(proj) | (np.abs(proj) < 0.05)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                vel = np.where(weak, np.nan, value * v.to_model / proj)
+            good = np.isfinite(x) & np.isfinite(vel)
+            one = dict(file_idx=i, x=x[good], v=vel[good], dist=sw['dist'][good],
+                       perp=sw['perp'][good], value=value[good],
+                       row=np.asarray(sw['row'])[good], col=np.asarray(sw['col'])[good],
+                       lon=np.asarray(lon)[good], lat=np.asarray(lat)[good], proj=med_proj,
+                       kind=kind, comp=comp)
+            out.append(one)
+        return [f for f in out if f['x'].size and np.all(np.isfinite(
+            f['kind'] if isinstance(f['kind'], tuple) else 0.0))]
 
     def fault_parallel(self, swaths, warn=True):
         """Every pixel of some swaths as (distance from the fault, fault-parallel
@@ -512,8 +777,9 @@ class ModelSection(Section):
             east, north, lon, lat = v.en_km(self.frame, i, sw['row'], sw['col'])
             x = east * self.normal[0] + north * self.normal[1]
             value = np.asarray(sw['value'], dtype=np.float64)
+            up = None
             if v.comp == 'los':
-                ue, un, _ = v.los_vectors(i, sw['row'], sw['col'], lon, lat)
+                ue, un, up = v.los_vectors(i, sw['row'], sw['col'], lon, lat)
                 proj = ue * p_vec[0] + un * p_vec[1]
             elif v.comp == 've':
                 proj = np.full(value.size, p_vec[0])
@@ -530,11 +796,14 @@ class ModelSection(Section):
                 print(f'WARNING: {v.labels[i]}: the {v.comp.upper()} sees only '
                       f'{med_proj:.2f} of the fault-parallel motion (strike '
                       f'{self.strike:.0f} deg): its noise is amplified {1 / med_proj:.1f}x')
-            out.append(dict(file_idx=i, x=x[good], v=vpar[good], dist=sw['dist'][good],
-                            perp=sw['perp'][good], value=value[good],
-                            row=np.asarray(sw['row'])[good], col=np.asarray(sw['col'])[good],
-                            lon=np.asarray(lon)[good], lat=np.asarray(lat)[good],
-                            proj=med_proj))
+            one = dict(file_idx=i, x=x[good], v=vpar[good], dist=sw['dist'][good],
+                       perp=sw['perp'][good], value=value[good],
+                       row=np.asarray(sw['row'])[good], col=np.asarray(sw['col'])[good],
+                       lon=np.asarray(lon)[good], lat=np.asarray(lat)[good], proj=med_proj)
+            if up is not None:        # the LOS of each pixel: along the strike, and up
+                one['los_par'] = np.broadcast_to(proj, value.shape)[good]
+                one['los_up'] = np.broadcast_to(up, value.shape)[good]
+            out.append(one)
         return [f for f in out if f['x'].size]
 
     ##---------- the fit
@@ -546,42 +815,201 @@ class ModelSection(Section):
             ok = np.isfinite(gin['x']) & np.isfinite(gin['value'])
             if ok.any():
                 gnss = dict(x=gin['x'][ok], v=gin['value'][ok], sigma=gin['sigma'][ok])
-        bounds = {'S': (-v.s_max_used, v.s_max_used), 'd1': (0.1, v.d1_max),
-                  'C': (0.0, v.c_max), 'd2': (0.01, v.d2_max)}
         free_x0 = (-v.free_x0, v.free_x0) if v.free_x0 else None
+        if self.dip_slip:
+            bounds = {'S': (0.0, v.s_max_used), 'd1': (0.1, v.d1_max)}
+            data = ', '.join(f'{v.labels[f["file_idx"]]}: {DIP_COMP_TEXT[f["comp"]]}'
+                             for f in self.fp)
+            what = f'{v.fault_type} fault, dipping towards {self.dip_side()}; {data}'
+        else:
+            bounds = {'S': (-v.s_max_used, v.s_max_used), 'd1': (0.1, v.d1_max),
+                      'C': (0.0, v.c_max), 'd2': (0.01, v.d2_max)}
+            what = COMP_LONG[v.comp]
         print(f'section {self.name}: fault at {self.x_fault:.2f} km ({self.fault_how}), strike '
               f'{self.strike:.0f} deg ({self.strike_how}), profile azimuth {self.prof_az:.0f}'
-              f' deg; {COMP_LONG[v.comp]}')
+              f' deg; {what}')
         self.result = fit_profile([(f['x'], f['v']) for f in self.fp], bin_km=v.bin_km,
                                   gnss=gnss, noise=v.noise, walkers=v.walkers, steps=v.steps,
                                   burn=v.burn, seed=v.seed, creep=v.creep, free_x0=free_x0,
                                   rot=v.rot, rot_side=1 if v.rot_side == 'end' else -1,
                                   bounds=bounds, d1_prior=v.d1_prior,
-                                  verbose=v.print_msg)
+                                  verbose=v.print_msg, fault=getattr(v, 'fault_type', 'strike'),
+                                  kinds=[f.get('kind') for f in self.fp],
+                                  gnss_kind=self.gnss_kind, dip=v.dip_range,
+                                  toward=1 if v.dip_toward == 'end' else -1)
         res = self.result
         if self.sense_known:
             S = res['summary']['S']['map']
             print(f'   S {S:+.2f} {v.model_unit}: {slip_sense(S, self.strike, self.prof_az)}')
+        elif self.dip_slip:
+            par = res['model'].unpack(res['best'])
+            h, z = (res['derived'][k]['map'] for k in ('h_rate', 'v_rate'))
+            words = RATE_WORDS[v.fault_type]
+            print(f'   S {float(par["S"]):.2f} {v.model_unit} along the dip: {v.fault_type}, dip '
+                  f'{float(par["dip"]):.0f} deg towards {self.dip_side()}; {words[0]} '
+                  f'{h:.2f}, {words[1]} {z:.2f} {v.model_unit}')
         # the GNSS left out of the fit still sit on the model: their median misfit
         self.gnss_fit_shift = 0.0
         if gin is not None and gin['index'].size and gnss is None:
             ok = np.isfinite(gin['x']) & np.isfinite(gin['value'])
             if ok.any():
-                pred = res['model'].predict(res['best'], gin['x'][ok])
+                ref = self.gnss_ref()
+                pred = res['model'].predict(res['best'], gin['x'][ok],
+                                            offset=res['model'].offsets[ref],
+                                            kind=res['model'].gnss_kind)
                 self.gnss_fit_shift = float(np.median(pred - gin['value'][ok]))
         return res
 
-    def offset_shift(self, set_index):
-        """What brings file `set_index` (of the fit) onto the offset of the first."""
+    @property
+    def gnss_kind(self):
+        """What the GNSS of a dip-slip fault are: vertical (z) or across the
+        fault (h)."""
+        return 'z' if self.v.gnss_comp == 'vu' else 'h'
+
+    def dip_side(self):
+        """A' or A: the side the fault dips towards."""
+        return f"{self.label}'" if self.v.dip_toward == 'end' else self.label
+
+    def gnss_ref(self):
+        """The data set the GNSS are drawn against: the first of their kind
+        (dip-slip), else the first."""
+        model = self.result['model']
+        if model.gnss_kind is None:
+            return 0
+        same = [j for j, kind in enumerate(model.kinds) if kind == model.gnss_kind]
+        return same[0] if same else 0
+
+    def measure_offset(self):
+        """--creep-offset: the creep rate straight from the data, as Hussain et
+        al. (2016) measure it - per file of the fit, a straight line through the
+        pixels within KM of the fault and WIDTH of the profile line on each
+        side, and their offset at the fault (in the sense of S), its 95 % range
+        from a bootstrap that resamples each side on its own. LOS files of two
+        geometries or more (ascending and descending) also give it split into
+        fault-parallel and vertical, as Hussain et al. split theirs."""
+        v, res = self.v, self.result
+        km, width = v.creep_offset
+        summ = res['summary']
+        x0 = summ['x0']['map'] if 'x0' in summ else 0.0
+        sense = 1.0 if summ['S']['map'] >= 0 else -1.0
+        files, geoms = [], []
+        for j, k in enumerate(res['sets']):
+            f = self.fp[k]
+            u = f['x'] - x0
+            near = (np.abs(u) <= km) & (np.abs(f['perp']) <= width)
+            a, b = near & (u < 0), near & (u > 0)
+            fit = fault_offset(u[a], f['v'][a], u[b], f['v'][b], seed=v.seed + j)
+            one = dict(j=j, k=k, label=v.labels[f['file_idx']], n_a=int(a.sum()),
+                       n_b=int(b.sum()), fit=fit)
+            if fit is not None:
+                boot = sense * fit['boot']
+                one.update(rate=sense * fit['offset'], median=float(np.median(boot)),
+                           lo=float(np.percentile(boot, 2.5)),
+                           hi=float(np.percentile(boot, 97.5)))
+                if 'los_par' in f:    # back to the LOS, for the split
+                    h = float(np.median(f['los_par'][a | b]))
+                    up = float(np.median(f['los_up'][a | b]))
+                    geoms.append((fit['boot'] * h, fit['offset'] * h, h, up))
+            files.append(one)
+        split = None
+        if len(geoms) >= 2:
+            point = split_offsets([g[1] for g in geoms], [g[2] for g in geoms],
+                                  [g[3] for g in geoms])
+            draws = split_offsets(np.vstack([g[0] for g in geoms]), [g[2] for g in geoms],
+                                  [g[3] for g in geoms])
+            if point is not None:
+                par, up = sense * draws[0], draws[1]
+                split = dict(par=float(sense * point[0][0]), up=float(point[1][0]),
+                             par_median=float(np.median(par)), up_median=float(np.median(up)),
+                             par_lo=float(np.percentile(par, 2.5)),
+                             par_hi=float(np.percentile(par, 97.5)),
+                             up_lo=float(np.percentile(up, 2.5)),
+                             up_hi=float(np.percentile(up, 97.5)), n=len(geoms))
+        for one in files:
+            if one['fit'] is None:
+                print(f'WARNING: section {self.name}: {one["label"]}: too few pixels within '
+                      f'{km:g} km of the fault and {width:g} km of the line for the creep '
+                      f'offset ({one["n_a"]} | {one["n_b"]}, 3 a side at least)')
+        return dict(km=km, width=width, x0=x0, files=files, split=split)
+
+    def offset_lines(self):
+        """The creep offset as text, as Hussain et al. write their numbers - no
+        longer than the lines of the model, so the box stays narrow."""
+        v, off = self.v, self.offset
+        seen = ' in the LOS' if v.data_los else ''
+        out = []
+        many = len(off['files']) > 1
+        sp = off['split']
+        for one in off['files'] if sp is None else []:    # split: the files in _params
+            who = f', {one["label"]}' if many else ''
+            if one['fit'] is None:
+                out.append(f'creep offset{who}: too few pixels near the fault')
+                continue
+            out.append(f'creep offset{seen}{who} = '
+                       + ci_text(one['rate'], one['lo'], one['hi'], v.model_unit))
+        if sp is not None:
+            out.append('creep offset, fault-parallel = '
+                       + ci_text(sp['par'], sp['par_lo'], sp['par_hi'], v.model_unit))
+            up = ci_text(sp['up'], sp['up_lo'], sp['up_hi'], v.model_unit)
+            out.append(f"vertical offset = {'+' if sp['up'] > 0 else ''}{up}, "
+                       f"{self.label}' side up")
+        return out
+
+    def offset_rows(self):
+        """The creep offsets as rows (name, description, value, median, lo, hi)
+        of _params.csv - the value is the least-squares one, the rest from the
+        bootstrap."""
+        off = self.offset
+        if off is None:
+            return []
+        where = f'within {off["km"]:g} km of the fault and {off["width"]:g} km of the line'
+        rows, many = [], len(off['files']) > 1
+        for one in off['files']:
+            if one['fit'] is not None:
+                rows.append((f'C_offset_{one["j"] + 1}' if many else 'C_offset',
+                             f'creep rate from the offset of two lines {where}'
+                             + (f' - {one["label"]}' if many else ''),
+                             one['rate'], one['median'], one['lo'], one['hi']))
+        sp = off['split']
+        if sp is not None:
+            rows.append(('C_offset_par', f'fault-parallel creep rate from the offsets of '
+                         f'{sp["n"]} geometries', sp['par'], sp['par_median'], sp['par_lo'],
+                         sp['par_hi']))
+            rows.append(('U_offset', f"vertical offset ({self.label}' side up) from the "
+                         f'offsets of {sp["n"]} geometries', sp['up'], sp['up_median'],
+                         sp['up_lo'], sp['up_hi']))
+        return rows
+
+    def set_ref(self, j):
+        """The data set (of the fit) whose offset set j is drawn on: the first
+        of its panel - the first of all for a strike-slip fault."""
+        if not self.dip_slip:
+            return 0
+        for spec in getattr(self, 'specs', None) or self.panel_specs():
+            sets = self.panel_sets(spec)
+            if j in sets:
+                return sets[0]
+        return j
+
+    def offset_shift(self, set_index, ref=0):
+        """What brings file `set_index` (of the fit) onto the offset of file
+        `ref` - by default the first."""
         res = self.result
         model, best = res['model'], res['best']
-        return best[model.index('a')] - best[model.index(model.offsets[set_index])]
+        return (best[model.index(model.offsets[ref])]
+                - best[model.index(model.offsets[set_index])])
 
-    def gnss_shift(self):
+    def gnss_shift(self, ref=-1):
+        """What brings the GNSS onto the offset of file `ref` of the fit - by
+        default the one they are drawn against; None: their own offset."""
         res = self.result
         model = res['model']
+        ref = self.gnss_ref() if ref == -1 else ref
         if model.gnss:
-            return res['best'][model.index('a')] - res['best'][model.index('ag')]
+            if ref is None:
+                return 0.0
+            return (res['best'][model.index(model.offsets[ref])]
+                    - res['best'][model.index('ag')])
         return self.gnss_fit_shift
 
     ##---------- draw
@@ -602,6 +1030,7 @@ class ModelSection(Section):
                                transform=self.ax_swath.transAxes)
             self.fig.canvas.draw_idle()
             return
+        self.offset = self.measure_offset() if v.creep_offset else None
         self.reset_axes()
         self.draw_fit()
         if self.ax_strain is not None:
@@ -622,28 +1051,32 @@ class ModelSection(Section):
             return self.fp_draw[f['file_idx']]
         return f
 
-    def plot_points(self, thin=True):
-        """(x, v) of the points to draw, per file of the fit, each brought onto
-        the offset of the first - thinned to --max-points in all (thin=True)."""
+    def plot_points(self, thin=True, sets=None, ref=0):
+        """(x, v) of the points to draw, per file of the fit (or of `sets`),
+        each brought onto the offset of file `ref` - thinned to --max-points in
+        all (thin=True)."""
         res = self.result
-        total = sum(self.drawn(k)['x'].size for k in res['sets'])
+        sets = list(range(len(res['sets']))) if sets is None else list(sets)
+        total = sum(self.drawn(res['sets'][j])['x'].size for j in sets)
         keep = 1.0
         if thin and self.v.max_points and total > self.v.max_points:
             keep = self.v.max_points / total
         rng = np.random.default_rng(0)
         out = []
-        for j, k in enumerate(res['sets']):
+        for j in sets:
+            k = res['sets'][j]
             f = self.drawn(k)
             sel = (rng.random(f['x'].size) < keep) if keep < 1 else slice(None)
-            out.append((k, f['x'][sel], f['v'][sel] + self.offset_shift(j)))
+            out.append((k, f['x'][sel], f['v'][sel] + self.offset_shift(j, ref)))
         return out, total
 
-    def draw_density(self, ax):
+    def draw_density(self, ax, sets=None, ref=0, cax=None):
         """--cmap-prof: every pixel drawn (oversampled with --nlook) as a point
         density, as swath draws it: a log colour scale up to the 98th
         percentile of the occupied cells, the densest beyond it white."""
         v = self.v
-        pts, _ = self.plot_points(thin=False)
+        cax = self.ax_cbar if cax is None else cax
+        pts, _ = self.plot_points(thin=False, sets=sets, ref=ref)
         x = np.concatenate([p[1] for p in pts])
         y = np.concatenate([p[2] for p in pts])
         # cells as swath's: ~55 over the data (not over the room left for the
@@ -658,8 +1091,8 @@ class ModelSection(Section):
         pcm = ax.pcolormesh(den['x_edges'], den['y_edges'], counts.T, cmap=cmap,
                             shading='flat', norm=mcolors.LogNorm(vmin=1.0, vmax=cmax),
                             zorder=0.5, rasterized=True)
-        self.ax_cbar.set_axis_on()
-        cbar = self.fig.colorbar(pcm, cax=self.ax_cbar, extend='max')
+        cax.set_axis_on()
+        cbar = self.fig.colorbar(pcm, cax=cax, extend='max')
         unit = v.model_unit.split('/')[0] if _unit_text(v.model_unit).strip() else ''
         cbar.set_label(f"Point density\n[count / {den['bin_x']:g} km x {den['bin_y']:.3g}"
                        f"{' ' + unit if unit else ''} cell]", fontsize=max(v.font_size - 2, 6))
@@ -667,164 +1100,436 @@ class ModelSection(Section):
         return pcm
 
     def draw_fit(self):
-        v, ax, res = self.v, self.ax_swath, self.result
-        model, summ = res['model'], res['summary']
-        handles = []
-        density = bool(v.cmap_prof)
+        """The profile, as Hussain et al. (2016, Izmit, Fig. 9) draw theirs: the pixels
+        as a light red cloud (--cmap-prof: a density), the MAP model a black
+        line in its 95 % (dark grey) and 68 % (light grey) ranges, the GNSS
+        black (red on a density), the fault a blue arrow from below, the
+        section boxed top left, the parameters in italics top right, the sides
+        of the fault named at the bottom corners; the legend inside where it
+        hides nothing, else beside the plot (--legend); the binned medians on
+        a density, or with --medians. A reverse or normal fault: a panel per
+        component (across the fault, vertical, each LOS), the model in each."""
+        v, res = self.v, self.result
+        specs = getattr(self, 'specs', None) or self.panel_specs()
+        axes = getattr(self, 'ax_panels', None) or [self.ax_swath]
+        cbars = getattr(self, 'ax_cbars', None) or []
+        handles = {}                  # the legend: one of each
 
-        # the pixels, every file brought onto the offset of the first: red
-        # points (Hussain et al.), or - --cmap-prof - a density, drawn below
-        # once the limits are known
+        # one x range for every panel: the points drawn of every file, the GNSS
         pts, _ = self.plot_points()
+        lo_x = min(float(x.min()) for _, x, _ in pts if x.size)
+        hi_x = max(float(x.max()) for _, x, _ in pts if x.size)
+        gin = self.gnss_in
+        if (gin is not None and gin['index'].size > 0
+                and bool(np.isfinite(gin['value']).any())):
+            lo_x = min(lo_x, float(np.nanmin(gin['x'])))
+            hi_x = max(hi_x, float(np.nanmax(gin['x'])))
+        if len(res['sets']) > 1:      # the files first in the legend, in their order
+            for k in res['sets']:
+                color = POINT_COLORS[k % len(POINT_COLORS)]
+                name = v.labels[self.fp[k]['file_idx']]
+                handles[name] = (
+                    Line2D([], [], ls='', marker='o', ms=6, mfc=color, mec='k', mew=1.0,
+                           label=name) if v.cmap_prof else
+                    Line2D([], [], ls='', marker='o', ms=4, color=_tint(color, POINT_TINT),
+                           label=name))
+        panels = []
+        for i, (ax, spec) in enumerate(zip(axes, specs)):
+            panels.append(self.draw_panel(ax, spec, handles, (lo_x, hi_x), top=i == 0,
+                                          bottom=i == len(specs) - 1,
+                                          cax=cbars[i] if i < len(cbars) else None))
+        handles = list(handles.values())
+        ax, first = axes[0], panels[0]
+
+        # the parameters, as Hussain et al. (2016, Fig. 9): "slip rate = 19 mm/yr
+        # ( 9 – 28, 95% c.i. )", in italics, top right if they hide nothing there
+        lines = self.parameter_lines()
+        placer = _Placer(ax, np.vstack(first['occupied']), np.concatenate(first['weights']),
+                         first['top_marks'] + first['bottom_marks'])
+        small = 5 if len(lines) > 6 else 4        # a long text: a size smaller
+        room = not v.model_ylim
+
+        def make_text(loc, anchor):
+            align = {'left': 'left', 'right': 'right'}.get(loc.split()[-1], 'center')
+            box = AnchoredText('\n'.join(lines), loc=loc, bbox_to_anchor=anchor,
+                               bbox_transform=ax.transAxes, borderpad=0.0, frameon=True,
+                               prop=dict(fontsize=max(v.font_size - small, 6),
+                                         family=serif_family(), style='italic',
+                                         multialignment=align))
+            # no frame - but white under the text, where it may cross a point
+            box.patch.set(boxstyle='square,pad=0.2', fc='w', ec='none', alpha=0.72)
+            box.set_zorder(10)
+            ax.add_artist(box)
+            return box
+
+        def make_legend(ncol):
+            def make(loc, anchor):
+                return ax.legend(handles=handles, loc=loc, bbox_to_anchor=anchor,
+                                 bbox_transform=ax.transAxes, fontsize=max(v.font_size - 5, 6),
+                                 framealpha=0.88, handlelength=1.5, borderpad=0.35,
+                                 labelspacing=0.3, borderaxespad=0.0, ncol=ncol,
+                                 columnspacing=1.0)
+            return make
+
+        # the legend (--legend): inside where it hides nothing (auto), or anyway
+        # (in); beside the plot when the plot is too full for it (auto), or
+        # always (out); none (off)
+        where = self.legend_where or getattr(v, 'model_legend', 'auto') or 'auto'
+        placer.place(make_text, room=room)
+        self.legend_at = 'off' if where == 'off' else 'in'
+        if where == 'out':
+            self.legend_beside(ax, handles)
+            self.legend_at = 'out'
+        elif where in ('auto', 'in'):
+            inside = None
+            for ncol in ((1, 2) if len(handles) > 6 else (1,)):
+                art, best = placer._best(make_legend(ncol))
+                if (best is not None and np.isfinite(best[0])
+                        and best[0] <= placer.budget * placer.w.sum()):
+                    inside = art
+                    placer.taken.append(best[3])
+                    break
+                art.remove()
+            if inside is None and where == 'in':
+                placer.place(make_legend(2 if len(handles) > 6 else 1), room=room,
+                             max_grow=0.25)
+            elif inside is None:      # too full: the legend goes beside the plot
+                self.legend_beside(ax, handles)
+                self.legend_at = 'out'
+        if room:                      # the text may have raised the top: room again
+            self.room_below(ax, first['bottom_marks'], *first['low'])
+
+        # what the title of the window says (the figure has none, as Hussain et al.)
+        n_files = len(res['sets'])
+        total = sum(self.fp[k]['x'].size for k in res['sets'])    # fitted: the real pixels
+        what = (f'{v.fault_type} fault, ' + ' + '.join(dict.fromkeys(f['comp'] for f in self.fp))
+                if self.dip_slip else COMP_TEXT.get(v.comp, v.comp))
+        self.info = (f'{self.name}: swath ±{v.width:g} km, {total:,} pixels'
+                     + (f' in {n_files} files' if n_files > 1 else '')
+                     + (f' (drawn {v.nlook}x oversampled)' if self.fp_draw else '')
+                     + (f', {res["gnss"]["x"].size} GNSS' if res['gnss'] is not None else '')
+                     + f'; strike {self.strike:.0f}°, {what}')
+        try:
+            self.fig.canvas.manager.set_window_title(f'Model {self.info}')
+        except AttributeError:
+            pass
+        return
+
+    def panel_sets(self, spec):
+        """The data sets of the fit (their indices) that a panel shows."""
+        return [j for j, k in enumerate(self.result['sets'])
+                if self.fp[k]['file_idx'] in spec['files']]
+
+    def draw_panel(self, ax, spec, handles, x_range, top=True, bottom=True, cax=None):
+        """One panel of the profile: its pixels (brought onto the offset of its
+        first file), the model of its component with its ranges, its GNSS,
+        the marks; returns what the parameters and the legend must not hide."""
+        v, res = self.v, self.result
+        model, summ = res['model'], res['summary']
+        density = bool(v.cmap_prof)
+        medians = density or bool(getattr(v, 'show_medians', False))
+        multi = len(res['sets']) > 1
+        sets = self.panel_sets(spec)
+        ref = sets[0] if sets else None
+        kind = model.kinds[ref] if ref is not None else spec['kind']
+        if spec['files'] and not sets:  # its files: no pixel here, or too few bins
+            ax.text(0.5, 0.5, ', '.join(v.labels[i] for i in spec['files'])
+                    + ': too few pixels in this swath to fit', transform=ax.transAxes,
+                    ha='center', va='center', color='0.45', fontsize=max(v.font_size - 2, 6))
+            if kind == 'los':         # no line of sight to see the model through
+                lo_x, hi_x = x_range
+                ax.set_xlim(lo_x - 0.01 * (hi_x - lo_x), hi_x + 0.01 * (hi_x - lo_x))
+                x0 = summ['x0']['map'] if 'x0' in summ else 0.0
+                top_marks, bottom_marks = self.draw_marks(ax, x0, label=top, sides=bottom)
+                return dict(occupied=[np.empty((0, 2))], weights=[np.empty(0)],
+                            top_marks=top_marks, bottom_marks=bottom_marks,
+                            low=(np.empty(0), np.empty(0)))
+
+        def add(handle):
+            handles.setdefault(handle.get_label(), handle)
+
+        # the pixels: light red points, or - --cmap-prof - a density, drawn below
+        # once the limits are known
+        pts, _ = self.plot_points(sets=sets, ref=ref if ref is not None else 0)
         n_drawn = sum(p[1].size for p in pts)
         alpha = float(np.clip(1.5e4 / max(n_drawn, 1), 0.05, 0.6))
-        multi = len(pts) > 1
         for k, x, y in pts:
             color = POINT_COLORS[k % len(POINT_COLORS)]
             name = v.labels[self.fp[k]['file_idx']] if multi else 'InSAR'
             if density:
                 if multi:             # the file of each median: its colour
-                    handles.append(Line2D([], [], ls='', marker='o', ms=6, mfc=color,
-                                          mec='k', mew=1.0, label=name))
+                    add(Line2D([], [], ls='', marker='o', ms=6, mfc=color, mec='k', mew=1.0,
+                               label=name))
                 continue
-            ax.scatter(x, y, s=2.5, c=color, alpha=alpha, lw=0, zorder=1, rasterized=True)
-            handles.append(Line2D([], [], ls='', marker='o', ms=4, color=color, label=name))
+            light = _tint(color, POINT_TINT)
+            ax.scatter(x, y, s=2.5, color=light, alpha=alpha, lw=0, zorder=1, rasterized=True)
+            add(Line2D([], [], ls='', marker='o', ms=4, color=light, label=name))
 
-        # the model: its 95 % range and the MAP
-        lo_x = min(float(x.min()) for _, x, _ in pts)
-        hi_x = max(float(x.max()) for _, x, _ in pts)
+        # the model of this component: its 95 % and 68 % ranges and the MAP
+        lo_x, hi_x = x_range
         gin = self.gnss_in
         has_gnss = (gin is not None and gin['index'].size > 0
-                    and bool(np.isfinite(gin['value']).any()))
-        if has_gnss:
-            lo_x = min(lo_x, float(np.nanmin(gin['x'])))
-            hi_x = max(hi_x, float(np.nanmax(gin['x'])))
+                    and bool(np.isfinite(gin['value']).any())
+                    and (spec['kind'] is None or spec['kind'] == self.gnss_kind))
+        offset = (model.offsets[ref] if ref is not None
+                  else ('ag' if model.gnss else model.offsets[0]))
         xx = np.linspace(lo_x, hi_x, 801)
         x0 = summ['x0']['map'] if 'x0' in summ else 0.0
         xx = np.unique(np.r_[xx, x0 - 1e-6, x0 + 1e-6]) if model.creep else xx
-        best, band_lo, band_hi = model_band(res, xx)
+        outer, inner = (float(b) for b in getattr(v, 'bands', None) or (95.0, 68.0))
+        best, bands = model_bands(res, xx, levels=(outer, inner), offset=offset, kind=kind)
+        band_lo, band_hi = bands[outer]
 
-        # the binned medians, +/- one robust standard deviation - bigger on a
-        # density, their error bars haloed in white
+        # the binned medians, +/- one robust standard deviation: on a density
+        # (big, their error bars haloed in white), or with --medians
         bins_xy = []
-        big = dict(ms=6.5, mec='k', mew=1.1, ecolor='k', elinewidth=1.0) if density else \
-            dict(ms=3.2, mec='0.1', mew=0.7, ecolor='0.25', elinewidth=0.5)
-        for j, k in enumerate(res['sets']):
-            b = res['bins'][j]
-            face = 'w' if not multi else POINT_COLORS[k % len(POINT_COLORS)]
-            bars = ax.errorbar(b['x'], b['median'] + self.offset_shift(j), yerr=b['std'],
-                               fmt='o', mfc=face, capsize=0, zorder=4, **big)
-            if density:
-                white_halo(bars, width=2.6)
-            bins_xy.append(np.c_[b['x'], b['median'] + self.offset_shift(j)])
-        handles.append(Line2D([], [], ls='', marker='o', mfc='w',
-                              label=f'Median per {res["bin_km"]:g} km (±1σ)',
-                              **(dict(ms=6.5, mec='k', mew=1.1) if density else
-                                 dict(ms=4.5, mec='0.1', mew=0.7))))
+        if medians:
+            big = dict(ms=6.5, mec='k', mew=1.1, ecolor='k', elinewidth=1.0) if density else \
+                dict(ms=3.2, mec='0.1', mew=0.7, ecolor='0.25', elinewidth=0.5)
+            for j in sets:
+                k = res['sets'][j]
+                b = res['bins'][j]
+                face = 'w' if not multi else POINT_COLORS[k % len(POINT_COLORS)]
+                shift = self.offset_shift(j, ref)
+                bars = ax.errorbar(b['x'], b['median'] + shift, yerr=b['std'],
+                                   fmt='o', mfc=face, capsize=0, zorder=4, **big)
+                if density:
+                    white_halo(bars, width=2.6)
+                bins_xy.append(np.c_[b['x'], b['median'] + shift])
+            if sets:
+                add(Line2D([], [], ls='', marker='o', mfc='w',
+                           label=f'Median per {res["bin_km"]:g} km (±1σ)',
+                           **(dict(ms=6.5, mec='k', mew=1.1) if density else
+                              dict(ms=4.5, mec='0.1', mew=0.7))))
 
-        band = dict(color=DENSITY_BAND, alpha=0.4) if density else dict(color=BAND_COLOR,
-                                                                         alpha=0.55)
-        ax.fill_between(xx, band_lo, band_hi, lw=0, zorder=2, **band)
-        ax.plot(xx, best, ls='--', color=MAP_COLOR, lw=2.2, zorder=6)
-        handles.append(Line2D([], [], ls='--', color=MAP_COLOR, lw=2.2, label='MAP model'))
-        handles.append(plt.Rectangle((0, 0), 1, 1, fc=band['color'], alpha=band['alpha'],
-                                     label='95% range'))
+        if density:                   # red, as the points were; the inner darker -
+            # light enough for the density under them to show
+            shades = ((outer, DENSITY_BAND, 0.4), (inner, DENSITY_BAND, 0.3))
+        else:                         # Hussain et al.: dark grey 95 %, light grey 68 %
+            shades = ((outer, BAND_COLOR, BAND_ALPHA[0]), (inner, BAND_68, BAND_ALPHA[1]))
+        ax.plot(xx, best, '-', color=MAP_COLOR, lw=1.6, zorder=6)
+        add(Line2D([], [], color=MAP_COLOR, lw=1.6, label='MAP model'))
+        for i, (level, color, alpha_band) in enumerate(shades):
+            ax.fill_between(xx, *bands[level], color=color, alpha=alpha_band, lw=0,
+                            zorder=2 + 0.1 * i)
+            add(plt.Rectangle((0, 0), 1, 1, fc=color, alpha=alpha_band,
+                              label=f'{level:g}% range'))
 
-        # the GNSS
+        # --creep: the MAP model without its creep - what the creep adds
+        if model.creep:
+            par = model.unpack(res['best'])
+            plain = forward(xx, par['S'], par['d1'], par['a'], x0=par['x0'], rot=model.rot,
+                            rot_side=model.rot_side)
+            ax.plot(xx, plain, ls=':', color=MAP_COLOR, lw=1.2, zorder=5)
+            add(Line2D([], [], ls=':', color=MAP_COLOR, lw=1.2, label='MAP without creep'))
+
+        # --creep-offset: the two lines either side of the fault (Hussain et al. 2016)
+        if self.offset is not None:
+            off = self.offset
+            halo = [patheffects.withStroke(linewidth=4.4, foreground='w')]
+            for one in off['files']:
+                if one['fit'] is None:
+                    continue
+                shift = self.offset_shift(one['j'])
+                for side, (slope, icpt) in ((-1, one['fit']['line_a']),
+                                            (1, one['fit']['line_b'])):
+                    uu = np.array([side * off['km'], 0.0])
+                    ax.plot(off['x0'] + uu, slope * uu + icpt + shift, '-', color=OFFSET_COLOR,
+                            lw=2.4, zorder=6.5, path_effects=halo, solid_capstyle='butt')
+            if any(one['fit'] is not None for one in off['files']):
+                add(Line2D([], [], color=OFFSET_COLOR, lw=2.4,
+                           label=f'Offset lines, ±{off["km"]:g} km'))
+
+        # the GNSS: black - red on a density - outlined in white
         if has_gnss:
-            shift = self.gnss_shift()
+            shift = self.gnss_shift(ref)
+            color = GNSS_ON_DENSITY if density else GNSS_COLOR
             white_halo(ax.errorbar(gin['x'], gin['value'] + shift, yerr=gin['sigma'], fmt='o',
-                                   ms=6.5, mfc=GNSS_COLOR, ecolor=GNSS_COLOR, elinewidth=1.4,
-                                   capsize=3, capthick=1.2, zorder=7, **GNSS_EDGE))
-            handles.append(Line2D([], [], ls='', marker='o', ms=6, mfc=GNSS_COLOR,
-                                  label='GNSS' + ('' if model.gnss else ' (not fitted)'),
-                                  **GNSS_EDGE))
+                                   ms=6.5 if density else 5.5, mfc=color, ecolor=color,
+                                   elinewidth=1.3, capsize=3, capthick=1.1, zorder=7,
+                                   **GNSS_EDGE))
+            add(Line2D([], [], ls='', marker='o', ms=6, mfc=color, **GNSS_EDGE,
+                       label='GNSS' + ('' if model.gnss else ' (not fitted)')))
 
-        # the fault (dotted), and the traces the profile crosses (dash-dot)
+        # the traces the profile crosses (dash-dot); the fault itself: the arrow
         free = 'x0' in summ
-        ax.axvline(x0, color='k', ls=':', lw=1.2, zorder=3)
-        handles.append(Line2D([], [], color='k', ls=':', lw=1.2,
-                              label='Fault, fitted position' if free else 'Fault'))
+        add(Line2D([], [], ls='', marker='^', ms=8, color=FAULT_COLOR,
+                   label='Fault location, fitted' if free else 'Fault location'))
         traces = [(c - self.x_fault) * self.along_scale for c in self.crossings]
         traces = [xc for xc in traces if lo_x <= xc <= hi_x and (free or abs(xc) > 0.05)]
         for xc in traces:
             ax.axvline(xc, color=v.fault_color, ls='-.', lw=0.9, alpha=0.75, zorder=3)
         if traces:
-            handles.append(Line2D([], [], color=v.fault_color, ls='-.', lw=0.9,
-                                  label='Fault trace' if free else 'Other fault trace'))
+            add(Line2D([], [], color=v.fault_color, ls='-.', lw=0.9,
+                       label='Fault trace' if free else 'Other fault trace'))
 
-        # limits: the bulk of the points, the model and the GNSS
-        ally = np.concatenate([y for _, _, y in pts])
-        lo_y, hi_y = np.percentile(ally, [0.5, 99.5])
+        # limits: the bulk of the points, the model and the GNSS - room on top for
+        # the parameters on the top panel
+        ally = [y for _, _, y in pts if y.size]
+        lo_y, hi_y = (np.percentile(np.concatenate(ally), [0.5, 99.5]) if ally
+                      else (band_lo.min(), band_hi.max()))
         lo_y, hi_y = min(lo_y, band_lo.min()), max(hi_y, band_hi.max())
+        low_x, low_y = [x for _, x, _ in pts] + [xx], [y for _, _, y in pts] + [band_lo]
+        occupied = [np.c_[x, y] for _, x, y in pts] + bins_xy + [np.c_[xx[::4], best[::4]]]
+        weights = ([np.ones(x.size) for _, x, _ in pts] + [np.full(b.shape[0], 25.0)
+                                                           for b in bins_xy]
+                   + [np.full(best[::4].size, 25.0)])
         if has_gnss:
-            g = gin['value'] + self.gnss_shift()
+            g = gin['value'] + self.gnss_shift(ref)
             lo_y = min(lo_y, np.nanmin(g - gin['sigma']))
             hi_y = max(hi_y, np.nanmax(g + gin['sigma']))
+            low_x.append(gin['x'])
+            low_y.append(g - gin['sigma'])
+            occupied.append(np.c_[gin['x'], g])
+            weights.append(np.full(gin['x'].size, 200.0))
+        low = (np.concatenate(low_x), np.concatenate(low_y))
         pad = 0.06 * (hi_y - lo_y or 1.0)
-        ax.set_ylim(v.model_ylim if v.model_ylim else (lo_y - pad, hi_y + 0.25 * (hi_y - lo_y)
-                                                        + pad))
+        head = 0.25 * (hi_y - lo_y) if top else 0.0
+        ax.set_ylim(v.model_ylim if v.model_ylim else (lo_y - pad, hi_y + head + pad))
         span = hi_x - lo_x
         ax.set_xlim(lo_x - 0.01 * span, hi_x + 0.01 * span)
-        if density:
-            self.draw_density(ax)
 
-        # the A / A' ends, inside the top corners
-        kw = dict(xycoords='axes fraction', fontsize=v.font_size + 3, fontweight='bold',
-                  va='top', zorder=12, bbox=dict(boxstyle='round,pad=0.2', fc='w', ec='0.4',
-                                                 lw=0.6, alpha=0.85))
-        ends = [ax.annotate(self.label, xy=(0.012, 0.975), ha='left', **kw),
-                ax.annotate(f"{self.label}'", xy=(0.988, 0.975), ha='right', **kw)]
+        # the section (top left, the top panel), the sides of the fault (the
+        # bottom panel) and the fault, with room under the data for them
+        top_marks, bottom_marks = self.draw_marks(ax, x0, label=top, sides=bottom)
+        if not v.model_ylim:
+            self.room_below(ax, bottom_marks, *low)
+        if density and sets:
+            self.draw_density(ax, sets=sets, ref=ref, cax=cax)
+        return dict(occupied=occupied, weights=weights, top_marks=top_marks,
+                    bottom_marks=bottom_marks, low=low)
 
-        # the parameters, as Hussain et al. (2016): "slip rate = 20 mm/yr (11 – 29, 95% CI)"
-        lines = self.parameter_lines()
+    def cycle_legend(self):
+        """The "l" key: the legend inside the plot, outside it, or none - the
+        next of these from where it is now."""
+        if not self.has_data:
+            return
+        now = self.legend_at if self.legend_at in LEGEND_CYCLE else 'in'
+        self.legend_where = LEGEND_CYCLE[(LEGEND_CYCLE.index(now) + 1) % len(LEGEND_CYCLE)]
+        self.redraw()
+        print(f'section {self.name}: legend {self.legend_where} '
+              '("l" again: ' + ', '.join(LEGEND_CYCLE) + ' in turn)')
 
-        # ... and the legend: each where it hides the least (points, bins,
-        # the model, the GNSS), never on the A / A' labels nor on each other
-        occupied, weights = [np.c_[x, y] for _, x, y in pts], [np.ones(x.size) for _, x, _ in pts]
-        occupied += bins_xy + [np.c_[xx[::4], best[::4]]]
-        weights += [np.full(b.shape[0], 25.0) for b in bins_xy] + [np.full(best[::4].size, 25.0)]
-        if has_gnss:
-            occupied.append(np.c_[gin['x'], gin['value'] + self.gnss_shift()])
-            weights.append(np.full(gin['x'].size, 200.0))
-        placer = _Placer(ax, np.vstack(occupied), np.concatenate(weights), ends)
+    def redraw(self):
+        """The profile of a fitted section again, as it is - no new fit."""
+        if not self.has_data:
+            return
+        self.reset_axes()
+        self.draw_fit()
+        if self.ax_strain is not None:
+            self.draw_strain()
+        if self.ax_topo is not None:
+            self.draw_topo()
+        self.fig.canvas.draw_idle()
 
-        def make_box(loc, anchor):
-            box = AnchoredText('\n'.join(lines), loc=loc, bbox_to_anchor=anchor,
-                               bbox_transform=ax.transAxes, borderpad=0.0, frameon=True,
-                               prop=dict(fontsize=max(v.font_size - 4, 6)))
-            box.patch.set(boxstyle='round,pad=0.35', fc='w', ec='0.5', alpha=0.88)
-            box.set_zorder(10)
-            ax.add_artist(box)
-            return box
+    def legend_beside(self, ax, handles):
+        """The legend outside the plot, on its right - beyond the colour bar of
+        a density. The figure grows to the right to hold it: the panels keep
+        their size in inches, so all that is placed in them stays as it is."""
+        v, fig = self.v, self.fig
+        kw = dict(handles=handles, loc='upper left', frameon=False, handlelength=1.5,
+                  fontsize=max(v.font_size - 5, 6), labelspacing=0.45, borderaxespad=0.0)
+        try:
+            renderer = fig.canvas.get_renderer()
+        except Exception:                         # noqa: BLE001 - a non-Agg canvas
+            return ax.legend(bbox_to_anchor=(1.02, 1.0), bbox_transform=ax.transAxes, **kw)
+        width, height = fig.get_size_inches()
+        boxes = [(a, a.get_position()) for a, _ in self.home]
+        probe = ax.legend(bbox_to_anchor=(1.0, 1.0), bbox_transform=fig.transFigure, **kw)
+        need = probe.get_window_extent(renderer).width / fig.dpi          # inches
+        probe.remove()
+        right = max(box.x1 for _, box in boxes) * width                     # inches
+        for cax in getattr(self, 'ax_cbars', None) or [self.ax_cbar]:
+            if cax is not None and cax.axison:
+                right = max(right, cax.get_tightbbox(renderer).x1 / fig.dpi)
+        gap, margin = 0.18, 0.12
+        grown = max(width, right + gap + need + margin)
+        if grown > width + 1e-6:
+            if getattr(self, '_narrow', None) is None:
+                self._narrow = (width, height)
+            fig.set_size_inches(grown, height, forward=True)
+            for a, box in boxes:                  # the same inches, in the wider figure
+                a.set_position([box.x0 * width / grown, box.y0, box.width * width / grown,
+                                box.height])
+        return ax.legend(bbox_to_anchor=((right + gap) / grown, ax.get_position().y1),
+                         bbox_transform=fig.transFigure, **kw)
 
-        def make_legend(loc, anchor):
-            return ax.legend(handles=handles, loc=loc, bbox_to_anchor=anchor,
-                             bbox_transform=ax.transAxes, fontsize=max(v.font_size - 5, 6),
-                             framealpha=0.88, handlelength=1.5, borderpad=0.35,
-                             labelspacing=0.3, borderaxespad=0.0)
+    def draw_marks(self, ax, x0, label=True, sides=True):
+        """The marks of Hussain et al. (2016, Fig. 9): the section, A-A', boxed
+        top left (label); the sides of the fault named at the bottom corners
+        (sides: the direction of its normal, North / South); a blue arrow up
+        from the bottom at the fault, "Fault location" under it (with the
+        sides: under the arrow of the bottom panel only). Returns the marks at
+        the top and at the bottom."""
+        v = self.v
+        top = [ax.annotate(self.name, xy=(0.012, 0.975), xycoords='axes fraction',
+                           ha='left', va='top', fontsize=v.font_size + 1, fontweight='bold',
+                           zorder=12, bbox=dict(boxstyle='square,pad=0.25', fc=LABEL_FACE,
+                                                ec='k', lw=0.9))] if label else []
+        bottom = []
+        side = dict(xycoords='axes fraction', va='bottom', fontsize=v.font_size, zorder=12,
+                    bbox=dict(boxstyle='square,pad=0.1', fc='w', ec='none', alpha=0.72))
+        if self.normal is not None and sides:
+            toward = azimuth_of(self.normal[0], self.normal[1])     # the x > 0 side
+            bottom += [ax.annotate(compass_word(toward + 180.0), xy=(0.012, 0.022),
+                                   ha='left', **side),
+                       ax.annotate(compass_word(toward), xy=(0.988, 0.022), ha='right', **side)]
+        free = 'x0' in self.result['summary']
+        lo, hi = ax.get_xlim()
+        if lo <= x0 <= hi:            # a panel above the bottom one: a short arrow, no words
+            tip = ARROW_TIP if sides else ARROW_SHORT
+            bottom.append(ax.annotate(
+                ('Fault location' + (', fitted' if free else '')) if sides else '',
+                xy=(x0, tip), xytext=(x0, 0.022 if sides else 0.0),
+                xycoords=('data', 'axes fraction'),
+                textcoords=('data', 'axes fraction'), ha='center', va='bottom',
+                fontsize=max(v.font_size - 4, 6), fontweight='bold', family=serif_family(),
+                zorder=12, annotation_clip=False,
+                arrowprops=dict(facecolor=FAULT_COLOR, edgecolor=FAULT_COLOR, width=3.6,
+                                headwidth=11, headlength=10 if sides else 8, shrink=0.0)))
+            bottom[-1].tip = tip              # the top of the mark, whatever its extent says
+        return top, bottom
 
-        room = not v.model_ylim
-        placer.place(make_box, room=room)
-        placer.place(make_legend, room=room, max_grow=0.25)
-
-        n_files = len(res['sets'])
-        total = sum(self.fp[k]['x'].size for k in res['sets'])    # fitted: the real pixels
-        title = (f'{self.name}: swath ±{v.width:g} km, {total:,} pixels'
-                 + (f' in {n_files} files' if n_files > 1 else '')
-                 + (f' (drawn {v.nlook}x oversampled)' if self.fp_draw else '')
-                 + (f', {res["gnss"]["x"].size} GNSS' if res['gnss'] is not None else '')
-                 + f'\nstrike {self.strike:.0f}°, {COMP_TEXT[v.comp]}')
-        ax.set_title(title, fontsize=v.font_size - 1, pad=6)
-        return
+    @staticmethod
+    def room_below(ax, marks, xs, ys, max_grow=0.45):
+        """Lower the bottom of the plot until what is under each mark at the
+        bottom (the sides, the fault arrow) clears it - the 1st percentile of
+        the points under it, so a stray pixel does not count - by at most
+        max_grow of the range."""
+        try:
+            renderer = ax.figure.canvas.get_renderer()
+            box = ax.get_window_extent(renderer)
+            exts = [art.get_window_extent(renderer) for art in marks]
+        except Exception:                         # noqa: BLE001 - a non-Agg canvas
+            return
+        lo, hi = ax.get_ylim()
+        to_data = ax.transAxes + ax.transData.inverted()
+        new_lo = lo
+        for art, ext in zip(marks, exts):
+            x_a = to_data.transform(((ext.x0 - box.x0) / box.width, 0.0))[0]
+            x_b = to_data.transform(((ext.x1 - box.x0) / box.width, 0.0))[0]
+            top = max((ext.y1 - box.y0) / box.height, getattr(art, 'tip', 0.0))
+            need = top + 0.05                                  # axes fraction to clear
+            under = (xs >= min(x_a, x_b)) & (xs <= max(x_a, x_b)) & np.isfinite(ys)
+            if not under.any() or need >= 0.9:
+                continue
+            q = float(np.percentile(ys[under], 1.0))
+            new_lo = min(new_lo, (q - need * hi) / (1.0 - need))
+        new_lo = max(new_lo, lo - max_grow * (hi - lo))
+        if new_lo < lo:
+            ax.set_ylim(new_lo, hi)
 
     def parameter_lines(self):
-        """The parameters as Hussain et al. (2016) write them: the MAP value, its
-        unit, and the 95 % range - the slip rate as a rate, with its sense."""
+        """The parameters as Hussain et al. (2016, Fig. 9) write them: the MAP
+        value, its unit and the 95 % range, rounded to it - the slip rate as a
+        rate, with its sense; the offset as they give it, with one file."""
         v, res = self.v, self.result
         summ = res['summary']
+        if self.dip_slip:
+            return self.dip_slip_lines()
         lines = []
-        for name in [n for n in PHYSICAL if n in summ]:
+        order = ('S', 'd1') + (('a',) if len(res['sets']) == 1 else ()) + ('C', 'd2', 'x0')
+        for name in [n for n in order if n in summ]:
             s = summ[name]
             unit = v.model_unit if UNITS[name] == 'mm/yr' else UNITS[name]
             val, lo, hi, extra = s['map'], s['lo'], s['hi'], ''
@@ -836,21 +1541,103 @@ class ModelSection(Section):
                 else:
                     extra = f', {sense} (the range crosses 0: S > 0 is right-lateral)'
             # LOS data fitted as they are: the rates are what the LOS sees of them
-            seen = ' in the LOS' if v.data_los and name in ('S', 'C') else ''
-            lines.append(f'{NAMES[name]}{seen} = {_num(val)}{_unit_text(unit)} '
-                         f'({_num(lo)} – {_num(hi)}, 95% CI){extra}')
+            seen = ' in the LOS' if v.data_los and name in ('S', 'C', 'a') else ''
+            lines.append(f'{NAMES[name]}{seen} = {ci_text(val, lo, hi, unit)}{extra}')
         d = res['derived']['strain']
-        lines.append(f'strain rate{" in the LOS" if v.data_los else ""} = {d["map"]:.2f} '
-                     f'{strain_unit(v.model_unit)} ({d["lo"]:.2f} – {d["hi"]:.2f}, 95% CI)')
+        lines.append(f'strain rate{" in the LOS" if v.data_los else ""} = '
+                     + ci_text(d['map'], d['lo'], d['hi'], strain_unit(v.model_unit)))
+        if self.offset is not None:
+            lines += self.offset_lines()
         return lines
+
+    def dip_slip_lines(self):
+        """The parameters of a reverse or normal fault, as Hussain et al. write
+        theirs: the slip rate along the dip, with the fault type; the locking
+        depth; the dip, towards A or A'; the far-field rates of the hanging wall
+        against the footwall - shortening and uplift (reverse), extension and
+        subsidence (normal)."""
+        v, res = self.v, self.result
+        summ, model = res['summary'], res['model']
+        lines = []
+        for name in ('S', 'd1', 'dip', 'a', 'x0'):
+            if name == 'a' and len(res['sets']) > 1:
+                continue
+            if name == 'dip':
+                text = (ci_text(summ['dip']['map'], summ['dip']['lo'], summ['dip']['hi'], 'deg')
+                        if 'dip' in summ else f'{model.dip_fixed:g}° (fixed)')
+                lines.append(f'dip = {text}, towards {self.dip_side()}')
+                continue
+            if name not in summ:
+                continue
+            s = summ[name]
+            unit = v.model_unit if UNITS[name] == 'mm/yr' else UNITS[name]
+            extra = f', {v.fault_type}' if name == 'S' else ''
+            lines.append(f'{NAMES[name]} = {ci_text(s["map"], s["lo"], s["hi"], unit)}{extra}')
+        for key, word in zip(('h_rate', 'v_rate'), RATE_WORDS[v.fault_type]):
+            d = res['derived'][key]
+            lines.append(f'{word} = ' + ci_text(d['map'], d['lo'], d['hi'], v.model_unit))
+        return lines
+
+    def derived_rows(self):
+        """What is derived from the parameters, as rows (name, description,
+        unit, MAP, median, lo, hi) of _params.csv: the strain rate at the
+        fault (strike-slip), the far-field rates (reverse, normal) - and a
+        fixed dip."""
+        v, res = self.v, self.result
+        if not self.dip_slip:
+            d = res['derived']['strain']
+            return [('strain', 'shear strain rate at the fault |S|/(pi d1)',
+                     'microstrain/yr' if v.model_unit == 'mm/yr' else f'{v.model_unit}/km',
+                     d['map'], d['median'], d['lo'], d['hi'])]
+        words = RATE_WORDS[v.fault_type]
+        rows = []
+        if res['model'].dip_fixed is not None:
+            dip = res['model'].dip_fixed
+            rows.append(('dip', 'dip (fixed)', 'deg', dip, dip, dip, dip))
+        for key, word, what in zip(('h_rate', 'v_rate'), words,
+                                   ('S cos(dip) - across the fault', 'S sin(dip) - vertical')):
+            d = res['derived'][key]
+            rows.append((key, f'{word} {what}; the hanging wall against the footwall far off',
+                         v.model_unit, d['map'], d['median'], d['lo'], d['hi']))
+        return rows
+
+    def dip_slip_model_lines(self):
+        """The model of a reverse or normal fault, for _params.txt."""
+        v, model = self.v, self.result['model']
+        hanging = self.dip_side()
+        moves = ('up the dip, over the footwall' if v.fault_type == 'reverse'
+                 else 'down the dip, away from the footwall')
+        h_word, z_word = RATE_WORDS[v.fault_type]
+        return [
+            f'fault type     : {v.fault_type} - dipping towards {hanging}; the hanging wall '
+            f'(the {hanging} side) moves {moves}',
+            'model          : locked from the surface down to d1, slipping at S along its dip '
+            'below (the back-slip of',
+            '                 Savage 1983; Segall 2010, eqs. 3.71-3.72), the trace at x0:',
+            '                   u = t (x - x0),  z = u / d1 - cot(dip)',
+            '                   across the fault (+ towards '
+            f"{self.label}'): h(x) = -t s S/pi [cos(dip) atan(z) + (sin(dip) - z cos(dip)) "
+            '/ (1 + z^2)] + a',
+            '                   vertical (+ up)                 : v(x) =    s S/pi [sin(dip) '
+            'atan(z) + (cos(dip) + z sin(dip)) / (1 + z^2)] + a',
+            '                   a line of sight                 : ph h(x) + pu v(x) + a',
+            f'                 s = {model.sense:+d} ({v.fault_type}), t = {model.toward:+d} '
+            f'(dipping towards {hanging}); far off, the hanging wall moves S cos(dip) '
+            f'across ({h_word.split()[0]}) and S sin(dip) vertically ({z_word.split()[0]})',
+            '                 x: km from the fault, perpendicular to it; + towards '
+            f"{self.label}'",
+            f'data           : per file, below, in {v.model_unit}'
+            + (f' (read in {v.disp_unit})' if v.disp_unit != v.model_unit else '')
+            + '; ve / vn assume no motion along the fault',
+        ]
 
     def draw_strain(self):
         ax, res = self.ax_strain, self.result
         lo, hi = self.ax_swath.get_xlim()
         xx = np.linspace(lo, hi, 801)
         best, band_lo, band_hi = strain_rate(res, xx)
-        ax.fill_between(xx, band_lo, band_hi, color=BAND_COLOR, alpha=0.55, lw=0)
-        ax.plot(xx, best, ls='--', color=MAP_COLOR, lw=1.8)
+        ax.fill_between(xx, band_lo, band_hi, color=BAND_COLOR, alpha=0.8, lw=0)
+        ax.plot(xx, best, '-', color=MAP_COLOR, lw=1.4)
         ax.axhline(0, color='k', lw=0.4)
         x0 = res['summary']['x0']['map'] if 'x0' in res['summary'] else 0.0
         ax.axvline(x0, color='k', ls=':', lw=1.1)
@@ -877,8 +1664,8 @@ class ModelSection(Section):
         return
 
     def draw_posterior(self):
-        """The posterior, as Hussain et al. (2016, Fig. 9): the joint distribution
-        of every pair of parameters as a 2D histogram (jet; each panel scaled to
+        """The posterior, as Hussain et al. (2016, central NAF, Fig. 9): the joint
+        distribution of every pair of parameters as a 2D histogram (jet; each panel scaled to
         its own peak, as their bin areas differ and a strong correlation such as
         slip rate - locking depth would otherwise leave every other panel dark
         blue), the marginal histograms along the bottom row (blue, one frequency
@@ -1049,9 +1836,12 @@ class ModelSection(Section):
                 s = summ[name]
                 fid.write(f'{name},{describe(name)},{unit_of[name]},{s["map"]:.6g},'
                           f'{s["median"]:.6g},{s["lo"]:.6g},{s["hi"]:.6g}\n')
-            d = res['derived']['strain']
-            fid.write(f'strain,shear strain rate at the fault |S|/(pi d1),{strain_unit},'
-                      f'{d["map"]:.6g},{d["median"]:.6g},{d["lo"]:.6g},{d["hi"]:.6g}\n')
+            for name, what, unit, val, med, lo, hi in self.derived_rows():
+                fid.write(f'{name},{what},{unit},{val:.6g},{med:.6g},{lo:.6g},{hi:.6g}\n')
+            for name, what, val, med, lo, hi in self.offset_rows():
+                what = what.replace(',', ';')         # one column: a label may hold a comma
+                fid.write(f'{name},{what},{v.model_unit},{val:.6g},{med:.6g},{lo:.6g},'
+                          f'{hi:.6g}\n')
         written.append(out)
 
         out = f'{base}_params.txt'
@@ -1065,10 +1855,14 @@ class ModelSection(Section):
         if samples.shape[0] > 20000:
             samples = samples[np.random.default_rng(2).choice(samples.shape[0], 20000,
                                                               replace=False)]
-        i_s, i_d = model.index('S'), model.index('d1')
-        strain = np.abs(samples[:, i_s]) / (np.pi * samples[:, i_d])
-        np.savetxt(out, np.column_stack([samples, strain]), fmt='%.6g', delimiter=',',
-                   header=','.join(res['names'] + ['strain']), comments='')
+        if self.dip_slip:            # the far-field rates, sample by sample
+            extra, extra_names = np.column_stack(model.rates(samples)), ['h_rate', 'v_rate']
+        else:
+            i_s, i_d = model.index('S'), model.index('d1')
+            extra = np.abs(samples[:, i_s]) / (np.pi * samples[:, i_d])
+            extra_names = ['strain']
+        np.savetxt(out, np.column_stack([samples, extra]), fmt='%.6g', delimiter=',',
+                   header=','.join(res['names'] + extra_names), comments='')
         written.append(out)
 
         # 4. the bins, with the model
@@ -1076,8 +1870,9 @@ class ModelSection(Section):
         rows = []
         for j, k in enumerate(res['sets']):
             b = res['bins'][j]
-            pred = model.predict(res['best'], b['x'], offset=model.offsets[j])
-            shift = self.offset_shift(j)
+            pred = model.predict(res['best'], b['x'], offset=model.offsets[j],
+                                 kind=model.kinds[j])
+            shift = self.offset_shift(j, self.set_ref(j))
             rows.append(np.column_stack([np.full(b['x'].size, self.fp[k]['file_idx']), b['x'],
                                          b['median'], b['std'], b['q25'], b['q75'],
                                          b['count'], pred, b['median'] - pred,
@@ -1094,7 +1889,8 @@ class ModelSection(Section):
         for j, k in enumerate(res['sets']):
             f = self.fp[k]
             blocks.append(np.column_stack([
-                f['dist'], f['x'], f['perp'], f['value'], f['v'], f['v'] + self.offset_shift(j),
+                f['dist'], f['x'], f['perp'], f['value'], f['v'],
+                f['v'] + self.offset_shift(j, self.set_ref(j)),
                 f['row'], f['col'], f['lon'], f['lat'], np.full(f['x'].size, f['file_idx'])]))
         np.savetxt(out, np.vstack(blocks), delimiter=',', comments='',
                    fmt=['%.5f', '%.5f', '%.5f', '%.6g', '%.6g', '%.6g', '%d', '%d',
@@ -1134,32 +1930,50 @@ class ModelSection(Section):
             rng = f'[{s["lo"]:.4g}, {s["hi"]:.4g}]'
             lines.append(f'{name:<10s}  {s["map"]:<11.4g}  {rng:<24s}  {s["median"]:<11.4g}  '
                          f'{describe(name)} [{unit_of[name]}]')
-        d = res['derived']['strain']
-        rng = f'[{d["lo"]:.4g}, {d["hi"]:.4g}]'
-        lines.append(f'{"strain":<10s}  {d["map"]:<11.4g}  {rng:<24s}  {d["median"]:<11.4g}  '
-                     f'shear strain rate at the fault, |S| / (pi d1) [{strain_unit}]')
+        for name, what, unit, val, med, lo, hi in self.derived_rows():
+            rng = f'[{lo:.4g}, {hi:.4g}]'
+            if name == 'strain':
+                what = 'shear strain rate at the fault, |S| / (pi d1)'
+            lines.append(f'{name:<10s}  {val:<11.4g}  {rng:<24s}  {med:<11.4g}  {what} [{unit}]')
         lines.append('')
         if self.sense_known:
             lines.append(f'sense of slip  : {slip_sense(summ["S"]["map"], self.strike, self.prof_az)}'
                          f' (S > 0 = right-lateral with this strike)')
-        lines += [
-            'model          : v(x) = S/pi atan((x - x0)/d1) + a'
-            + (' + C [H(x - x0) - 1/2 - 1/pi atan((x - x0)/d2)]' if model.creep else '')
-            + (f' + {model.rot:g} (x - x0) on the {"x > 0" if model.rot_side > 0 else "x < 0"}'
-               ' side' if model.rot else ''),
-            '                 x: km from the fault, perpendicular to it; + towards '
-            f"{self.label}'",
-            f'data           : {COMP_LONG[v.comp]} (--comp {v.comp}), in {v.model_unit}'
-            + (f' (read in {v.disp_unit})' if v.disp_unit != v.model_unit else ''),
-        ]
+        if self.dip_slip:
+            lines += self.dip_slip_model_lines()
+        else:
+            lines += [
+                'model          : v(x) = S/pi atan((x - x0)/d1) + a'
+                + (' + C [H(x - x0) - 1/2 - 1/pi atan((x - x0)/d2)]' if model.creep else '')
+                + (f' + {model.rot:g} (x - x0) on the {"x > 0" if model.rot_side > 0 else "x < 0"}'
+                   ' side' if model.rot else ''),
+                '                 x: km from the fault, perpendicular to it; + towards '
+                f"{self.label}'",
+                f'data           : {COMP_LONG[v.comp]} (--comp {v.comp}), in {v.model_unit}'
+                + (f' (read in {v.disp_unit})' if v.disp_unit != v.model_unit else ''),
+            ]
         for j, k in enumerate(res['sets']):
             f = self.fp[k]
             noise = res['noise'][j]
             lines.append(f'file {j + 1:<10d}: {os.path.abspath(v.file[f["file_idx"]])}')
+            if self.dip_slip:
+                comp = f['comp']
+                if comp == 'vu':
+                    about = ', --comp vu: the vertical velocity, as it is'
+                elif comp in ('ve', 'vn'):
+                    word = 'east' if comp == 've' else 'north'
+                    about = (f', --comp {comp}: the {word} velocity / {f["proj"]:.2f} (the {word} '
+                             'component of the fault normal) - the motion across the fault')
+                else:                         # a line of sight: what it sees of each
+                    ph, pu = f['kind']
+                    about = (f', --comp los: the LOS velocity, as it is - it sees {ph:+.2f} of '
+                             f'the motion across the fault and {pu:+.2f} of the vertical (the '
+                             'medians of the swath)')
+            else:
+                about = (f', LOS sees {f["proj"]:.2f} of the fault-parallel motion'
+                         if v.comp == 'los' else '')
             lines.append(f'                 {f["x"].size:,} pixels, {res["bins"][j]["x"].size} '
-                         f'bins, offset {model.offsets[j]}'
-                         + (f', LOS sees {f["proj"]:.2f} of the fault-parallel motion'
-                            if v.comp == 'los' else ''))
+                         f'bins, offset {model.offsets[j]}{about}')
             lines.append('                 noise: ' + (
                 'white, the scatter of each bin' if res['noise_mode'] == 'white' else
                 f'exponential covariance, sill {noise[0]:.4g} ({v.model_unit})^2, '
@@ -1181,14 +1995,17 @@ class ModelSection(Section):
             + (f', lat/lon {self.start_lalo} -> {self.end_lalo}' if self.start_lalo else ''),
             f'                 azimuth {self.prof_az:.2f} deg, swath half width {v.width:g} km',
             f'fault          : at {self.x_fault:.3f} km along the profile - {self.fault_how}',
-            f'strike         : {self.strike:.2f} deg - {self.strike_how}; the profile is '
-            f'{self.obliquity:.1f} deg off the fault normal',
+            f'strike         : {self.strike:.2f} deg - {self.strike_how}'
+            + (' (the right-hand rule: the fault dips to its right)' if self.dip_slip else '')
+            + f'; the profile is {self.obliquity:.1f} deg off the fault normal',
             f'bins           : {res["bin_km"]:g} km, the median of each (3+ pixels)'
             + (f'; the real pixels - --nlook {v.nlook} oversampled what is drawn only'
                if v.nlook > 1 else ''),
             'priors         : uniform, ' + ', '.join(
                 f'{n} {model.bounds[n][0]:.4g} to {model.bounds[n][1]:.4g}'
-                for n in res['names'] if n in ('S', 'd1', 'C', 'd2', 'x0'))
+                for n in res['names'] if n in ('S', 'd1', 'dip', 'C', 'd2', 'x0'))
+            + (f'; dip fixed at {model.dip_fixed:g} deg'
+               if getattr(model, 'dip_fixed', None) is not None else '')
             + (f'; d1 ~ N({model.d1_prior[0]:g}, {model.d1_prior[1]:g})' if model.d1_prior
                else '') + ('; d2 <= d1' if model.creep else ''),
             f'sampler        : affine-invariant ensemble MCMC (Goodman & Weare 2010), '
@@ -1199,6 +2016,30 @@ class ModelSection(Section):
             'MAP            : the maximum a posteriori model (the best sample, polished)',
             '95% range      : the 2.5 and 97.5 percentiles of the posterior samples',
         ]
+        off = self.offset
+        if off is not None:
+            lines += [
+                f'creep offset   : as Hussain et al. (2016) - per file, a straight line '
+                f'through the pixels within {off["km"]:g} km of the fault (at {off["x0"]:.3f} '
+                f'km) and {off["width"]:g} km of the profile line on each side, and their '
+                'offset at the fault, in the sense of S;',
+                '                 95% range: 2000 bootstrap draws resampling each side on '
+                'its own, the pixels taken as independent']
+            for one in off['files']:
+                if one['fit'] is None:
+                    lines.append(f'                 {one["label"]}: too few pixels '
+                                 f'({one["n_a"]} | {one["n_b"]})')
+                    continue
+                lines.append(f'                 {one["label"]}: {one["rate"]:.3f} '
+                             f'({one["lo"]:.3f} to {one["hi"]:.3f}) {v.model_unit}, '
+                             f'{one["n_a"]} | {one["n_b"]} pixels')
+            sp = off['split']
+            if sp is not None:
+                lines.append(f'                 split of the {sp["n"]} LOS offsets: '
+                             f'fault-parallel {sp["par"]:.3f} ({sp["par_lo"]:.3f} to '
+                             f'{sp["par_hi"]:.3f}), vertical {sp["up"]:+.3f} '
+                             f'({sp["up_lo"]:+.3f} to {sp["up_hi"]:+.3f}) {v.model_unit}, '
+                             f"+ = the {self.label}' side up")
         return '\n'.join(lines) + '\n'
 
 
@@ -1218,6 +2059,15 @@ class ModelViewer(swathProfileViewer):
 
     COMMAND = 'model'
     SECTION_CLASS = ModelSection
+
+    def on_key(self, event):
+        if event.key in ('l', 'L'):           # the legend of the profile under the mouse
+            figure = getattr(event.canvas, 'figure', None)
+            for sec in self.sections:
+                if sec.fig is not None and sec.fig is figure:
+                    sec.cycle_legend()
+            return
+        super().on_key(event)
 
     def __init__(self, inps, view_cmd):
         super().__init__(inps, view_cmd)
@@ -1264,11 +2114,19 @@ class ModelViewer(swathProfileViewer):
                   '--comp los gives the fault-parallel velocity (and the sense of slip)')
         return
 
+    @property
+    def dip_slip(self):
+        """A reverse or a normal fault (`viewinsar model reverse|normal`)."""
+        return getattr(self, 'fault_type', 'strike') != 'strike'
+
     def resolve_comp(self):
         """--comp auto: los when the LOS geometry of every file is known and no
-        file is named as a component of a decomposition; as-is otherwise."""
+        file is named as a component of a decomposition; as-is otherwise. A
+        reverse or normal fault: what each file is (resolve_dip_comps)."""
         from .cli import check_model_gnss
 
+        if self.dip_slip:
+            return self.resolve_dip_comps()
         was_auto = self.comp == 'auto'
         if was_auto:
             why, named = None, []
@@ -1287,6 +2145,11 @@ class ModelViewer(swathProfileViewer):
                     why = (f'only nominal LOS angles for {os.path.basename(fname)}, too rough '
                            'to turn its LOS into fault-parallel velocity')
                     break
+            if named and NAMED_AS.get(named[0]) == 'vu':
+                raise ValueError(
+                    f'{why}: the vertical velocity tells of a reverse or a normal fault, not of '
+                    'a strike-slip one - viewinsar model reverse ... (or normal), or --comp '
+                    'as-is to fit it as it is all the same')
             self.comp = 'as-is' if why else 'los'
             self.data_los = bool(why) and not named
             if self.print_msg:
@@ -1300,6 +2163,7 @@ class ModelViewer(swathProfileViewer):
                 if self.gnss_comp and self.print_msg:
                     print(f'GNSS: --vel {self.gnss_comp}, to match the data as they are')
             check_model_gnss(self)
+            self.comps = [self.comp] * len(self.file)
         elif self.comp == 'los':
             for i, fname in enumerate(self.file):
                 try:
@@ -1317,7 +2181,83 @@ class ModelViewer(swathProfileViewer):
             self.gnss_comp_used = self.gnss_comp
             self.vprint(f'GNSS: the {self.gnss_comp} component, '
                         f'{"fitted" if self.gnss_fit else "shown"} [{self.model_unit}]')
+        if self.comp == 'as-is' and not was_auto:
+            # given as they are: LOS data, unless a file is named as a component
+            self.data_los = not any(self.named_as(f) for f in self.file)
+        self.plotted = self.what_is_plotted()
         return
+
+    def resolve_dip_comps(self):
+        """reverse / normal: what each file is - vu (vertical), ve / vn (east /
+        north: across the fault) or los (as it is); auto: by the file's name,
+        else los, its line of sight known (not the nominal angles of a name)."""
+        from .cli import check_model_gnss
+
+        comps, said = list(self.comps), []
+        for i, fname in enumerate(self.file):
+            base = os.path.basename(fname)
+            if comps[i] == 'auto':
+                named = self.named_as(fname)
+                if named == 'horizontal':
+                    raise ValueError(f'{base} is named as a horizontal velocity, of no known '
+                                     'direction: say which with --comp ve or vn (one per file)')
+                comps[i] = {'vu': 'vu', 'east': 've', 'north': 'vn'}.get(named, 'los')
+                said.append(f'{self.labels[i] if self.labels else base}: {comps[i]}'
+                            + (' (its name)' if named else ''))
+            if comps[i] != 'los':
+                continue
+            try:
+                geom = self._los_geometry(i)
+            except ValueError as err:
+                raise ValueError(f'{base}, a LOS velocity: {err} - give --geom (or --los-inc and '
+                                 '--los-az), or say what it is with --comp vu, ve or vn (one per '
+                                 'file)') from None
+            if geom.kind == 'nominal':
+                raise ValueError(f'{base}, a LOS velocity: only nominal LOS angles from its name, '
+                                 'too rough to see the model through - give --geom (MintPy '
+                                 'geometryGeo.h5, LiCSBAS GEOCml*/, LiCSAR *.geo.E.tif) or '
+                                 '--los-inc and --los-az; or say what it is with --comp vu, ve '
+                                 'or vn (one per file)')
+        self.comps = comps
+        self.comp = comps[0] if len(set(comps)) == 1 else 'mixed'
+        self.data_los = False
+        if said and self.print_msg:
+            print('--comp auto -> ' + ', '.join(said))
+        check_model_gnss(self)
+        if self.gnss is not None:
+            self.gnss_comp_used = self.gnss_comp
+            if self.gnss_comp == 'vu' and not np.any(self.gnss.has_vu):
+                print('WARNING: --vel vu: no GNSS station has a vertical velocity')
+            self.vprint(f'GNSS: the {self.gnss_comp} component '
+                        + ('(across the fault, + towards the end of the profile), '
+                           if self.gnss_comp == 'perp' else '')
+                        + f'{"fitted" if self.gnss_fit else "shown"} [{self.model_unit}]')
+        self.plotted = None
+        return
+
+    @staticmethod
+    def named_as(fname):
+        """The component a file is named as - 'vu', 'east', 'north',
+        'horizontal' - or None."""
+        tokens = set(re.split(r'[^a-z0-9]+', os.path.basename(fname).lower()))
+        for token in sorted(tokens):
+            if token in NAMED_AS:
+                return NAMED_AS[token]
+        return None
+
+    def what_is_plotted(self):
+        """What the y axis says: fault-parallel velocity once the data are
+        turned into it (par, ve, vn, los); the vertical (vu); the data as they
+        are - the LOS, or a component by the name of its file; else None, just
+        "Velocity"."""
+        if self.comp in ('par', 've', 'vn', 'los'):
+            return 'par'
+        if self.comp == 'vu':
+            return 'vu'
+        if self.data_los:
+            return 'los'
+        named = {self.named_as(f) for f in self.file} - {None}
+        return named.pop() if len(named) == 1 else None
 
     def init_gnss(self):
         """Read the GNSS and place them on the map; their component is taken
@@ -1341,10 +2281,11 @@ class ModelViewer(swathProfileViewer):
         return
 
     def gnss_values(self, gnss, p_vec):
-        """The GNSS component that matches the data: fault-parallel (par), east,
-        north, up, or the LOS of the first file."""
+        """The GNSS component that matches the data: fault-parallel (par),
+        across the fault (perp: + towards the end of the profile), east, north,
+        up, or the LOS of the first file."""
         comp = self.gnss_comp
-        if comp == 'par':
+        if comp in ('par', 'perp'):  # along the strike, or across the fault
             return gnss.component('los', (p_vec[0], p_vec[1], 0.0))
         if comp == 'los':
             geom = self._los_geometry(0)
@@ -1502,24 +2443,33 @@ class ModelViewer(swathProfileViewer):
         out = os.path.join(self.outdir,
                            f'{self.COMMAND}_sections_{"".join(s.label for s in fitted)}.csv')
         os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
-        names = ('S', 'd1', 'C', 'd2', 'x0')
+        if self.dip_slip:
+            names, derived = ('S', 'd1', 'dip', 'x0'), ('h_rate', 'v_rate')
+        else:
+            names, derived = ('S', 'd1', 'C', 'd2', 'x0'), ('strain',)
         head = ['section', 'start_lat', 'start_lon', 'end_lat', 'end_lon', 'fault_km',
-                'fault_lat', 'fault_lon', 'strike_deg', 'sense', 'pixels', 'rate_unit']
-        for name in names + ('strain',):
+                'fault_lat', 'fault_lon', 'strike_deg',
+                'fault_type' if self.dip_slip else 'sense', 'pixels', 'rate_unit']
+        for name in names + derived + self.offset_names(fitted):
             head += [f'{name}_map', f'{name}_lower_95', f'{name}_upper_95']
         with open(out, 'w') as fid:
             fid.write(','.join(head) + '\n')
             for sec in fitted:
-                fid.write(','.join(self._section_row(sec, names)) + '\n')
-        print(f'saved: {out}  (one row per section; S, C in {self.model_unit}, d1, d2, x0 in '
-              'km, strain in ' + ('microstrain/yr)' if self.model_unit == 'mm/yr' else
-                                  f'{self.model_unit}/km)'))
+                fid.write(','.join(self._section_row(sec, names, derived)) + '\n')
+        if self.dip_slip:
+            print(f'saved: {out}  (one row per section; S, h_rate, v_rate in {self.model_unit}, '
+                  'd1, x0 in km, the dip in degrees)')
+        else:
+            print(f'saved: {out}  (one row per section; S, C in {self.model_unit}, d1, d2, x0 in '
+                  'km, strain in ' + ('microstrain/yr)' if self.model_unit == 'mm/yr' else
+                                      f'{self.model_unit}/km)'))
         written.append(out)
         return written
 
-    def _section_row(self, sec, names):
+    def _section_row(self, sec, names, derived=('strain',)):
         """One row of the _sections.csv table."""
         res, summ = sec.result, sec.result['summary']
+        fixed = getattr(res['model'], 'dip_fixed', None)
 
         def lonlat(row, col):
             try:
@@ -1540,11 +2490,28 @@ class ModelViewer(swathProfileViewer):
         row += [f'{sec.x_fault:.4f}', *lonlat(y0 + t * (y1 - y0), x0 + t * (x1 - x0)),
                 f'{sec.strike:.2f}',
                 slip_sense(summ['S']['map'], sec.strike, sec.prof_az) if sec.sense_known
-                else '', str(res['n_pixels']), self.model_unit]
+                else (self.fault_type if self.dip_slip else ''), str(res['n_pixels']),
+                self.model_unit]
         for name in names:
             s = summ.get(name)
+            if s is None and name == 'dip' and fixed is not None:
+                s = dict(map=fixed, lo=fixed, hi=fixed)
             row += ([f'{s["map"]:.6g}', f'{s["lo"]:.6g}', f'{s["hi"]:.6g}'] if s
                     else ['', '', ''])
-        d = res['derived']['strain']
-        row += [f'{d["map"]:.6g}', f'{d["lo"]:.6g}', f'{d["hi"]:.6g}']
+        for key in derived:
+            d = res['derived'][key]
+            row += [f'{d["map"]:.6g}', f'{d["lo"]:.6g}', f'{d["hi"]:.6g}']
+        rows = {name: (val, lo, hi) for name, _, val, _, lo, hi in sec.offset_rows()}
+        for name in self.offset_names(self.sections):
+            val = rows.get(name)
+            row += [f'{val[0]:.6g}', f'{val[1]:.6g}', f'{val[2]:.6g}'] if val else ['', '', '']
         return row
+
+    def offset_names(self, sections):
+        """--creep-offset: the offsets of every section, as columns."""
+        names = []
+        for sec in sections:
+            for name, *_ in (sec.offset_rows() if sec.has_data else []):
+                if name not in names:
+                    names.append(name)
+        return tuple(names)

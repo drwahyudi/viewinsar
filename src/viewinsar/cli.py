@@ -720,19 +720,24 @@ def add_save_options(group, what):
 
 
 # options whose value may be left out: a file after them is an input instead
-BARE_BEFORE_A_FILE = {'--save': '', '--cmap-prof': 'viridis'}
+BARE_BEFORE_A_FILE = {'--save': '', '--cmap-prof': 'viridis', '--legend': 'auto'}
+# ... and options of any number of numbers: moved to the end, where they take none
+BARE_LIST_BEFORE_A_FILE = ('--creep-offset',)
 
 
 def _bare_save(argv):
     """`--save velocity.h5`: a data file after --save is an input, not the folder
-    to export into - keep --save bare then (and --cmap-prof: no colormap)."""
+    to export into - keep --save bare then (and --cmap-prof: no colormap;
+    --creep-offset: no numbers)."""
     if argv is None:
         argv = sys.argv[1:]
     argv = list(argv)
     for i, tok in enumerate(argv[:-1]):
         if tok in BARE_BEFORE_A_FILE and os.path.isfile(argv[i + 1]):
             argv[i] = f'{tok}={BARE_BEFORE_A_FILE[tok]}'
-    return argv
+    moved = [i for i, tok in enumerate(argv[:-1])
+             if tok in BARE_LIST_BEFORE_A_FILE and os.path.isfile(argv[i + 1])]
+    return [tok for i, tok in enumerate(argv) if i not in moved] + [argv[i] for i in moved]
 
 
 def check_colormap(name, option):
@@ -1226,12 +1231,29 @@ def stat_main(iargs=None):
 #                                  model                                     #
 ##############################################################################
 MODEL_DESCRIPTION = """\
-Fit an elastic dislocation model to a profile across a fault: the slip rate
-S below the locking depth d1 (Savage & Burford 1973) - optionally with
-shallow creep C from the surface down to d2, and a rotation term - as
-Hussain et al. (2016, 2018) did along the North Anatolian Fault:
+Fit an elastic dislocation model to a profile across a fault - of the type
+named by the first word: strike (the default), reverse (or thrust), normal.
 
-    v(x) = S/pi atan(x/d1) + C [H(x) - 1/2 - 1/pi atan(x/d2)] + a
+  strike   a strike-slip fault: the slip rate S below the locking depth d1
+           (Savage & Burford 1973) - optionally with shallow creep C from
+           the surface down to d2, and a rotation term - as Hussain et al.
+           (2016, 2018) did along the North Anatolian Fault, fitted to the
+           fault-parallel velocity (--comp par, ve, vn, los - one for all):
+             v(x) = S/pi atan(x/d1) + C [H(x) - 1/2 - 1/pi atan(x/d2)] + a
+             viewinsar model strike geo_ve.h5 --comp ve ...
+  reverse  a reverse (thrust) or a normal fault dipping at dip (--dip DEG,
+  normal   or a range: --dip 10 45; default 5 85) towards A' or A
+           (--dip-toward end|start), locked from the surface down to d1,
+           slipping at S along its dip below it - up the dip (reverse) or
+           down it (normal): the back-slip model of Savage (1983), as Segall
+           (2010, eqs. 3.71-3.72) writes it. Fitted to the vertical velocity
+           (vu), the motion across the fault (ve / vn: the east / north
+           velocity over the east / north of the fault normal) or a line of
+           sight as it is (los) - one --comp per file, a panel each, the
+           model in each; the far-field rates follow - shortening / extension
+           S cos(dip), uplift / subsidence S sin(dip):
+             viewinsar model reverse geo_vu.h5 --comp vu ...
+             viewinsar model normal geo_ve.h5 geo_vu.h5 --comp ve vu ...
 
 Draw the profile ACROSS the fault on the map (two clicks), or give it - or
 several, A-A', B-B', C-C' ... - up front with --start-lalo / --end-lalo,
@@ -1246,23 +1268,42 @@ under uniform priors, with a noise covariance that decays with distance
 are fitted together, each with an offset of its own; GNSS (--gnss) too, with
 theirs.
 
-One window shows the points (no density: the pixels themselves, red), the
-binned medians, the GNSS (blue), the maximum a posteriori (MAP) model (bold
-dashes) and its 95 % range (grey), with the parameters and their 95 %
-ranges written on it; a second one the posterior distributions, as Hussain
-et al. (2016, Fig. 9): every pair of parameters as a 2D histogram (jet),
-the marginals as blue histograms along the bottom, the MAP in red. With
---cmap-prof CMAP the pixels are a point DENSITY in that colormap instead, as
-in swath (--nlook fills it in), under a red 95 % range and bigger medians.
+One window shows the profile as Hussain et al. (2016, Izmit, Fig. 9) draw it:
+the pixels as light red points, the maximum a posteriori (MAP) model as a
+black line in its 95 % (dark grey) and 68 % (light grey) ranges, the GNSS
+black, the fault as a blue arrow from below ("Fault location"), the section
+boxed top left, the sides of the fault named at the bottom corners, and the
+parameters in italics top right - "slip rate = 19 mm/yr ( 9 – 28, 95% c.i. )".
+The legend sits inside the plot where it hides nothing, else outside on the
+right (--legend). No medians (--medians: the median of each bin).
+A second window holds the posterior distributions, as Hussain et al. (2016,
+central NAF, Fig. 9): every pair of parameters as a 2D histogram (jet), the
+marginals as blue histograms along the bottom, the MAP in red.
+With --cmap-prof CMAP the pixels are a point DENSITY in that colormap
+instead, as in swath (--nlook fills it in): the ranges red, the medians big,
+the GNSS red with a white outline.
+
+Creep, as Hussain et al. (2016) constrained it, two ways: --creep fits the
+creep rate C and its depth d2 in the model (written on the profile, the MAP
+model without the creep dotted); --creep-offset measures the rate straight
+from the data - the offset at the fault of two straight lines, one through
+the pixels on each side within a few km of it, its 95 % range by bootstrap.
+The LOS offsets of an ascending and a descending track are split into
+fault-parallel and vertical, so a vertical step at the fault (subsidence of
+one side) is not taken for creep.
 
 The fault: where the profile crosses a --fault trace, with the strike of the
-trace there - or --x0 and --strike. --comp says what the data are: par
+trace there - or --x0 and --strike. --comp says what the data are (strike-
+slip; for reverse and normal faults see above and --comp below): par
 (fault-parallel velocity), ve / vn (east / north velocity), los (line-of-
-sight velocity) or as-is (fitted as they are); the first three are turned
-into fault-parallel velocity assuming purely fault-parallel motion (no
-vertical, no fault-normal motion). Then S > 0 is right-lateral, and the
-sense of slip is written out. By default (auto) a LOS velocity whose line of
-sight is known becomes fault-parallel velocity by itself.
+sight velocity), vu (vertical velocity) or as-is (fitted as they are); ve,
+vn and los are turned into fault-parallel velocity assuming purely
+fault-parallel motion (no vertical, no fault-normal motion). Then S > 0 is
+right-lateral, and the sense of slip is written out. By default (auto) a LOS
+velocity whose line of sight is known becomes fault-parallel velocity by
+itself. The y axis says what is plotted: "Fault-parallel velocity (mm/yr)",
+or "LOS velocity (mm/yr)" (the LOS fitted as it is); for a reverse or normal
+fault "Fault vertical velocity", "Fault-normal velocity" or "LOS velocity".
 
 The line of sight of every pixel is found next to the data: MintPy's
 geometryGeo.h5 / geometryRadar.h5, LiCSBAS's GEOCml*/E.geo, N.geo, U.geo (for
@@ -1316,8 +1357,30 @@ examples:
   viewinsar model geo_vpar.h5 --comp par --strike 100 --rot 0.0215 \\
       --d1-prior 17 5 --noise 6.35 35.8
 
+  # a reverse fault, from the vertical velocity (asc + desc decomposed): the
+  # dip free between 10 and 45 degrees, dipping towards A' (the end of the line)
+  viewinsar model reverse geo_vu.h5 --comp vu --fault faults.shp --dip 10 45
+
+  # a normal fault from the east and the vertical velocity together, a panel
+  # each, dipping towards A; the GNSS across the fault (--vel perp, the default)
+  viewinsar model normal geo_ve.h5 geo_vu.h5 --comp ve vu --fault faults.shp \\
+      --dip-toward start --gnss gnss.csv
+
+  # a thrust (= reverse) seen by two tracks, each LOS as it is, the dip fixed
+  viewinsar model thrust T014A/geo_velocity.h5 T123D/geo_velocity.h5 --comp los \\
+      --fault faults.shp --labels T014A T123D --dip 25
+
+  # the creep: its rate and depth in the model, and its rate from the offset of
+  # two lines +/-5 km either side of the fault - ascending and descending
+  # together, the offsets split into fault-parallel and vertical
+  viewinsar model T014A/geo_velocity.h5 T123D/geo_velocity.h5 --comp los \\
+      --fault faults.shp --labels T014A T123D --creep --creep-offset
+  viewinsar model geo_velocity.h5 --comp los --fault faults.shp --creep \\
+      --creep-offset 3 2      # lines 3 km long, pixels within 2 km of the line
+
 mouse / keyboard: as `viewinsar swath` - two left clicks draw a section (and
-fit it), "=" starts another, "n" redoes the current one, "e" exports.
+fit it), "=" starts another, "n" redoes the current one, "e" exports; "l" on a
+profile moves its legend: inside, outside, off, in turn.
 
 output (written by "e" or --save, into the --save folder - made if it does not
 exist - or --outdir, else the current folder), for each section X, named after
@@ -1327,6 +1390,12 @@ its line, e.g. model_A_Y470X150_Y130X700_w25km:
   <name>_params.csv      every parameter: MAP, median, the 95 % range (2.5 and
                          97.5 percentiles: lower_95, upper_95),
                          and the shear strain rate at the fault |S| / (pi d1)
+                         - reverse / normal: h_rate and v_rate, S cos(dip) and
+                         S sin(dip) (shortening / extension, uplift /
+                         subsidence);
+                         --creep-offset: C_offset (C_offset_1, _2 ... per file;
+                         C_offset_par and U_offset, split) - the offset of the
+                         lines, the median and 95 % range of the bootstrap
   <name>_params.txt      the same, readable, with the fault position, strike,
                          sense of slip, noise, priors and sampler diagnostics
   <name>_samples.csv     posterior samples, for plots of your own
@@ -1338,13 +1407,82 @@ its line, e.g. model_A_Y470X150_Y130X700_w25km:
   model_sections_AB.csv  two sections or more: one row each - its ends, where
                          it crosses the fault, the strike, the sense of slip,
                          S, d1 (C, d2, x0) and the strain with their 95 % ranges
+                         (reverse / normal: S, d1, dip, x0, h_rate, v_rate)
 
 map options: anything not listed above goes to view.py, as for `viewinsar swath`
 (--colormap --vlim --unit --mask --sub-lat --sub-lon ...).
 """
 
 
-def create_model_parser(prog=f'{PROG} model'):
+# viewinsar model strike|reverse|normal: the fault type, the first word
+FAULT_TYPES = {'strike': 'strike', 'strike-slip': 'strike', 'strikeslip': 'strike',
+               'reverse': 'reverse', 'thrust': 'reverse', 'normal': 'normal'}
+MODEL_COMPS = ('auto', 'as-is', 'par', 've', 'vn', 'los', 'vu')
+DIP_SLIP_COMPS = ('auto', 'vu', 've', 'vn', 'los')     # reverse, normal
+DIP_SLIP_GNSS = ('perp', 'vu')
+# options of one kind of fault only: (option, what it is for)
+STRIKE_ONLY = {'--creep': 'shallow creep', '--creep-offset': 'the creep offset',
+               '--rot': 'the rotation term', '--rot-side': 'the rotation term',
+               '--strain': 'the shear strain rate', '--c-max': 'the creep rate',
+               '--d2-max': 'the creep depth'}
+DIP_SLIP_ONLY = {'--dip': 'the dip', '--dip-toward': 'the dip direction'}
+
+
+def split_fault_type(argv):
+    """`viewinsar model reverse FILE ...`: the fault type (strike, reverse,
+    normal - thrust is reverse), and the arguments after it; strike when the
+    first word is none of them."""
+    argv = list(argv)
+    if argv and str(argv[0]).lower() in FAULT_TYPES:
+        return FAULT_TYPES[str(argv[0]).lower()], argv[1:], True
+    return 'strike', argv, False
+
+
+def _glue_values(argv, option, accept, most=None):
+    """`--comp ve vu FILE ...`: the values after `option` that `accept` takes
+    (at most `most`), glued to it - `--comp=ve,vu` - so the files after them
+    stay inputs."""
+    out, i = [], 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok == option:
+            j, values = i + 1, []
+            while j < len(argv) and (most is None or len(values) < most) and accept(argv[j]):
+                values.append(argv[j])
+                j += 1
+            if values:
+                out.append(f'{option}=' + ','.join(values))
+                i = j
+                continue
+        out.append(tok)
+        i += 1
+    return out
+
+
+def _is_number(text):
+    try:
+        float(text)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def model_argv(argv):
+    """The arguments of `model` after its fault type, as its parser takes
+    them: the values of --comp and --dip glued to them (--comp=ve,vu), so the
+    files after them stay inputs; --save, --cmap-prof ... bare before a file."""
+    argv = _glue_values(argv, '--comp', lambda tok: str(tok).lower() in MODEL_COMPS)
+    argv = _glue_values(argv, '--dip', _is_number, most=2)
+    return _bare_save(argv)
+
+
+def given_options(argv, options):
+    """Those of `options` that the command line gives (--opt or --opt=...)."""
+    return [opt for opt in options
+            if any(tok == opt or str(tok).startswith(opt + '=') for tok in argv)]
+
+
+def create_model_parser(prog=f'{PROG} model [strike|reverse|normal]'):
     """The argument parser of the `model` sub-command."""
     parser = ViewinsarParser(
         prog=prog, description=MODEL_DESCRIPTION, epilog=MODEL_EXAMPLE,
@@ -1436,18 +1574,30 @@ def create_model_parser(prog=f'{PROG} model'):
                      help='line width of the traces on the map (default: %(default)s).')
 
     data = parser.add_argument_group('Data', 'what the data are')
-    data.add_argument('--comp', dest='comp', default='auto',
-                      choices=['auto', 'as-is', 'par', 've', 'vn', 'los'],
-                      help='auto (default): los when the LOS geometry of every file\n'
-                           'is known - found, --geom, --los-inc / --los-az; not the\n'
-                           'nominal angles of a name - and no file is named as a\n'
-                           'component (hz, up, east, ve ...); else as-is, and the\n'
-                           'GNSS --vel los (or the component of the name). as-is:\n'
-                           'fitted as they are (LOS data: rates "in the LOS"); par:\n'
-                           'fault-parallel velocity; ve / vn: east / north velocity,\n'
-                           'divided by sin / cos(strike); los: LOS velocity, divided\n'
-                           'by the LOS . strike direction, pixel by pixel. ve, vn\n'
-                           'and los assume fault-parallel motion only.')
+    data.add_argument('--comp', dest='comp', default='auto', nargs='+', metavar='COMP',
+                      help='what the data are - one for all the files, or one per\n'
+                           'file (reverse / normal: --comp ve vu ve.h5 vu.h5).\n'
+                           'strike (one for all): auto (default) - los when the LOS\n'
+                           'geometry of every file is known (found, --geom,\n'
+                           '--los-inc / --los-az; not the nominal angles of a name)\n'
+                           'and no file is named as a component (hz, east, ve ...),\n'
+                           'else as-is, and the GNSS --vel los (or the component of\n'
+                           'the name); as-is: fitted as they are (LOS data: rates "in\n'
+                           'the LOS"); par: fault-parallel velocity; ve / vn: east /\n'
+                           'north velocity, divided by sin / cos(strike); los: LOS\n'
+                           'velocity, divided by the LOS . strike direction, pixel\n'
+                           'by pixel. ve, vn and los assume fault-parallel motion\n'
+                           'only; the y axis says "Fault-parallel velocity (mm/yr)",\n'
+                           '"LOS velocity (mm/yr)" (the LOS as it is).\n'
+                           'reverse / normal: vu - the vertical velocity ("Fault\n'
+                           'vertical velocity"); ve / vn - the east / north velocity,\n'
+                           'divided by the east / north of the fault normal: the\n'
+                           'motion across the fault, assuming none along it ("Fault-\n'
+                           'normal velocity", + towards the end of the profile); los\n'
+                           '- the LOS as it is, the model seen through the line of\n'
+                           'sight of the file; auto (default) - by the file name (up,\n'
+                           'vu, vertical; east, ve; north, vn), else los. A panel per\n'
+                           'component, the model in each.')
     data.add_argument('--geom', dest='geom_file', nargs='+', metavar='PATH',
                       help='the LOS geometry, one per input file in order: MintPy\'s\n'
                            'geometryGeo.h5, LiCSBAS\'s E.geo, N.geo, U.geo (a GEOCml*\n'
@@ -1469,7 +1619,28 @@ def create_model_parser(prog=f'{PROG} model'):
     mod = parser.add_argument_group('Model', 'the parameters and their uniform priors')
     mod.add_argument('--creep', dest='creep', action='store_true',
                      help='add shallow creep: C (rate) from the surface down to d2\n'
-                          '(depth), d2 <= d1, in the same sense as S.')
+                          '(depth), d2 <= d1, in the same sense as S - as Hussain et\n'
+                          'al. (2016): written on the profile with their 95 %% ranges,\n'
+                          'and the MAP model without the creep dotted.')
+    mod.add_argument('--creep-offset', dest='creep_offset', type=float, nargs='*',
+                     metavar='KM',
+                     help='the creep rate straight from the data, as Hussain et al.\n'
+                          '(2016): a straight line through the pixels within KM of\n'
+                          'the fault (default 5) on each side, both within WIDTH of\n'
+                          'the profile line (--creep-offset KM WIDTH, default 2.5 km),\n'
+                          'and their offset at the fault, its 95 %% range by bootstrap\n'
+                          '(the pixels taken as independent). LOS of an ascending and\n'
+                          'a descending track: split into fault-parallel and vertical.\n'
+                          'Drawn on the profile; with --creep or without.')
+    mod.add_argument('--dip', dest='dip_range', nargs='+', metavar='DEG',
+                     help='reverse / normal: the dip of the fault, in degrees from\n'
+                          'the horizontal - one value: fixed (--dip 30); two: the\n'
+                          'range of its uniform prior (--dip 10 45; default: 5 85).')
+    mod.add_argument('--dip-toward', dest='dip_toward', default='end',
+                     choices=['end', 'start'],
+                     help="reverse / normal: the side the fault dips towards - end\n"
+                          "(default: towards A', x > 0; the hanging wall on that\n"
+                          'side) or start (towards A).')
     mod.add_argument('--free-x0', dest='free_x0', type=float, nargs='?', const=5.0,
                      metavar='KM',
                      help='fit the fault position too, within +/-KM of it\n'
@@ -1482,7 +1653,8 @@ def create_model_parser(prog=f'{PROG} model'):
                      help="the side of --rot: end (default, towards A', x > 0) or\n"
                           'start (towards A, x < 0).')
     mod.add_argument('--s-max', dest='s_max', type=float, metavar='NUM',
-                     help='|S| <= NUM (default: 60 mm/yr).')
+                     help='|S| <= NUM (default: 60 mm/yr; reverse / normal: the slip\n'
+                          'rate along the dip, 0 <= S <= NUM).')
     mod.add_argument('--d1-max', dest='d1_max', type=float, default=60.0, metavar='KM',
                      help='0.1 <= d1 <= KM (default: %(default)s).')
     mod.add_argument('--c-max', dest='c_max', type=float, default=30.0, metavar='NUM',
@@ -1517,11 +1689,15 @@ def create_model_parser(prog=f'{PROG} model'):
                           '--gnss-width of the line are fitted with an offset of\n'
                           'their own, and drawn in blue with their 1-sigma.')
     gns.add_argument('--vel', dest='gnss_comp', nargs='+',
-                     choices=['par', 've', 'vn', 'vu', 'los'], metavar='COMP',
-                     help='the GNSS component that matches the data, one of par ve\n'
-                          'vn vu los (default: par, fault-parallel, from ve and vn;\n'
-                          'los when --comp auto fits LOS data as they are). One only:\n'
-                          'it is fitted with the data. --comp as-is needs it.')
+                     choices=['par', 'perp', 've', 'vn', 'vu', 'los'], metavar='COMP',
+                     help='the GNSS component that matches the data, one of par perp\n'
+                          've vn vu los. strike: default par, fault-parallel, from\n'
+                          've and vn (los when --comp auto fits LOS data as they\n'
+                          'are); --comp as-is needs it. reverse / normal: perp -\n'
+                          'across the fault, from ve and vn (default with ve / vn\n'
+                          'data, or LOS only: then a panel of their own) - or vu\n'
+                          '(default with vu data only). One only: it is fitted with\n'
+                          'the data.')
     gns.add_argument('--gnss-unit', dest='gnss_unit', default='auto',
                      choices=['auto', 'mm/yr', 'cm/yr', 'm/yr'],
                      help='unit of the GNSS file (default: auto).')
@@ -1540,9 +1716,23 @@ def create_model_parser(prog=f'{PROG} model'):
     look.add_argument('--cmap-prof', dest='cmap_prof', nargs='?', const='viridis',
                       metavar='CMAP',
                       help='draw the pixels as a point DENSITY in this colormap, as\n'
-                           'swath does (alone: viridis) - with the 95 %% range in red\n'
-                           'and bigger medians, and no points. Default: the pixels\n'
-                           'as red points, the 95 %% range grey (Hussain et al.).')
+                           'swath does (alone: viridis) - the 95 / 68 %% ranges red,\n'
+                           'the medians big, the GNSS red, no points. Default: as\n'
+                           'Hussain et al. (2016, Izmit, Fig. 9) - light red points,\n'
+                           'the 95 / 68 %% ranges dark / light grey, the GNSS black.')
+    look.add_argument('--bands', dest='bands', type=float, nargs=2, default=[95.0, 68.0],
+                      metavar=('OUTER', 'INNER'),
+                      help='the two ranges of the model shaded, in %% (default: 95 68 -\n'
+                           'the 68 %% range is +/- 1 sigma, as Hussain et al.).')
+    look.add_argument('--legend', dest='model_legend', nargs='?', const='auto',
+                      default='auto', choices=['auto', 'in', 'out', 'off'], metavar='WHERE',
+                      help='the legend: auto (default) inside the plot where it hides\n'
+                           'nothing, else outside, on the right; in: inside anyway\n'
+                           '(room made for it); out: outside, on the right; off: none.\n'
+                           'On the profile, "l" moves it: in, out, off, in turn.')
+    look.add_argument('--medians', dest='show_medians', action='store_true',
+                      help='draw the median of each bin, +/- 1 sigma, over the points\n'
+                           '(always on a --cmap-prof density).')
     look.add_argument('--max-points', dest='max_points', type=int, default=200000,
                       metavar='NUM',
                       help='draw at most NUM pixels as points, a random subset\n'
@@ -1601,6 +1791,21 @@ def _parse_noise(values):
 
 def check_model_gnss(inps):
     """The GNSS component that matches --comp (inps: the options, or the viewer)."""
+    fault = getattr(inps, 'fault_type', 'strike')
+    if fault != 'strike':
+        comps = list(getattr(inps, 'comps', None) or [inps.comp])
+        if inps.gnss_comp is None:    # across the fault: GNSS horizontals are the good ones
+            inps.gnss_comp = ('vu' if 'vu' in comps and not {'ve', 'vn'} & set(comps)
+                              else 'perp')
+        elif inps.gnss_comp not in DIP_SLIP_GNSS:
+            raise ValueError(f'viewinsar model {fault}: --vel {inps.gnss_comp} - the GNSS of a '
+                             'reverse or normal fault are perp (across the fault, from ve and '
+                             'vn) or vu (vertical)')
+        return inps
+    if inps.gnss_comp == 'perp':
+        raise ValueError('--vel perp: the GNSS across the fault are for a reverse or a normal '
+                         'fault (viewinsar model reverse|normal ...); a strike-slip one moves '
+                         'along it: --vel par')
     if inps.gnss_comp is None:
         if inps.gnss_file and inps.comp == 'as-is':
             raise ValueError('--comp as-is: say which GNSS component matches the data with '
@@ -1616,19 +1821,92 @@ def check_model_gnss(inps):
     return inps
 
 
+def check_model_comps(inps, given):
+    """--comp of `viewinsar model strike|reverse|normal`: one for all the
+    files or one per file; inps.comps, one per file, and inps.comp - the one,
+    or 'mixed'. `given`: the options on the command line."""
+    fault, n_file = inps.fault_type, len(inps.file)
+    given_comp = inps.comp if isinstance(inps.comp, str) else ','.join(inps.comp)
+    comps = [c for c in re.split(r'[,\s]+', given_comp.strip().lower()) if c]
+    for c in comps:
+        if c not in MODEL_COMPS:
+            raise ValueError(f'--comp: {c} is not a component - one of '
+                             + ', '.join(MODEL_COMPS))
+    if len(comps) not in (1, n_file):
+        raise ValueError(f'--comp: {len(comps)} components for {n_file} input file(s) - one '
+                         'for all, or one per file')
+    for word in inps.file:            # the fault type, put after the options
+        if word.lower() in FAULT_TYPES and not os.path.exists(word):
+            raise ValueError(f'{word}: the fault type comes first - viewinsar model '
+                             f'{FAULT_TYPES[word.lower()]} FILE ... [options]')
+    if fault == 'strike':
+        if len(set(comps)) > 1:
+            raise ValueError(f'--comp {" ".join(comps)}: a strike-slip fault takes ONE --comp '
+                             'for all the files - they all become fault-parallel velocity. One '
+                             'per file is for reverse and normal faults')
+        if comps[0] == 'vu':
+            raise ValueError('--comp vu: the vertical velocity tells of a reverse or a normal '
+                             'fault, not of a strike-slip one - viewinsar model reverse --comp vu '
+                             '... (or normal); --comp as-is fits it as it is anyway')
+        inps.comp, inps.comps = comps[0], [comps[0]] * n_file
+        wrong = given_options(given, DIP_SLIP_ONLY)
+        if wrong:
+            raise ValueError(f'{wrong[0]}: {DIP_SLIP_ONLY[wrong[0]]} of a reverse or a normal '
+                             f'fault - viewinsar model reverse|normal ... {wrong[0]}')
+        inps.dip_range = (5.0, 85.0)
+        return inps
+    for c in comps:
+        if c not in DIP_SLIP_COMPS:
+            raise ValueError(f'viewinsar model {fault}: --comp {c} - a {fault} fault is fitted '
+                             'to vu (the vertical velocity), ve / vn (the east / north velocity: '
+                             'the motion across the fault) or los (the LOS as it is), one per '
+                             'file - or auto (by the file name, else los)')
+    wrong = given_options(given, STRIKE_ONLY)
+    if wrong:
+        raise ValueError(f'{wrong[0]}: {STRIKE_ONLY[wrong[0]]} is for a strike-slip fault '
+                         f'(viewinsar model strike ...), not a {fault} one')
+    inps.comps = comps * n_file if len(comps) == 1 else comps
+    inps.comp = inps.comps[0] if len(set(inps.comps)) == 1 else 'mixed'
+    # the dip: fixed, or the range of its prior
+    given_dip = (inps.dip_range if isinstance(inps.dip_range, (str, type(None)))
+                 else ','.join(inps.dip_range))
+    values = ([5.0, 85.0] if given_dip is None
+              else [v for v in re.split(r'[,\s]+', given_dip.strip()) if v])
+    try:
+        values = [float(v) for v in values]
+    except ValueError:
+        raise ValueError(f'--dip: one angle (fixed) or two (a range), in degrees; got '
+                         f'{given_dip}') from None
+    if len(values) not in (1, 2) or not all(0 < v <= 90 for v in values):
+        raise ValueError(f'--dip: one angle (fixed) or two (a range), each above 0 and at most '
+                         f'90 degrees; got {" ".join(f"{v:g}" for v in values)}')
+    inps.dip_range = (min(values), max(values))
+    return inps
+
+
 def model_cmd_line_parse(iargs=None):
     """Parse the `model` arguments; unknown ones are forwarded to view.py."""
     iargs = _argv(iargs, 'model')
+    fault_type, rest, named = split_fault_type(iargs)
     parser = create_model_parser()
-    inps, view_extra = parser.parse_known_args(args=_bare_save(iargs))
+    inps, view_extra = parser.parse_known_args(args=model_argv(rest))
     inps.argv = list(iargs)
+    inps.fault_type = fault_type
+    if named and inps.print_msg:
+        print(f'model: a {fault_type} fault' + {
+            'strike': ' - the arctan of Savage & Burford (1973)',
+            'reverse': ' - a dislocation dipping into the crust, slipping up-dip below d1',
+            'normal': ' - a dislocation dipping into the crust, slipping down-dip below '
+                      'd1'}[fault_type])
     inps.view_extra = view_extra
+    check_model_comps(inps, rest)
     if isinstance(inps.gnss_comp, list):
         comps = list(dict.fromkeys(inps.gnss_comp))
         if len(comps) > 1:
             raise ValueError(f'--vel {" ".join(comps)}: model fits ONE GNSS component with '
                              'the data - the one that matches them (par, ve, vn, vu or '
-                             'los). Several at once are for swath.')
+                             'los; perp or vu for a reverse or normal fault). Several at once '
+                             'are for swath.')
         inps.gnss_comp = comps[0]
 
     check_save_options(inps)
@@ -1663,11 +1941,26 @@ def model_cmd_line_parse(iargs=None):
         raise ValueError(f'--max-points must be positive, got {inps.max_points}')
     if inps.cmap_prof:
         check_colormap(inps.cmap_prof, '--cmap-prof')
+    if inps.creep_offset is not None:
+        values = list(inps.creep_offset)
+        if len(values) > 2:
+            raise ValueError(f'--creep-offset takes KM and WIDTH at most, got {values}')
+        km, width = (values + [5.0, 2.5][len(values):])[:2]
+        if km <= 0 or width <= 0:
+            raise ValueError(f'--creep-offset: KM and WIDTH must be positive, got {km} {width}')
+        inps.creep_offset = (float(km), float(width))
     inps.noise = _parse_noise(inps.noise)
+    outer, inner = inps.bands
+    if not 0 < inner < outer < 100:
+        raise ValueError(f'--bands OUTER INNER: 0 < INNER < OUTER < 100, got {outer:g} {inner:g}')
 
     # the GNSS component must match the data (--comp auto: once it is settled)
-    if inps.comp != 'auto':
+    if 'auto' not in inps.comps:
         check_model_gnss(inps)
+    elif inps.gnss_comp is not None and (
+            inps.gnss_comp not in DIP_SLIP_GNSS if inps.fault_type != 'strike'
+            else inps.gnss_comp == 'perp'):
+        check_model_gnss(inps)        # wrong whatever the data are: said now
 
     # what the shared machinery of the swath viewer expects to find
     for key, value in dict(bin_x=inps.bin_km, bin_y=None, ylim=None, x_offset=0.0, cmin=1.0,
@@ -2171,35 +2464,46 @@ stat - the two sides of a fault: block 1 against block 2
 model - slip rate and locking depth from profiles across a fault
 {rule}
   The pixels of a swath against their distance from the fault, binned (--bin km),
-  and an elastic dislocation fitted by MCMC (the Goodman & Weare sampler), as
-  Hussain et al. (2016, 2018):  v(x) = S/pi atan(x/d1) + a  (+ creep, rotation)
+  and an elastic dislocation fitted by MCMC (the Goodman & Weare sampler)
+  fault type    {prog} model [strike|reverse|normal] FILE ... - strike (the default):
+                v(x) = S/pi atan(x/d1) + a (+ creep, rotation), as Hussain et al.
+                (2016, 2018); reverse (thrust) / normal: a fault dipping at dip,
+                locked down to d1, slipping at S along its dip below (Savage 1983)
+                - --dip DEG [DEG], --dip-toward end|start; shortening / extension
+                S cos(dip), uplift / subsidence S sin(dip)
   profiles      as swath: two clicks, or up front --start-lalo / --end-lalo,
                 --profile (repeat it: A-A', B-B' ... each fitted on its own) and
                 --line-file (one per line)
   the fault     where the profile crosses --fault FILE, with its strike there; or
                 --x0 KM / --strike DEG
-  the data      --comp auto|los|par|ve|vn|as-is: auto (default) turns a LOS
-                velocity into fault-parallel velocity, pixel by pixel, when its
+  the data      strike: --comp auto|los|par|ve|vn|as-is - auto (default) turns a
+                LOS velocity into fault-parallel velocity, pixel by pixel, when its
                 line of sight is found (MintPy geometry, LiCSBAS E/N/U, LiCSAR
                 *.geo.E.tif), named by --geom or given by --los-inc / --los-az;
-                several files fitted together, each with an offset of its own
+                reverse / normal: --comp vu|ve|vn|los, one per file (--comp ve vu),
+                a panel each; several files fitted together, each with an offset
+                of its own
   the model     S and d1; --creep (C, d2), --free-x0 [KM], --rot / --rot-side,
                 --d1-prior MEAN SIGMA, --s-max --d1-max --c-max --d2-max,
                 --noise auto|white|SILL LENGTH
   the sampler   --walkers, --steps, --burn, --seed
   keys          as swath: left click x2 draws a profile and fits it | "=" another |
                 "n" redo the current one | "e" export
-  GNSS          --gnss FILE --vel par|ve|vn|vu|los, fitted with an offset of their own
-                (--gnss-nofit: shown only), --gnss-width
-  figures       the fit: the pixels as points, binned medians, GNSS, the MAP model
-                and its 95 % range, the parameters written on it as Hussain et al.
-                ("slip rate = 20 mm/yr (11 - 29, 95% CI), right-lateral", locking
-                depth in km, strain rate in µstrain/yr); --cmap-prof [CMAP]: the
-                pixels as a density instead, as swath (--nlook fills it in), the
-                95 % range red, bigger medians; --strain: dv/dx below,
-                --topoxsect: elevation; the posteriors as Hussain et al. (2016,
-                Fig. 9): every pair a jet 2D histogram, the marginals in blue, the
-                MAP in red - one of each per section
+  GNSS          --gnss FILE --vel par|ve|vn|vu|los (reverse / normal: perp|vu),
+                fitted with an offset of their own (--gnss-nofit: shown only),
+                --gnss-width
+  figures       the fit as Hussain et al. (2016, Izmit, Fig. 9): the pixels as
+                light red points, the MAP model a black line in its 95 / 68 %
+                ranges (dark / light grey), GNSS black, the fault a blue arrow,
+                A-A' boxed, the parameters in italics ("slip rate = 19 mm/yr
+                ( 9 - 28, 95% c.i. ), right-lateral", locking depth in km, strain
+                rate in µstrain/yr), the legend inside or beside it (--legend);
+                --medians adds the binned medians; --cmap-prof
+                [CMAP]: the pixels as a density instead, as swath (--nlook fills
+                it in), the ranges red, big medians, GNSS red; --strain: dv/dx
+                below, --topoxsect: elevation; the posteriors as Hussain et al.
+                (2016, central NAF, Fig. 9): every pair a jet 2D histogram, the
+                marginals in blue, the MAP in red - one of each per section
   output        model_<A>_...: .png, _posterior.png, _params.csv / .txt, _samples.csv,
                 _bins.csv, _points.csv, _gnss.csv; model_map_ABC.png, and
                 model_sections_ABC.csv (two sections or more: one row each)
@@ -2208,6 +2512,8 @@ model - slip rate and locking depth from profiles across a fault
                 {prog} model velocity.h5 --comp los --fault faults.shp --creep \\
                     --profile 40.2 33.1 41.3 33.4 --profile 40.3 33.9 41.4 34.2 \\
                     --nodisplay --save fits
+                {prog} model reverse geo_vu.h5 --comp vu --fault faults.shp --dip 10 45
+                {prog} model normal ve.h5 vu.h5 --comp ve vu --fault faults.shp
 
 {rule}
 tseries - time series, after LiCSBAS_plot_ts.py

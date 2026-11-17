@@ -6,6 +6,94 @@ the project uses [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-11-17
+
+### Added
+- **`viewinsar model reverse|normal`: faults that dip.** The fault type is
+  the first word - `strike` (the default, as before), `reverse` (or
+  `thrust`), `normal` - and each is its own model. A reverse or normal fault
+  is locked from the surface down to d1 and slips at S along its dip below
+  it, up the dip or down it: the back-slip model of Savage (1983), as Segall
+  (2010, eqs. 3.71-3.72) writes it, checked against Okada (1992). The dip is
+  fitted (`--dip 10 45`, the range of its prior; default 5 85) or fixed
+  (`--dip 30`), towards A' or A (`--dip-toward end|start`). Its data, one
+  `--comp` per file: `vu` (vertical), `ve` / `vn` (the east / north
+  velocity over the east / north of the fault normal: the motion across the
+  fault) or `los` (a line of sight as it is, the model seen through it) -
+  `viewinsar model reverse geo_vu.h5 --comp vu`, `viewinsar model normal
+  geo_ve.h5 geo_vu.h5 --comp ve vu`; `auto` goes by the file's name, else
+  LOS. A panel per component, the model in each, the parameters on the top
+  one: the slip rate with the fault type, the locking depth, `dip = 30° ( 27
+  – 33, 95% c.i. ), towards A'`, and the far-field rates of the hanging wall
+  - shortening and uplift, or extension and subsidence: S cos(dip) and S
+  sin(dip) (`h_rate`, `v_rate` in `_params.csv`, `_samples.csv` and
+  `model_sections_*.csv`). The strike follows the right-hand rule. GNSS:
+  `--vel perp` (across the fault, from ve and vn) or `--vel vu`; with no
+  file of their component they get a panel of their own. The options of a
+  strike-slip fault (`--creep`, `--creep-offset`, `--rot`, `--strain` ...)
+  are refused for a dipping one, and `--dip` for a strike-slip one.
+  `viewinsar.model.dip_slip` and `DipSlipModel`; `fit_profile(fault=...,
+  kinds=..., dip=..., toward=...)`.
+- **`model --creep-offset [KM [WIDTH]]`: the creep rate straight from the
+  data**, as Hussain et al. (2016) measured it along the North Anatolian
+  Fault - a straight line through the pixels on each side of the fault,
+  within KM (default 5) of it and WIDTH (default 2.5) km of the profile line,
+  each with its own slope; their offset at the fault, in the sense of the
+  slip, is the creep rate, its 95 % range from a bootstrap that resamples
+  each side on its own (the pixels taken as independent). Per file; with LOS
+  files of an ascending and a descending track the offsets are also split
+  into fault-parallel and vertical (least squares, draw by draw), so a
+  vertical step at the fault is not taken for creep. Drawn on the profile as
+  two orange lines, written with the parameters (`creep offset = 5.9 mm/yr
+  ( 4.6 – 7.3, 95% c.i. )`; split: `creep offset, fault-parallel = …` and
+  `vertical offset = …, A' side up`), in `_params.csv` (`C_offset`, `C_offset_1` …,
+  `C_offset_par`, `U_offset`), `_params.txt` and `model_sections_*.csv`.
+  Works with `--creep` or without; `--creep-offset` before a file takes the
+  defaults.
+- `model --creep` also draws the MAP model without the creep, dotted, so the
+  creep's share of the step at the fault shows.
+- `model --legend [auto|in|out|off]`: the legend goes inside the plot where it
+  hides nothing, else outside on the right - the figure grows to hold it, so
+  the plot keeps its size (auto); inside anyway (in); outside always (out);
+  none (off). On the profile, the **l** key moves it: inside, outside, off,
+  in turn, drawn again without a new fit (matplotlib's own "l", a log y axis,
+  is off there). `model --medians`: the median of each bin, ±1σ, over the
+  points.
+- `model`: the y axis says what is plotted: `Fault-parallel velocity
+  (mm/yr)` for par, ve, vn and los (all turned into it), and with as-is the
+  data as they are - `LOS velocity (mm/yr)`, or a component by the name of
+  its file (`East velocity` …); for a reverse or normal fault `Fault
+  vertical velocity`, `Fault-normal velocity` or `LOS velocity, <file>`.
+  Before, it said "Velocity" for anything as it is. With `--comp as-is` the
+  LOS is now taken as LOS data, as `auto` did: the rates are "in the LOS". A
+  file named as the vertical (`up`, `vu`, `vertical`) is a reverse or normal
+  fault's: `viewinsar model FILE` says so.
+- `model --bands OUTER INNER` (default 95 68): the two ranges of the model
+  shaded, in %.
+
+### Changed
+- **The `model` profile looks like Hussain et al. (2016, Izmit, Fig. 9)**:
+  - the pixels light red;
+  - the MAP model a black line in its 95 % (dark grey, 25 % transparent) and
+    68 % (light grey, 40 % transparent) ranges - 68 % is ±1σ;
+  - the GNSS black, outlined in white;
+  - the fault a blue arrow from below, with "Fault location" under it;
+  - the section `A-A'` boxed top left, the sides of the fault named at the
+    bottom corners (North / South);
+  - the parameters in italics, top right if they hide nothing there, written
+    as theirs: `slip rate = 19 mm/yr ( 9 – 28, 95% c.i. )`, each rounded to
+    its range, with the offset when there is one file;
+  - the axes labelled with what is plotted - `Fault-parallel velocity
+    (mm/yr)` … - and `Distance from fault (km)`.
+
+  Before it had red points, the binned medians, a bold dashed MAP model, a
+  grey 95 % range, a dotted fault, a boxed text and a title. Now there are no
+  medians (but on a density) and no title (the window's title says what it
+  did); the legend stays, inside or beside the plot. With `--cmap-prof` the
+  95 % and 68 % ranges are red and the **GNSS red**, outlined in white.
+- `model`: a box that would hide points makes room above or below the data
+  for itself only when that hides fewer.
+
 ## [0.5.5] - 2026-11-17
 
 ### Added
