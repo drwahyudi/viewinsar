@@ -342,12 +342,14 @@ def test_model_reverse_fault_from_the_vertical(dip_products, tmp_path):
     assert lines[0].startswith('slip rate = ') and lines[0].endswith(', reverse')
     assert lines[2].startswith('dip = ') and "°" in lines[2] and lines[2].endswith("towards A'")
     assert lines[-2].startswith('shortening rate = ') and lines[-1].startswith('uplift rate = ')
-    # the sides named under the bottom panel, the fault marked in each
-    bottom = {a.get_text() for a in sec.ax_panels[-1].texts if isinstance(a, Annotation)}
-    top = [a for a in sec.ax_swath.texts if isinstance(a, Annotation)]
-    assert {'West', 'East', 'Fault location'} <= bottom
-    assert "A-A'" in {a.get_text() for a in top} and any(
-        a.get_text() == '' and a.arrow_patch is not None for a in top)
+    # A and A' over the top panel, the title; the fault dotted in each panel
+    top = {a.get_text() for a in sec.ax_swath.texts if isinstance(a, Annotation)}
+    assert {'A', "A'"} <= top
+    assert sec.ax_swath.get_title().startswith("A-A': swath ±10 km")
+    assert 'reverse fault dipping towards A\'' in sec.ax_swath.get_title()
+    for ax in sec.ax_panels:
+        assert [ln for ln in ax.get_lines() if ln.get_linestyle() == ':']
+        assert [ln for ln in ax.get_lines() if ln.get_linestyle() == '--']   # the MAP
     # the files: the rates, the samples, the GNSS
     params = _csv(next(out.glob('*_params.csv')))
     rows = {str(n): r for n, r in zip(params['name'], params)}

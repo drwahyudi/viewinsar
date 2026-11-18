@@ -696,36 +696,28 @@ with their 1-σ and an offset of their own (`ag`): their fault-parallel
 component, from `ve` and `vn` (`--vel` picks another one, to match
 `--comp as-is`). `--gnss-nofit` shows them without fitting them.
 
-**The profile** is drawn as Hussain et al. (2016, Izmit) drew theirs (their
-Fig. 9):
+**The figures**, after Hussain et al.: the pixels as points (red; a colour per
+file), the median of each bin with ±1σ (its robust spread), the GNSS in blue
+with their error bars (outlined in white), the MAP model as a bold dashed line
+in its **95 %** and **68 %** ranges (grey, 25 % and 40 % transparent - 68 %
+being ±1σ; `--bands 95 65` shades others), the fault dotted, `A` and `A'` in
+the top corners, and the parameters written in a box as Hussain et al. write
+them - `slip rate = 20.3 mm/yr (18.4 – 34.0, 95% CI), right-lateral`,
+`locking depth = 12.7 km (…)`, `creep rate` in mm/yr, `creep depth` in km,
+and the `strain rate` at the fault in µstrain/yr - placed where they hide the
+fewest points; the title gives the swath, the pixels and the strike. The
+slip rate is given as a rate with its sense; when its 95 % range crosses
+zero it keeps its sign (S > 0 right-lateral). Every file is shifted onto the
+offset of the first, the GNSS onto the InSAR. `--strain` adds the shear
+strain rate of the model, `dv/dx`, below; `--topoxsect` the topography.
 
-- the pixels as **light red points** (a colour per file);
-- the MAP model as a **black line**, in its **95 %** (dark grey, 25 %
-  transparent) and **68 %** (light grey, 40 % transparent) ranges - 68 % being
-  ±1σ, as Hussain et al.; `--bands 95 65` shades others;
-- the **GNSS black**, with their error bars, outlined in white;
-- the fault as a **blue arrow** from below, `Fault location` under it;
-- the section, `A-A'`, boxed top left, and the sides of the fault named at
-  the bottom corners (`North`, `South` …: the direction of the fault normal);
-- the parameters **in italics**, top right if they hide nothing there, as
-  Hussain et al. write them - `slip rate = 19 mm/yr ( 9 – 28, 95% c.i. ),
-  right-lateral`, `locking depth = 18 km ( 9 – 28, 95% c.i. )`, the offset
-  (one file), `creep rate`, `creep depth`, and the `strain rate` at the fault
-  in µstrain/yr, each rounded to the first digit of its range's half width.
-
-The **legend** goes inside the plot where it hides nothing; when the plot is
-too full for it, it goes **outside, on the right** (beyond the colour bar of
-a density), and the figure grows to hold it, so the plot keeps its size.
-`--legend in` keeps it inside anyway (making room for it), `--legend out`
-puts it outside always, `--legend off` leaves it out, as in Hussain et al.'s
-figure; on the profile, <kbd>l</kbd> moves it - inside, outside, off, in
-turn - without fitting again. There is no title: the window's title says what it used to (the
-pixels, the files, the strike). `--medians` draws the median of each bin
-with ±1σ (its robust spread) over the points. The slip rate is given as a rate with its sense; when its 95 %
-range crosses zero it keeps its sign (S > 0 right-lateral). Every file is
-shifted onto the offset of the first, the GNSS onto the InSAR. `--strain`
-adds the shear strain rate of the model, `dv/dx`, below; `--topoxsect` the
-topography.
+The **legend** goes inside the plot where it hides the least, room made for
+it; when the plot is too full for it, it goes **outside, on the right**
+(beyond the colour bar of a density), and the figure grows to hold it, so
+the plot keeps its size. `--legend in` keeps it inside anyway, `--legend
+out` puts it outside always, `--legend off` leaves it out; on the profile,
+<kbd>l</kbd> moves it - inside, outside, off, in turn - without fitting
+again.
 
 A second window holds the **posterior**, drawn as Hussain et al. (2016,
 central NAF, Fig. 9): every pair of parameters (*S*, *d₁*, the offset *a*, and *C*, *d₂*,
@@ -739,9 +731,8 @@ section, `A - A'`, white on black in the corner. The trade-off between *S* and
 `--cmap-prof CMAP` (alone: `viridis`) they are a **point density** instead,
 drawn as `viewinsar swath` draws its own - log colour scale, the densest
 cells white, a colour bar, cells half a `--bin` wide - with the 95 % and 68 %
-ranges in **red** over it (the 68 % darker), the medians drawn and **big**
-(white, a colour per file with several), the **GNSS red**, outlined in white,
-and no points:
+ranges in **red** over it, the medians **bigger** (white, a colour per file
+with several), the **GNSS red**, outlined in white, and no points:
 
 ```bash
 viewinsar model TS_GEOCml10GACOS/cum_filt.h5 --fault faults.shp --width 20 \
@@ -752,8 +743,8 @@ viewinsar model TS_GEOCml10GACOS/cum_filt.h5 --fault faults.shp --width 20 \
 points or the density - with N × N samples per pixel. **The fit always takes
 the real pixels**: interpolated samples are no new data. Before 0.5.5 they went
 into the fit, which made the 95 % ranges too narrow (in a test, half as wide
-with `--nlook 3`). The window's title says when the drawing is oversampled,
-and so does `_params.txt`.
+with `--nlook 3`). The title says when the drawing is oversampled, and so does
+`_params.txt`.
 
 **Creep: its rate and its depth.** Hussain et al. (2016) constrained the
 creep two ways, and `model` does both:
@@ -763,8 +754,8 @@ creep two ways, and `model` does both:
   the surface down to *d₂* ≤ *d₁*, under uniform priors (0 ≤ *C* ≤ 30 mm/yr,
   *d₂* ≤ 40 km: `--c-max`, `--d2-max`; Hussain et al.: 0-15 and 0-40 km at
   Izmit, 0-30 and 0-40 km in the centre). The profile says
-  `creep rate = 5.6 mm/yr ( 4.8 – 6.2, 95% c.i. )` and `creep depth = 5 km
-  ( 4 – 17, 95% c.i. )`, and draws the MAP model without the creep, dotted. The depth is the
+  `creep rate = 8.1 mm/yr (7.2 – 8.8, 95% CI)` and `creep depth = 5.5 km
+  (…)`, and draws the MAP model without the creep, dotted. The depth is the
   weakly resolved one: Hussain et al. found 6-9 km at the MAP but 95 % ranges
   of ~0-25 km, and creep down to 4, 8 or 12 km fitted Izmit within the noise.
   A prior on *d₁* (`--d1-prior 17 5`, theirs at Izmit) narrows it a little.
@@ -773,13 +764,12 @@ creep two ways, and `model` does both:
   (2.5) km of the profile line, each with its own slope; their offset at the
   fault is the creep rate, its 95 % range from 2000 bootstrap draws that
   resample each side on its own (Hussain et al. after Bekaert et al. 2015).
-  Drawn as two orange lines either side of the fault, and written with the
-  parameters.
+  Drawn as two orange lines either side of the fault, and written in the box.
   With an **ascending and a descending track** the LOS offsets are also
   **split into fault-parallel and vertical**, by least squares and draw by
   draw: Hussain et al. did this at Izmit, where the subsidence of the
   Adapazari basin added to the LOS step and had made an earlier creep rate
-  too high. The parameters then say `creep offset, fault-parallel = …` and
+  too high. The box then gives `creep offset, fault-parallel = …` and
   `vertical offset = +1.6 mm/yr (…), A' side up`.
 
 ```bash
@@ -847,13 +837,12 @@ viewinsar model thrust T014A/geo_velocity.h5 T123D/geo_velocity.h5 --comp los \
 Each component gets **a panel of its own**, stacked over one distance axis,
 with the model in each - the vertical and the horizontal of one fault, fitted
 together, pin the dip down; one component alone leaves *S* and the dip trading
-off (the posterior shows by how much). The parameters are written on the top
-panel, as Hussain et al. write them: `slip rate = 8.2 mm/yr ( 7.6 – 9.5, 95%
-c.i. ), reverse`, `locking depth`, `dip = 30° ( 27 – 33, 95% c.i. ), towards
-A'` (`(fixed)` with one `--dip`), the offset (one file), then `shortening
-rate` and `uplift rate` - `extension rate` and `subsidence rate` for a normal
-fault. The sides of the fault are named under the bottom panel, the fault
-marked in each.
+off (the posterior shows by how much). The box on the top panel gives
+`slip rate = 8.2 mm/yr (7.6 – 9.5, 95% CI), reverse`, `locking depth`, `dip =
+29.9° (27.4 – 33.0, 95% CI), towards A'` (`(fixed)` with one `--dip`), then
+`shortening rate` and `uplift rate` - `extension rate` and `subsidence rate`
+for a normal fault. `A` and `A'` and the title are over the top panel, the
+fault dotted in each.
 
 **The dip.** `--dip 30` fixes it; `--dip 10 45` is the range of its uniform
 prior (default 5 85). `--dip-toward end` (the default) has the fault dip
@@ -899,7 +888,6 @@ the fault type, *S*, *d₁*, the dip, *x₀* and both rates.
 | `--cmap-prof [CMAP]` | off: points | the pixels as a point density in CMAP (above) |
 | `--legend [WHERE]` | `auto` | the legend: `auto` inside where it hides nothing, else outside on the right; `in`, `out`, `off` (<kbd>l</kbd> on the profile) |
 | `--bands OUTER INNER` | `95 68` | the two ranges of the model shaded, % |
-| `--medians` | off | the median of each bin, ±1σ, over the points (always on a density) |
 | `--nlook` | `1` | oversample the picture (points or density), not the fit |
 | `--strain`, `--ylim`, `--max-points` | off, auto, 200000 | the figure |
 

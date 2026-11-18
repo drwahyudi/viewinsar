@@ -19,7 +19,6 @@ from viewinsar import model as mdl
 from viewinsar.modelview import (
     azimuth_of,
     ci_text,
-    compass_word,
     fault_normal,
     local_en,
     orient_strike,
@@ -382,19 +381,16 @@ def test_split_offsets_into_horizontal_and_vertical():
     assert mdl.split_offsets(los[:1], h[:1], u[:1]) is None
 
 
-def test_parameters_written_as_hussain():
-    """Hussain et al. (2016, Izmit, Fig. 9): '19 mm/yr ( 9 – 28, 95% c.i. )' -
-    rounded to the first digit of the half width of the range."""
-    assert ci_text(19.2, 9.1, 28.4, 'mm/yr') == '19 mm/yr ( 9 – 28, 95% c.i. )'
+def test_parameters_written_as_before():
+    """The parameters as the box writes them: '20.1 mm/yr (19.4 – 22.2, 95% CI)'
+    - a true minus sign, an angle in degrees."""
+    assert ci_text(20.14, 19.43, 22.21, 'mm/yr') == '20.1 mm/yr (19.4 – 22.2, 95% CI)'
     assert ci_text(-12.3, -16.2, -8.9, 'mm/yr') == \
-        '\u221212 mm/yr ( \u221216 – \u22129, 95% c.i. )'
-    assert ci_text(5.62, 4.71, 6.18, 'mm/yr') == '5.6 mm/yr ( 4.7 – 6.2, 95% c.i. )'
+        '\u221212.3 mm/yr (\u221216.2 – \u22128.9, 95% CI)'
     assert ci_text(0.514, 0.371, 0.549, 'µstrain/yr') == \
-        '0.51 µstrain/yr ( 0.37 – 0.55, 95% c.i. )'
-    assert ci_text(-0.3, -1.6, 1.2, 'km') == '0 km ( \u22122 – 1, 95% c.i. )'
-    assert ci_text(3.0, 3.0, 3.0, '') == '3.0 ( 3.0 – 3.0, 95% c.i. )'
-    assert [compass_word(a) for a in (0, 44, 91, 170, 200, 350)] == \
-        ['North', 'North-east', 'East', 'South', 'South', 'North']
+        '0.51 µstrain/yr (0.37 – 0.55, 95% CI)'
+    assert ci_text(29.87, 27.39, 32.95, 'deg') == '29.9° (27.4 – 33.0, 95% CI)'
+    assert ci_text(3.0, 3.0, 3.0, '') == '3.0 (3.0 – 3.0, 95% CI)'
 
 
 def test_geometry_helpers():
@@ -465,12 +461,11 @@ def test_model_options(products):
         cli.model_cmd_line_parse([asc, '--creep-offset', '4', '2', '1', '--noverbose'])
     with pytest.raises(ValueError, match='must be positive'):
         cli.model_cmd_line_parse([asc, '--creep-offset', '0', '--noverbose'])
-    # the legend: inside where it hides nothing, else beside (auto); no medians
-    # over the points unless asked
+    # the legend: inside, room made for it, else beside (auto); in, out, off
     plain = cli.model_cmd_line_parse([asc, '--noverbose'])
-    assert plain.model_legend == 'auto' and not plain.show_medians
-    asked = cli.model_cmd_line_parse([asc, '--legend', 'out', '--medians', '--noverbose'])
-    assert asked.model_legend == 'out' and asked.show_medians
+    assert plain.model_legend == 'auto'
+    asked = cli.model_cmd_line_parse([asc, '--legend', 'out', '--noverbose'])
+    assert asked.model_legend == 'out'
     assert cli.model_cmd_line_parse([asc, '--legend', '--noverbose']).model_legend == 'auto'
     bare = cli.model_cmd_line_parse(['--legend', asc, '--noverbose'])
     assert bare.model_legend == 'auto' and bare.file == [asc]
@@ -545,49 +540,52 @@ def test_model_end_to_end(products, tmp_path):
     samples = _csv(out / f'{base}_samples.csv')
     assert samples.dtype.names == ('S', 'd1', 'a', 'ag', 'strain')
 
-    # the window, as Hussain et al. (2016, Izmit, Fig. 9): light red points, the
-    # MAP a black line in its 95 % (dark grey) and 68 % (light grey) ranges, the
-    # GNSS black, A-A' boxed top left, North / South at the bottom corners, a blue
-    # arrow at the fault, the parameters in italics - no legend, no medians,
-    # no title (the window's title says what it did)
-    _check_hussain_look(sec)
+    # the window: red points, the medians, the MAP model in bold dashes and its
+    # 95 % and 68 % ranges, the GNSS blue, the fault dotted, A and A', the
+    # parameters in a box, the legend, the title; the strain panel
+    _check_look(sec)
     ax = sec.ax_swath
-    assert ax.get_title() == ''
+    assert ax.get_title().startswith("A-A': swath ±15 km") and 'GNSS' in ax.get_title()
     labels = [t.get_text() for t in ax.get_legend().get_texts()]
-    for label in ('InSAR', 'MAP model', '95% range', '68% range', 'GNSS', 'Fault location'):
+    assert labels[:3] == ['InSAR', 'Median per 1 km (±1σ)', 'MAP model']
+    for label in ('95% range', '68% range', 'GNSS', 'Fault'):
         assert label in labels, label
     _check_legend_clear(sec)
-    assert not [ln for ln in ax.get_lines() if ln.get_marker() == 'o' and ln.get_mfc() == 'w']
-    gnss = [ln for ln in ax.get_lines() if ln.get_marker() == 'o']
-    assert gnss and all(mcolors.to_hex(ln.get_mfc()) == '#000000' for ln in gnss)
-    assert all(ln.get_mec() == 'w' for ln in gnss)
+    gnss = [ln for ln in ax.get_lines() if ln.get_marker() == 'o' and ln.get_mec() == 'w']
+    assert gnss and all(mcolors.to_hex(ln.get_mfc()) == '#1f77b4' for ln in gnss)
     assert sec.info.startswith("A-A': swath ±15 km") and 'GNSS' in sec.info
     assert ax.get_ylabel() == 'Fault-parallel velocity (mm/yr)'
-    assert sec.ax_strain.get_xlabel() == 'Distance from fault (km)'
+    assert sec.ax_strain.get_xlabel() == 'Distance from the fault (km)'
+    strain = [ln for ln in sec.ax_strain.get_lines() if ln.get_linestyle() == '--']
+    assert len(strain) == 1
     assert sec.ax_strain is not None and sec.fig_post is not None
     _check_posterior(sec, ['S', 'd1', 'a'])
 
 
-def _check_hussain_look(sec, density=False):
-    """The profile as Hussain et al. (2016, Izmit, Fig. 9) draw it."""
+def _check_look(sec, density=False):
+    """The profile as viewinsar draws it: A and A' in the top corners, the
+    parameters in a box, the MAP model in bold black dashes in its 95 % and
+    68 % ranges (25 % and 40 % transparent; red on a density), the medians, the
+    fault dotted."""
     from matplotlib.collections import PolyCollection
     from matplotlib.offsetbox import AnchoredText
     from matplotlib.text import Annotation
 
     ax = sec.ax_swath
     notes = {a.get_text(): a for a in ax.texts if isinstance(a, Annotation)}
-    assert "A-A'" in notes and notes["A-A'"].get_bbox_patch() is not None
-    assert {'North', 'South'} <= set(notes)                    # the profile runs NNW-SSE
-    arrow = notes.get('Fault location') or notes.get('Fault location, fitted')
-    assert arrow is not None and arrow.arrow_patch is not None
+    assert {'A', "A'"} <= set(notes) and notes["A'"].get_bbox_patch() is not None
     texts = [a for a in ax.artists if isinstance(a, AnchoredText)]
     assert len(texts) == 1
     text = texts[0].txt._text
-    assert text.get_style() == 'italic' and '95% c.i. )' in text.get_text()
-    assert text.get_text().startswith('slip rate = ')
-    model = [ln for ln in ax.get_lines() if ln.get_linestyle() == '-' and ln.get_color() == 'k'
+    assert text.get_style() == 'normal' and '95% CI)' in text.get_text()
+    assert text.get_text().startswith('slip rate')
+    model = [ln for ln in ax.get_lines() if ln.get_linestyle() == '--' and ln.get_color() == 'k'
              and len(ln.get_xdata()) > 100]
-    assert len(model) == 1                                      # the MAP: a black line
+    assert len(model) == 1                                      # the MAP: bold dashes
+    assert [ln for ln in ax.get_lines() if ln.get_linestyle() == ':'
+            and len(ln.get_xdata()) == 2]                       # the fault, dotted
+    medians = [ln for ln in ax.get_lines() if ln.get_marker() == 'o' and ln.get_mec() != 'w']
+    assert medians
     polys = [c for c in ax.collections if isinstance(c, PolyCollection)]
     shades = [mcolors.to_hex(c.get_facecolor()[0]) for c in polys]
     assert shades == (['#d62728', '#d62728'] if density else ['#9e9e9e', '#dbdbdb'])
@@ -717,7 +715,7 @@ def test_model_creep_offset(tmp_path):
     # plot as wide (in inches) as ever
     labels = [t.get_text() for t in ax.get_legend().get_texts()]
     for label in ('asc', 'desc', 'MAP model', '95% range', '65% range', 'MAP without creep',
-                  'Offset lines, ±5 km', 'Fault location'):
+                  'Offset lines, ±5 km', 'Fault'):
         assert label in labels, label
     assert not _check_legend_clear(sec)                       # beside, not inside
     (_, home), = [(a, box) for a, box in sec.home if a is ax]
@@ -737,7 +735,7 @@ def test_model_density_view(products, tmp_path):
     args = [products['asc'], products['desc'], '--labels', 'T1A', 'T2D', '--comp', 'los',
             '-fault', products['fault'], '-gnss', products['gnss'], *PROFILE, *FAST,
             '--nodisplay', '--noverbose']
-    plain = cli.model_main([*args, '--medians', '--outdir', str(tmp_path / 'plain')])
+    plain = cli.model_main([*args, '--outdir', str(tmp_path / 'plain')])
     dense = cli.model_main([*args, '--cmap-prof', 'magma', '--nlook', '3',
                             '--outdir', str(tmp_path / 'dense')])
     sp, sd = plain.sections[0], dense.sections[0]
@@ -748,7 +746,7 @@ def test_model_density_view(products, tmp_path):
                 sp.result['summary'][name][key], rel=1e-9), (name, key)
     drawn = sum(f['x'].size for f in sd.fp_draw.values())
     assert drawn > 5 * sd.result['n_pixels'] and sp.fp_draw is None
-    assert '(drawn 3x oversampled)' in sd.info
+    assert '(drawn 3x oversampled)' in sd.ax_swath.get_title()
     assert 'oversampled what is drawn only' in next(
         (tmp_path / 'dense').glob('*_params.txt')).read_text()
     pts = _csv(next((tmp_path / 'dense').glob('*_points.csv')))
@@ -773,12 +771,12 @@ def test_model_density_view(products, tmp_path):
     assert 0.99 * drawn < mesh[0].get_array().sum() <= drawn
     assert not [c for c in ax.collections if isinstance(c, PathCollection)]
     assert bands(ax) == ['#d62728', '#d62728'] and bands(sp.ax_swath) == ['#9e9e9e', '#dbdbdb']
-    _check_hussain_look(sd, density=True)
-    _check_hussain_look(sp)
-    # --medians over the points; on a density they are twice the size
+    _check_look(sd, density=True)
+    _check_look(sp)
+    # the medians: on a density twice the size
     assert median_size(ax) > 1.8 * median_size(sp.ax_swath)
-    # the GNSS: red on a density, black on the points - outlined in white either way
-    assert gnss_face(ax) == {'#d62728'} and gnss_face(sp.ax_swath) == {'#000000'}
+    # the GNSS: red on a density, blue on the points - outlined in white either way
+    assert gnss_face(ax) == {'#d62728'} and gnss_face(sp.ax_swath) == {'#1f77b4'}
     assert sd.ax_cbar.get_ylabel().startswith('Point density')
     # the legend: the files first, the GNSS red in it too
     labels = [t.get_text() for t in ax.get_legend().get_texts()]
@@ -972,5 +970,5 @@ def test_help_mentions_model(capsys):
     for needle in ('--comp', '--creep', '--free-x0', '--d1-prior', '--noise', '--walkers',
                    '-gnss', '_posterior.png', '_samples.csv', 'Goodman & Weare',
                    'Hussain et al.', '--cmap-prof', 'point DENSITY', '--creep-offset',
-                   'bootstrap', '--legend', '--medians', 'Fault location'):
+                   'bootstrap', '--legend', '--bands'):
         assert needle in out, needle

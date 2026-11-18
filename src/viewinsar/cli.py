@@ -1268,20 +1268,18 @@ under uniform priors, with a noise covariance that decays with distance
 are fitted together, each with an offset of its own; GNSS (--gnss) too, with
 theirs.
 
-One window shows the profile as Hussain et al. (2016, Izmit, Fig. 9) draw it:
-the pixels as light red points, the maximum a posteriori (MAP) model as a
-black line in its 95 % (dark grey) and 68 % (light grey) ranges, the GNSS
-black, the fault as a blue arrow from below ("Fault location"), the section
-boxed top left, the sides of the fault named at the bottom corners, and the
-parameters in italics top right - "slip rate = 19 mm/yr ( 9 – 28, 95% c.i. )".
-The legend sits inside the plot where it hides nothing, else outside on the
-right (--legend). No medians (--medians: the median of each bin).
-A second window holds the posterior distributions, as Hussain et al. (2016,
-central NAF, Fig. 9): every pair of parameters as a 2D histogram (jet), the
-marginals as blue histograms along the bottom, the MAP in red.
+One window shows the points (no density: the pixels themselves, red), the
+binned medians, the GNSS (blue), the maximum a posteriori (MAP) model (bold
+dashes) and its 95 % and 68 % ranges (grey, --bands), with the parameters
+and their 95 % ranges written on it, and a legend - inside the plot, or
+beside it when the plot is too full for it (--legend; "l" on the profile:
+inside, outside, off, in turn); a second one the posterior distributions, as
+Hussain et al. (2016, central NAF, Fig. 9): every pair of parameters as a 2D
+histogram (jet), the marginals as blue histograms along the bottom, the MAP
+in red.
 With --cmap-prof CMAP the pixels are a point DENSITY in that colormap
-instead, as in swath (--nlook fills it in): the ranges red, the medians big,
-the GNSS red with a white outline.
+instead, as in swath (--nlook fills it in), under red ranges, with bigger
+medians and the GNSS red.
 
 Creep, as Hussain et al. (2016) constrained it, two ways: --creep fits the
 creep rate C and its depth d2 in the model (written on the profile, the MAP
@@ -1348,7 +1346,7 @@ examples:
       --fault faults.shp --labels T014A T123D
 
   # the pixels as a point density (as swath), filled in for ml10 data; the
-  # 95 % range red, bigger medians
+  # ranges red, bigger medians
   viewinsar model TS_GEOCml10GACOS/cum_filt.h5 --fault faults.shp --width 20 \\
       --cmap-prof magma --nlook 10
 
@@ -1385,7 +1383,7 @@ profile moves its legend: inside, outside, off, in turn.
 output (written by "e" or --save, into the --save folder - made if it does not
 exist - or --outdir, else the current folder), for each section X, named after
 its line, e.g. model_A_Y470X150_Y130X700_w25km:
-  <name>.png             the fit: points, bins, GNSS, MAP model, 95 % range
+  <name>.png             the fit: points, bins, GNSS, MAP model, 95 / 68 % ranges
   <name>_posterior.png   the posterior distributions, the MAP in red
   <name>_params.csv      every parameter: MAP, median, the 95 % range (2.5 and
                          97.5 percentiles: lower_95, upper_95),
@@ -1716,10 +1714,10 @@ def create_model_parser(prog=f'{PROG} model [strike|reverse|normal]'):
     look.add_argument('--cmap-prof', dest='cmap_prof', nargs='?', const='viridis',
                       metavar='CMAP',
                       help='draw the pixels as a point DENSITY in this colormap, as\n'
-                           'swath does (alone: viridis) - the 95 / 68 %% ranges red,\n'
-                           'the medians big, the GNSS red, no points. Default: as\n'
-                           'Hussain et al. (2016, Izmit, Fig. 9) - light red points,\n'
-                           'the 95 / 68 %% ranges dark / light grey, the GNSS black.')
+                           'swath does (alone: viridis) - with the 95 / 68 %% ranges in\n'
+                           'red, bigger medians and the GNSS red, and no points.\n'
+                           'Default: the pixels as red points, the ranges grey, the\n'
+                           'GNSS blue.')
     look.add_argument('--bands', dest='bands', type=float, nargs=2, default=[95.0, 68.0],
                       metavar=('OUTER', 'INNER'),
                       help='the two ranges of the model shaded, in %% (default: 95 68 -\n'
@@ -1727,12 +1725,10 @@ def create_model_parser(prog=f'{PROG} model [strike|reverse|normal]'):
     look.add_argument('--legend', dest='model_legend', nargs='?', const='auto',
                       default='auto', choices=['auto', 'in', 'out', 'off'], metavar='WHERE',
                       help='the legend: auto (default) inside the plot where it hides\n'
-                           'nothing, else outside, on the right; in: inside anyway\n'
-                           '(room made for it); out: outside, on the right; off: none.\n'
-                           'On the profile, "l" moves it: in, out, off, in turn.')
-    look.add_argument('--medians', dest='show_medians', action='store_true',
-                      help='draw the median of each bin, +/- 1 sigma, over the points\n'
-                           '(always on a --cmap-prof density).')
+                           'the least, room made for it - outside, on the right, when\n'
+                           'the plot is too full for it; in: inside anyway; out:\n'
+                           'outside, on the right; off: none. On the profile, "l"\n'
+                           'moves it: in, out, off, in turn.')
     look.add_argument('--max-points', dest='max_points', type=int, default=200000,
                       metavar='NUM',
                       help='draw at most NUM pixels as points, a random subset\n'
@@ -2492,15 +2488,13 @@ model - slip rate and locking depth from profiles across a fault
   GNSS          --gnss FILE --vel par|ve|vn|vu|los (reverse / normal: perp|vu),
                 fitted with an offset of their own (--gnss-nofit: shown only),
                 --gnss-width
-  figures       the fit as Hussain et al. (2016, Izmit, Fig. 9): the pixels as
-                light red points, the MAP model a black line in its 95 / 68 %
-                ranges (dark / light grey), GNSS black, the fault a blue arrow,
-                A-A' boxed, the parameters in italics ("slip rate = 19 mm/yr
-                ( 9 - 28, 95% c.i. ), right-lateral", locking depth in km, strain
-                rate in µstrain/yr), the legend inside or beside it (--legend);
-                --medians adds the binned medians; --cmap-prof
+  figures       the fit: the pixels as points, binned medians, GNSS, the MAP model
+                and its 95 / 68 % ranges (--bands), the parameters written on it as
+                Hussain et al. ("slip rate = 20 mm/yr (11 - 29, 95% CI), right-
+                lateral", locking depth in km, strain rate in µstrain/yr), the
+                legend inside or beside it (--legend; "l" moves it); --cmap-prof
                 [CMAP]: the pixels as a density instead, as swath (--nlook fills
-                it in), the ranges red, big medians, GNSS red; --strain: dv/dx
+                it in), the ranges red, bigger medians, GNSS red; --strain: dv/dx
                 below, --topoxsect: elevation; the posteriors as Hussain et al.
                 (2016, central NAF, Fig. 9): every pair a jet 2D histogram, the
                 marginals in blue, the MAP in red - one of each per section

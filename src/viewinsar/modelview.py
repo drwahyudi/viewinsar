@@ -3,11 +3,12 @@
 The map and the profile line work as in `viewinsar swath`. Every section gets
 a window with the pixels of its swath as points - fault-parallel velocity
 against the distance from the fault - their binned medians, the GNSS, and the
-maximum a posteriori (MAP) model with its 95 % range and the parameters
-written on the figure, after Hussain et al. (2016, 2018) and Ou et al. (2022);
-and a second window with the posterior distributions of the parameters.
-With --cmap-prof the pixels are a point density instead, as in swath, under a
-red 95 % range and bigger medians.
+maximum a posteriori (MAP) model with its 95 % and 68 % ranges and the
+parameters written on the figure, after Hussain et al. (2016, 2018) and Ou et
+al. (2022); and a second window with the posterior distributions of the
+parameters. With --cmap-prof the pixels are a point density instead, as in
+swath, under red ranges and bigger medians. A reverse or normal fault
+(`viewinsar model reverse|normal`) gets a panel per component of its data.
 
 The fit always takes the pixels as they are: --nlook oversamples what is
 drawn only - interpolated samples are no new data, and counted as such they
@@ -65,14 +66,12 @@ from .viewer import (
 __all__ = ['ModelViewer', 'ModelSection', 'azimuth_of', 'local_en', 'strike_of_points',
            'orient_strike', 'slip_sense', 'fault_normal']
 
-# The profile as Hussain et al. (2016, Izmit, Fig. 9) draw theirs
 POINT_COLORS = ('#d62728', '#9467bd', '#2ca02c', '#ff7f0e', '#8c564b', '#e377c2',
-                '#bcbd22', '#17becf')            # the pixels of each file, red first ...
-POINT_TINT = 0.4                                 # ... lightened: the cloud stays behind
-GNSS_COLOR = 'k'                                 # the GNSS black, outlined in white
+                '#bcbd22', '#17becf')            # the pixels of each file, red first
+GNSS_COLOR = '#1f77b4'                           # blue, as Hussain et al.
 GNSS_ON_DENSITY = '#d62728'                      # --cmap-prof: red, outlined in white
-MAP_COLOR = 'k'                                  # the MAP model: a black line
-BAND_COLOR = '0.62'                              # the 95 % range: dark grey ...
+MAP_COLOR = 'k'                                  # the MAP model: bold black dashes
+BAND_COLOR = '0.62'                              # the 95 % range: grey ...
 BAND_68 = '0.86'                                 # ... the 68 % range: light grey
 BAND_ALPHA = (0.75, 0.6)                         # ... 25 % and 40 % transparent
 # the y axis says what is plotted: fault-parallel velocity once the data are
@@ -90,18 +89,8 @@ NAMED_AS = {'up': 'vu', 'vert': 'vu', 'vertical': 'vu', 'vu': 'vu', 'east': 'eas
             'ew': 'east', 've': 'east', 'north': 'north', 'ns': 'north', 'vn': 'north',
             'hz': 'horizontal', 'horz': 'horizontal', 'horizontal': 'horizontal'}
 LEGEND_CYCLE = ('in', 'out', 'off')              # the "l" key, in turn
-FAULT_COLOR = '#1f4fe0'                          # the arrow under the fault, blue
-ARROW_TIP = 0.235                                # ... its tip, in axes fraction
-ARROW_SHORT = 0.13                               # ... over a panel without the words
-LABEL_FACE = '0.86'                              # the A-A' box, top left
 # --cmap-prof: the pixels as a density; the 95 % range red, as the points were
 DENSITY_BAND = '#d62728'
-# Times-like faces for the parameters (italic) and "Fault location" (bold), as
-# Hussain et al. set them: the first one installed - matplotlib ships STIX
-SERIF_FONTS = ('Times New Roman', 'Times', 'Nimbus Roman', 'Nimbus Roman No9 L',
-               'TeX Gyre Termes', 'Liberation Serif', 'STIXGeneral', 'DejaVu Serif')
-COMPASS = ('North', 'North-east', 'East', 'South-east', 'South', 'South-west', 'West',
-           'North-west')
 OFFSET_COLOR = '#ff7f0e'                         # --creep-offset: the two lines, orange
 POST_COLOR = '#d62728'                           # the MAP in the posterior plots
 HIST_COLOR, HIST_EDGE = '#1f4fd8', '#0a1f73'      # the marginal histograms, blue
@@ -206,45 +195,16 @@ def _fmt(value):
     return f'{value:.2f}' if abs(value) < 1 else f'{value:.1f}'
 
 
-def _decimals(lo, hi):
-    """The decimals that suit a 95 % range: to the first digit of its half
-    width, as Hussain et al. (2016) round - 19 (9 - 28), 5.6 (4.7 - 6.2)."""
-    half = abs(float(hi) - float(lo)) / 2.0
-    if not np.isfinite(half) or half <= 0:
-        return None
-    return int(np.clip(np.ceil(-np.log10(half)), 0, 4))
-
-
-def _val(value, decimals):
-    """A value to `decimals` (None: _fmt), with a true minus sign."""
-    if not np.isfinite(value):
-        return 'nan'
-    text = _fmt(value) if decimals is None else f'{value:.{decimals}f}'
-    if text.startswith('-') and float(text) == 0.0:
-        text = text[1:]
-    return text.replace('-', '\u2212')
+def _num(value):
+    """_fmt with a true minus sign, so a range reads (−10.7 – −2.7)."""
+    return _fmt(value).replace('-', '\u2212')
 
 
 def ci_text(value, lo, hi, unit=''):
-    """'19 mm/yr ( 9 – 28, 95% c.i. )' - a value and its 95 % range, written
-    as Hussain et al. (2016, Fig. 9) write them."""
-    dec = _decimals(lo, hi)
+    """'20.1 mm/yr (19.4 – 22.2, 95% CI)' - a value and its 95 % range; an
+    angle in degrees: '29.9° (27.4 – 33.0, 95% CI)'."""
     unit = '°' if unit in ('deg', '°') else (_unit_text(unit) if unit else '')
-    return f'{_val(value, dec)}{unit} ( {_val(lo, dec)} – {_val(hi, dec)}, 95% c.i. )'
-
-
-def serif_family():
-    """The first of SERIF_FONTS that is installed."""
-    global _SERIF
-    if _SERIF is None:
-        from matplotlib import font_manager
-
-        have = {f.name for f in font_manager.fontManager.ttflist}
-        _SERIF = next((name for name in SERIF_FONTS if name in have), 'serif')
-    return _SERIF
-
-
-_SERIF = None
+    return f'{_num(value)}{unit} ({_num(lo)} – {_num(hi)}, 95% CI)'
 
 
 def keep_default_keys(fig, keys):
@@ -265,17 +225,6 @@ def keep_default_keys(fig, keys):
     manager.key_press_handler_id = fig.canvas.mpl_connect('key_press_event', handler)
 
 
-def compass_word(azimuth):
-    """'North', 'South-east' ... for an azimuth in degrees."""
-    return COMPASS[int(np.round((float(azimuth) % 360.0) / 45.0)) % 8]
-
-
-def _tint(color, amount):
-    """`color` mixed with white: amount 0 is the colour, 1 white."""
-    rgb = np.asarray(mcolors.to_rgb(color))
-    return tuple(rgb + (1.0 - rgb) * amount)
-
-
 def _unit_text(unit):
     """' mm/yr', or '' for data without a unit."""
     unit = str(unit or '').strip()
@@ -292,17 +241,12 @@ def strain_unit(model_unit):
 
 class _Placer:
     """Puts boxes (the parameters, the legend) inside an axes where they hide
-    the fewest weighted points, clear of the marks already there (the A-A'
-    box, the sides of the fault, the fault arrow) and of each other - making
-    room above or below the data when every spot would hide some.
+    the fewest weighted points, clear of the A / A' labels and of each other -
+    making room above or below the data when every spot would hide some. An
+    upper spot is tried at the top of the axes and under each label there."""
 
-    An upper spot is tried at the top of the axes and under each mark at the
-    top, a lower one at the bottom and over each mark at the bottom. On a tie
-    the first spot wins: the upper right, where Hussain et al. (2016, Izmit,
-    Fig. 9) write their parameters."""
-
-    SPOTS = (('upper right', 0.988), ('upper left', 0.012), ('upper center', 0.5),
-             ('lower right', 0.988), ('lower left', 0.012), ('lower center', 0.5),
+    SPOTS = (('upper left', 0.012), ('upper right', 0.988), ('lower left', 0.012),
+             ('lower right', 0.988), ('upper center', 0.5), ('lower center', 0.5),
              ('center left', 0.012), ('center right', 0.988))
 
     def __init__(self, ax, xy, weights, labels=()):
@@ -380,6 +324,7 @@ class _Placer:
         data keep most of the panel."""
         budget = self.budget if budget is None else budget
         artist, best = self._best(make)
+        self.last = best
         if best is None:
             self.taken.append((0.0, self.top - 0.3, 0.5, self.top))
             return artist
@@ -421,6 +366,7 @@ class _Placer:
                 self.refresh()
                 artist, best = self._best(make)
         self.taken.append(best[3])
+        self.last = best
         return artist
 
 
@@ -497,9 +443,10 @@ class ModelSection(Section):
                   + ([1.1] if v.topoxsect else []))
         height = v.fig_size[1] + 3.0 * (n_data - 1) + 1.5 * (len(panels) - n_data)
         self.fig = _new_figure(f'Model {self.name}', [v.fig_size[0], height])
+        margin = 0.1 if n_data == 1 else 0.55 / height     # stacked panels: in inches
         gsp = self.fig.add_gridspec(len(panels), 1, height_ratios=panels, hspace=0.08,
                                     left=0.12, right=0.86 if v.cmap_prof else 0.97,
-                                    bottom=0.1, top=0.95)
+                                    bottom=margin, top=1.0 - margin)
         self.ax_panels = [self.fig.add_subplot(gsp[0])]
         self.ax_swath = self.ax_panels[0]
         for k in range(1, n_data):
@@ -549,7 +496,7 @@ class ModelSection(Section):
             cax.set_axis_off()
         for ax in axes[:-1]:
             ax.tick_params(labelbottom=False)
-        axes[-1].set_xlabel('Distance from fault (km)', fontsize=v.font_size + 1)
+        axes[-1].set_xlabel('Distance from the fault (km)', fontsize=v.font_size + 1)
         unit = _unit_text(v.model_unit).strip()
         for ax, spec in zip(panels, getattr(self, 'specs', None) or self.panel_specs()):
             if spec['kind'] is None:
@@ -948,11 +895,11 @@ class ModelSection(Section):
             out.append(f'creep offset{seen}{who} = '
                        + ci_text(one['rate'], one['lo'], one['hi'], v.model_unit))
         if sp is not None:
+            unit = _unit_text(v.model_unit)
             out.append('creep offset, fault-parallel = '
                        + ci_text(sp['par'], sp['par_lo'], sp['par_hi'], v.model_unit))
-            up = ci_text(sp['up'], sp['up_lo'], sp['up_hi'], v.model_unit)
-            out.append(f"vertical offset = {'+' if sp['up'] > 0 else ''}{up}, "
-                       f"{self.label}' side up")
+            out.append(f'vertical offset = {sp["up"]:+.2g}{unit} ({sp["up_lo"]:+.2g} – '
+                       f"{sp['up_hi']:+.2g}, 95% CI), {self.label}' side up")
         return out
 
     def offset_rows(self):
@@ -1100,15 +1047,13 @@ class ModelSection(Section):
         return pcm
 
     def draw_fit(self):
-        """The profile, as Hussain et al. (2016, Izmit, Fig. 9) draw theirs: the pixels
-        as a light red cloud (--cmap-prof: a density), the MAP model a black
-        line in its 95 % (dark grey) and 68 % (light grey) ranges, the GNSS
-        black (red on a density), the fault a blue arrow from below, the
-        section boxed top left, the parameters in italics top right, the sides
-        of the fault named at the bottom corners; the legend inside where it
-        hides nothing, else beside the plot (--legend); the binned medians on
-        a density, or with --medians. A reverse or normal fault: a panel per
-        component (across the fault, vertical, each LOS), the model in each."""
+        """The profile: the pixels as red points (--cmap-prof: a density), the
+        median of each bin with its spread, the MAP model as bold black dashes
+        in its 95 % and 68 % ranges, the GNSS (blue; red on a density), the
+        fault dotted, A and A' in the top corners, the parameters in a box and
+        the legend where they hide the fewest points - the legend beside the
+        plot when it is too full for it (--legend; the "l" key) - and a title.
+        A reverse or normal fault: a panel per component, the model in each."""
         v, res = self.v, self.result
         specs = getattr(self, 'specs', None) or self.panel_specs()
         axes = getattr(self, 'ax_panels', None) or [self.ax_swath]
@@ -1124,95 +1069,88 @@ class ModelSection(Section):
                 and bool(np.isfinite(gin['value']).any())):
             lo_x = min(lo_x, float(np.nanmin(gin['x'])))
             hi_x = max(hi_x, float(np.nanmax(gin['x'])))
-        if len(res['sets']) > 1:      # the files first in the legend, in their order
+        if len(res['sets']) > 1 and len(axes) > 1:    # the files first in the legend
             for k in res['sets']:
                 color = POINT_COLORS[k % len(POINT_COLORS)]
                 name = v.labels[self.fp[k]['file_idx']]
                 handles[name] = (
                     Line2D([], [], ls='', marker='o', ms=6, mfc=color, mec='k', mew=1.0,
                            label=name) if v.cmap_prof else
-                    Line2D([], [], ls='', marker='o', ms=4, color=_tint(color, POINT_TINT),
-                           label=name))
+                    Line2D([], [], ls='', marker='o', ms=4, color=color, label=name))
         panels = []
         for i, (ax, spec) in enumerate(zip(axes, specs)):
             panels.append(self.draw_panel(ax, spec, handles, (lo_x, hi_x), top=i == 0,
-                                          bottom=i == len(specs) - 1,
                                           cax=cbars[i] if i < len(cbars) else None))
         handles = list(handles.values())
         ax, first = axes[0], panels[0]
 
-        # the parameters, as Hussain et al. (2016, Fig. 9): "slip rate = 19 mm/yr
-        # ( 9 – 28, 95% c.i. )", in italics, top right if they hide nothing there
-        lines = self.parameter_lines()
-        placer = _Placer(ax, np.vstack(first['occupied']), np.concatenate(first['weights']),
-                         first['top_marks'] + first['bottom_marks'])
-        small = 5 if len(lines) > 6 else 4        # a long text: a size smaller
-        room = not v.model_ylim
+        # the A / A' ends, inside the top corners
+        kw = dict(xycoords='axes fraction', fontsize=v.font_size + 3, fontweight='bold',
+                  va='top', zorder=12, bbox=dict(boxstyle='round,pad=0.2', fc='w', ec='0.4',
+                                                 lw=0.6, alpha=0.85))
+        ends = [ax.annotate(self.label, xy=(0.012, 0.975), ha='left', **kw),
+                ax.annotate(f"{self.label}'", xy=(0.988, 0.975), ha='right', **kw)]
 
-        def make_text(loc, anchor):
-            align = {'left': 'left', 'right': 'right'}.get(loc.split()[-1], 'center')
+        # the parameters, as Hussain et al. (2016): "slip rate = 20 mm/yr (11 – 29, 95% CI)"
+        lines = self.parameter_lines()
+
+        # ... and the legend: each where it hides the least (points, bins,
+        # the model, the GNSS), never on the A / A' labels nor on each other
+        placer = _Placer(ax, np.vstack(first['occupied']), np.concatenate(first['weights']),
+                         ends)
+
+        def make_box(loc, anchor):
+            small = 5 if len(lines) > 6 else 4        # a long box: a size smaller
             box = AnchoredText('\n'.join(lines), loc=loc, bbox_to_anchor=anchor,
                                bbox_transform=ax.transAxes, borderpad=0.0, frameon=True,
-                               prop=dict(fontsize=max(v.font_size - small, 6),
-                                         family=serif_family(), style='italic',
-                                         multialignment=align))
-            # no frame - but white under the text, where it may cross a point
-            box.patch.set(boxstyle='square,pad=0.2', fc='w', ec='none', alpha=0.72)
+                               prop=dict(fontsize=max(v.font_size - small, 6)))
+            box.patch.set(boxstyle='round,pad=0.35', fc='w', ec='0.5', alpha=0.88)
             box.set_zorder(10)
             ax.add_artist(box)
             return box
 
-        def make_legend(ncol):
-            def make(loc, anchor):
-                return ax.legend(handles=handles, loc=loc, bbox_to_anchor=anchor,
-                                 bbox_transform=ax.transAxes, fontsize=max(v.font_size - 5, 6),
-                                 framealpha=0.88, handlelength=1.5, borderpad=0.35,
-                                 labelspacing=0.3, borderaxespad=0.0, ncol=ncol,
-                                 columnspacing=1.0)
-            return make
+        def make_legend(loc, anchor):
+            # a long legend in two columns: half as tall, so it finds a free spot
+            return ax.legend(handles=handles, loc=loc, bbox_to_anchor=anchor,
+                             bbox_transform=ax.transAxes, fontsize=max(v.font_size - 5, 6),
+                             framealpha=0.88, handlelength=1.5, borderpad=0.35,
+                             labelspacing=0.3, borderaxespad=0.0,
+                             ncol=2 if len(handles) > 6 else 1, columnspacing=1.0)
 
-        # the legend (--legend): inside where it hides nothing (auto), or anyway
-        # (in); beside the plot when the plot is too full for it (auto), or
-        # always (out); none (off)
+        room = not v.model_ylim
+        placer.place(make_box, room=room)
+        # the legend (--legend, the "l" key): inside where it hides the least
+        # (in; auto, unless it would hide data even so), beside the plot on the
+        # right (out; auto, the plot too full), or none (off)
         where = self.legend_where or getattr(v, 'model_legend', 'auto') or 'auto'
-        placer.place(make_text, room=room)
-        self.legend_at = 'off' if where == 'off' else 'in'
+        self.legend_at = where if where in ('out', 'off') else 'in'
         if where == 'out':
             self.legend_beside(ax, handles)
-            self.legend_at = 'out'
         elif where in ('auto', 'in'):
-            inside = None
-            for ncol in ((1, 2) if len(handles) > 6 else (1,)):
-                art, best = placer._best(make_legend(ncol))
-                if (best is not None and np.isfinite(best[0])
-                        and best[0] <= placer.budget * placer.w.sum()):
-                    inside = art
-                    placer.taken.append(best[3])
-                    break
-                art.remove()
-            if inside is None and where == 'in':
-                placer.place(make_legend(2 if len(handles) > 6 else 1), room=room,
-                             max_grow=0.25)
-            elif inside is None:      # too full: the legend goes beside the plot
+            ylim = ax.get_ylim()
+            legend = placer.place(make_legend, room=room, max_grow=0.25)
+            best = placer.last
+            hidden = np.inf if best is None else best[0]
+            if where == 'auto' and not hidden <= placer.budget * placer.w.sum():
+                legend.remove()       # too full: beside the plot, the plot as it was
+                if best is not None:
+                    placer.taken.pop()
+                ax.set_ylim(ylim)
                 self.legend_beside(ax, handles)
                 self.legend_at = 'out'
-        if room:                      # the text may have raised the top: room again
-            self.room_below(ax, first['bottom_marks'], *first['low'])
 
-        # what the title of the window says (the figure has none, as Hussain et al.)
         n_files = len(res['sets'])
         total = sum(self.fp[k]['x'].size for k in res['sets'])    # fitted: the real pixels
-        what = (f'{v.fault_type} fault, ' + ' + '.join(dict.fromkeys(f['comp'] for f in self.fp))
+        what = (f'{v.fault_type} fault dipping towards {self.dip_side()}, from '
+                + ' + '.join(dict.fromkeys(f['comp'] for f in self.fp))
                 if self.dip_slip else COMP_TEXT.get(v.comp, v.comp))
-        self.info = (f'{self.name}: swath ±{v.width:g} km, {total:,} pixels'
-                     + (f' in {n_files} files' if n_files > 1 else '')
-                     + (f' (drawn {v.nlook}x oversampled)' if self.fp_draw else '')
-                     + (f', {res["gnss"]["x"].size} GNSS' if res['gnss'] is not None else '')
-                     + f'; strike {self.strike:.0f}°, {what}')
-        try:
-            self.fig.canvas.manager.set_window_title(f'Model {self.info}')
-        except AttributeError:
-            pass
+        title = (f'{self.name}: swath ±{v.width:g} km, {total:,} pixels'
+                 + (f' in {n_files} files' if n_files > 1 else '')
+                 + (f' (drawn {v.nlook}x oversampled)' if self.fp_draw else '')
+                 + (f', {res["gnss"]["x"].size} GNSS' if res['gnss'] is not None else '')
+                 + f'\nstrike {self.strike:.0f}°, {what}')
+        ax.set_title(title, fontsize=v.font_size - 1, pad=6)
+        self.info = title.replace('\n', '; ')
         return
 
     def panel_sets(self, spec):
@@ -1220,35 +1158,50 @@ class ModelSection(Section):
         return [j for j, k in enumerate(self.result['sets'])
                 if self.fp[k]['file_idx'] in spec['files']]
 
-    def draw_panel(self, ax, spec, handles, x_range, top=True, bottom=True, cax=None):
+    def draw_panel(self, ax, spec, handles, x_range, top=True, cax=None):
         """One panel of the profile: its pixels (brought onto the offset of its
-        first file), the model of its component with its ranges, its GNSS,
-        the marks; returns what the parameters and the legend must not hide."""
+        first file), their medians, the model of its component with its ranges,
+        its GNSS, the fault; returns what the box and the legend must not
+        hide (the top panel's)."""
         v, res = self.v, self.result
         model, summ = res['model'], res['summary']
         density = bool(v.cmap_prof)
-        medians = density or bool(getattr(v, 'show_medians', False))
         multi = len(res['sets']) > 1
         sets = self.panel_sets(spec)
         ref = sets[0] if sets else None
         kind = model.kinds[ref] if ref is not None else spec['kind']
+        lo_x, hi_x = x_range
+        span = hi_x - lo_x
+        x0 = summ['x0']['map'] if 'x0' in summ else 0.0
+
+        def add(handle):
+            handles.setdefault(handle.get_label(), handle)
+
+        def draw_fault():
+            # the fault (dotted), and the traces the profile crosses (dash-dot)
+            free = 'x0' in summ
+            ax.axvline(x0, color='k', ls=':', lw=1.2, zorder=3)
+            add(Line2D([], [], color='k', ls=':', lw=1.2,
+                       label='Fault, fitted position' if free else 'Fault'))
+            traces = [(c - self.x_fault) * self.along_scale for c in self.crossings]
+            traces = [xc for xc in traces if lo_x <= xc <= hi_x and (free or abs(xc) > 0.05)]
+            for xc in traces:
+                ax.axvline(xc, color=v.fault_color, ls='-.', lw=0.9, alpha=0.75, zorder=3)
+            if traces:
+                add(Line2D([], [], color=v.fault_color, ls='-.', lw=0.9,
+                           label='Fault trace' if free else 'Other fault trace'))
+
         if spec['files'] and not sets:  # its files: no pixel here, or too few bins
             ax.text(0.5, 0.5, ', '.join(v.labels[i] for i in spec['files'])
                     + ': too few pixels in this swath to fit', transform=ax.transAxes,
                     ha='center', va='center', color='0.45', fontsize=max(v.font_size - 2, 6))
             if kind == 'los':         # no line of sight to see the model through
-                lo_x, hi_x = x_range
-                ax.set_xlim(lo_x - 0.01 * (hi_x - lo_x), hi_x + 0.01 * (hi_x - lo_x))
-                x0 = summ['x0']['map'] if 'x0' in summ else 0.0
-                top_marks, bottom_marks = self.draw_marks(ax, x0, label=top, sides=bottom)
-                return dict(occupied=[np.empty((0, 2))], weights=[np.empty(0)],
-                            top_marks=top_marks, bottom_marks=bottom_marks,
-                            low=(np.empty(0), np.empty(0)))
+                ax.set_xlim(lo_x - 0.01 * span, hi_x + 0.01 * span)
+                draw_fault()
+                return dict(occupied=[np.empty((0, 2))], weights=[np.empty(0)])
 
-        def add(handle):
-            handles.setdefault(handle.get_label(), handle)
-
-        # the pixels: light red points, or - --cmap-prof - a density, drawn below
+        # the pixels, every file brought onto the offset of the first: red
+        # points (Hussain et al.), or - --cmap-prof - a density, drawn below
         # once the limits are known
         pts, _ = self.plot_points(sets=sets, ref=ref if ref is not None else 0)
         n_drawn = sum(p[1].size for p in pts)
@@ -1261,12 +1214,10 @@ class ModelSection(Section):
                     add(Line2D([], [], ls='', marker='o', ms=6, mfc=color, mec='k', mew=1.0,
                                label=name))
                 continue
-            light = _tint(color, POINT_TINT)
-            ax.scatter(x, y, s=2.5, color=light, alpha=alpha, lw=0, zorder=1, rasterized=True)
-            add(Line2D([], [], ls='', marker='o', ms=4, color=light, label=name))
+            ax.scatter(x, y, s=2.5, c=color, alpha=alpha, lw=0, zorder=1, rasterized=True)
+            add(Line2D([], [], ls='', marker='o', ms=4, color=color, label=name))
 
         # the model of this component: its 95 % and 68 % ranges and the MAP
-        lo_x, hi_x = x_range
         gin = self.gnss_in
         has_gnss = (gin is not None and gin['index'].size > 0
                     and bool(np.isfinite(gin['value']).any())
@@ -1274,44 +1225,43 @@ class ModelSection(Section):
         offset = (model.offsets[ref] if ref is not None
                   else ('ag' if model.gnss else model.offsets[0]))
         xx = np.linspace(lo_x, hi_x, 801)
-        x0 = summ['x0']['map'] if 'x0' in summ else 0.0
         xx = np.unique(np.r_[xx, x0 - 1e-6, x0 + 1e-6]) if model.creep else xx
         outer, inner = (float(b) for b in getattr(v, 'bands', None) or (95.0, 68.0))
         best, bands = model_bands(res, xx, levels=(outer, inner), offset=offset, kind=kind)
         band_lo, band_hi = bands[outer]
 
-        # the binned medians, +/- one robust standard deviation: on a density
-        # (big, their error bars haloed in white), or with --medians
+        # the binned medians, +/- one robust standard deviation - bigger on a
+        # density, their error bars haloed in white
         bins_xy = []
-        if medians:
-            big = dict(ms=6.5, mec='k', mew=1.1, ecolor='k', elinewidth=1.0) if density else \
-                dict(ms=3.2, mec='0.1', mew=0.7, ecolor='0.25', elinewidth=0.5)
-            for j in sets:
-                k = res['sets'][j]
-                b = res['bins'][j]
-                face = 'w' if not multi else POINT_COLORS[k % len(POINT_COLORS)]
-                shift = self.offset_shift(j, ref)
-                bars = ax.errorbar(b['x'], b['median'] + shift, yerr=b['std'],
-                                   fmt='o', mfc=face, capsize=0, zorder=4, **big)
-                if density:
-                    white_halo(bars, width=2.6)
-                bins_xy.append(np.c_[b['x'], b['median'] + shift])
-            if sets:
-                add(Line2D([], [], ls='', marker='o', mfc='w',
-                           label=f'Median per {res["bin_km"]:g} km (±1σ)',
-                           **(dict(ms=6.5, mec='k', mew=1.1) if density else
-                              dict(ms=4.5, mec='0.1', mew=0.7))))
+        big = dict(ms=6.5, mec='k', mew=1.1, ecolor='k', elinewidth=1.0) if density else \
+            dict(ms=3.2, mec='0.1', mew=0.7, ecolor='0.25', elinewidth=0.5)
+        for j in sets:
+            k = res['sets'][j]
+            b = res['bins'][j]
+            face = 'w' if not multi else POINT_COLORS[k % len(POINT_COLORS)]
+            shift = self.offset_shift(j, ref)
+            bars = ax.errorbar(b['x'], b['median'] + shift, yerr=b['std'],
+                               fmt='o', mfc=face, capsize=0, zorder=4, **big)
+            if density:
+                white_halo(bars, width=2.6)
+            bins_xy.append(np.c_[b['x'], b['median'] + shift])
+        if sets:
+            add(Line2D([], [], ls='', marker='o', mfc='w',
+                       label=f'Median per {res["bin_km"]:g} km (±1σ)',
+                       **(dict(ms=6.5, mec='k', mew=1.1) if density else
+                          dict(ms=4.5, mec='0.1', mew=0.7))))
 
         if density:                   # red, as the points were; the inner darker -
             # light enough for the density under them to show
             shades = ((outer, DENSITY_BAND, 0.4), (inner, DENSITY_BAND, 0.3))
-        else:                         # Hussain et al.: dark grey 95 %, light grey 68 %
+        else:                         # grey, 25 % and 40 % transparent
             shades = ((outer, BAND_COLOR, BAND_ALPHA[0]), (inner, BAND_68, BAND_ALPHA[1]))
-        ax.plot(xx, best, '-', color=MAP_COLOR, lw=1.6, zorder=6)
-        add(Line2D([], [], color=MAP_COLOR, lw=1.6, label='MAP model'))
         for i, (level, color, alpha_band) in enumerate(shades):
             ax.fill_between(xx, *bands[level], color=color, alpha=alpha_band, lw=0,
                             zorder=2 + 0.1 * i)
+        ax.plot(xx, best, ls='--', color=MAP_COLOR, lw=2.2, zorder=6)
+        add(Line2D([], [], ls='--', color=MAP_COLOR, lw=2.2, label='MAP model'))
+        for level, color, alpha_band in shades:
             add(plt.Rectangle((0, 0), 1, 1, fc=color, alpha=alpha_band,
                               label=f'{level:g}% range'))
 
@@ -1340,64 +1290,41 @@ class ModelSection(Section):
                 add(Line2D([], [], color=OFFSET_COLOR, lw=2.4,
                            label=f'Offset lines, ±{off["km"]:g} km'))
 
-        # the GNSS: black - red on a density - outlined in white
+        # the GNSS: blue - red on a density - outlined in white
         if has_gnss:
             shift = self.gnss_shift(ref)
             color = GNSS_ON_DENSITY if density else GNSS_COLOR
             white_halo(ax.errorbar(gin['x'], gin['value'] + shift, yerr=gin['sigma'], fmt='o',
-                                   ms=6.5 if density else 5.5, mfc=color, ecolor=color,
-                                   elinewidth=1.3, capsize=3, capthick=1.1, zorder=7,
-                                   **GNSS_EDGE))
+                                   ms=6.5, mfc=color, ecolor=color, elinewidth=1.4, capsize=3,
+                                   capthick=1.2, zorder=7, **GNSS_EDGE))
             add(Line2D([], [], ls='', marker='o', ms=6, mfc=color, **GNSS_EDGE,
                        label='GNSS' + ('' if model.gnss else ' (not fitted)')))
 
-        # the traces the profile crosses (dash-dot); the fault itself: the arrow
-        free = 'x0' in summ
-        add(Line2D([], [], ls='', marker='^', ms=8, color=FAULT_COLOR,
-                   label='Fault location, fitted' if free else 'Fault location'))
-        traces = [(c - self.x_fault) * self.along_scale for c in self.crossings]
-        traces = [xc for xc in traces if lo_x <= xc <= hi_x and (free or abs(xc) > 0.05)]
-        for xc in traces:
-            ax.axvline(xc, color=v.fault_color, ls='-.', lw=0.9, alpha=0.75, zorder=3)
-        if traces:
-            add(Line2D([], [], color=v.fault_color, ls='-.', lw=0.9,
-                       label='Fault trace' if free else 'Other fault trace'))
+        draw_fault()
 
-        # limits: the bulk of the points, the model and the GNSS - room on top for
-        # the parameters on the top panel
+        # limits: the bulk of the points, the model and the GNSS - room on top
+        # for the box and the legend in the top panel
         ally = [y for _, _, y in pts if y.size]
         lo_y, hi_y = (np.percentile(np.concatenate(ally), [0.5, 99.5]) if ally
                       else (band_lo.min(), band_hi.max()))
         lo_y, hi_y = min(lo_y, band_lo.min()), max(hi_y, band_hi.max())
-        low_x, low_y = [x for _, x, _ in pts] + [xx], [y for _, _, y in pts] + [band_lo]
         occupied = [np.c_[x, y] for _, x, y in pts] + bins_xy + [np.c_[xx[::4], best[::4]]]
-        weights = ([np.ones(x.size) for _, x, _ in pts] + [np.full(b.shape[0], 25.0)
-                                                           for b in bins_xy]
+        weights = ([np.ones(x.size) for _, x, _ in pts]
+                   + [np.full(b.shape[0], 25.0) for b in bins_xy]
                    + [np.full(best[::4].size, 25.0)])
         if has_gnss:
             g = gin['value'] + self.gnss_shift(ref)
             lo_y = min(lo_y, np.nanmin(g - gin['sigma']))
             hi_y = max(hi_y, np.nanmax(g + gin['sigma']))
-            low_x.append(gin['x'])
-            low_y.append(g - gin['sigma'])
             occupied.append(np.c_[gin['x'], g])
             weights.append(np.full(gin['x'].size, 200.0))
-        low = (np.concatenate(low_x), np.concatenate(low_y))
         pad = 0.06 * (hi_y - lo_y or 1.0)
         head = 0.25 * (hi_y - lo_y) if top else 0.0
         ax.set_ylim(v.model_ylim if v.model_ylim else (lo_y - pad, hi_y + head + pad))
-        span = hi_x - lo_x
         ax.set_xlim(lo_x - 0.01 * span, hi_x + 0.01 * span)
-
-        # the section (top left, the top panel), the sides of the fault (the
-        # bottom panel) and the fault, with room under the data for them
-        top_marks, bottom_marks = self.draw_marks(ax, x0, label=top, sides=bottom)
-        if not v.model_ylim:
-            self.room_below(ax, bottom_marks, *low)
         if density and sets:
             self.draw_density(ax, sets=sets, ref=ref, cax=cax)
-        return dict(occupied=occupied, weights=weights, top_marks=top_marks,
-                    bottom_marks=bottom_marks, low=low)
+        return dict(occupied=occupied, weights=weights)
 
     def cycle_legend(self):
         """The "l" key: the legend inside the plot, outside it, or none - the
@@ -1454,82 +1381,15 @@ class ModelSection(Section):
         return ax.legend(bbox_to_anchor=((right + gap) / grown, ax.get_position().y1),
                          bbox_transform=fig.transFigure, **kw)
 
-    def draw_marks(self, ax, x0, label=True, sides=True):
-        """The marks of Hussain et al. (2016, Fig. 9): the section, A-A', boxed
-        top left (label); the sides of the fault named at the bottom corners
-        (sides: the direction of its normal, North / South); a blue arrow up
-        from the bottom at the fault, "Fault location" under it (with the
-        sides: under the arrow of the bottom panel only). Returns the marks at
-        the top and at the bottom."""
-        v = self.v
-        top = [ax.annotate(self.name, xy=(0.012, 0.975), xycoords='axes fraction',
-                           ha='left', va='top', fontsize=v.font_size + 1, fontweight='bold',
-                           zorder=12, bbox=dict(boxstyle='square,pad=0.25', fc=LABEL_FACE,
-                                                ec='k', lw=0.9))] if label else []
-        bottom = []
-        side = dict(xycoords='axes fraction', va='bottom', fontsize=v.font_size, zorder=12,
-                    bbox=dict(boxstyle='square,pad=0.1', fc='w', ec='none', alpha=0.72))
-        if self.normal is not None and sides:
-            toward = azimuth_of(self.normal[0], self.normal[1])     # the x > 0 side
-            bottom += [ax.annotate(compass_word(toward + 180.0), xy=(0.012, 0.022),
-                                   ha='left', **side),
-                       ax.annotate(compass_word(toward), xy=(0.988, 0.022), ha='right', **side)]
-        free = 'x0' in self.result['summary']
-        lo, hi = ax.get_xlim()
-        if lo <= x0 <= hi:            # a panel above the bottom one: a short arrow, no words
-            tip = ARROW_TIP if sides else ARROW_SHORT
-            bottom.append(ax.annotate(
-                ('Fault location' + (', fitted' if free else '')) if sides else '',
-                xy=(x0, tip), xytext=(x0, 0.022 if sides else 0.0),
-                xycoords=('data', 'axes fraction'),
-                textcoords=('data', 'axes fraction'), ha='center', va='bottom',
-                fontsize=max(v.font_size - 4, 6), fontweight='bold', family=serif_family(),
-                zorder=12, annotation_clip=False,
-                arrowprops=dict(facecolor=FAULT_COLOR, edgecolor=FAULT_COLOR, width=3.6,
-                                headwidth=11, headlength=10 if sides else 8, shrink=0.0)))
-            bottom[-1].tip = tip              # the top of the mark, whatever its extent says
-        return top, bottom
-
-    @staticmethod
-    def room_below(ax, marks, xs, ys, max_grow=0.45):
-        """Lower the bottom of the plot until what is under each mark at the
-        bottom (the sides, the fault arrow) clears it - the 1st percentile of
-        the points under it, so a stray pixel does not count - by at most
-        max_grow of the range."""
-        try:
-            renderer = ax.figure.canvas.get_renderer()
-            box = ax.get_window_extent(renderer)
-            exts = [art.get_window_extent(renderer) for art in marks]
-        except Exception:                         # noqa: BLE001 - a non-Agg canvas
-            return
-        lo, hi = ax.get_ylim()
-        to_data = ax.transAxes + ax.transData.inverted()
-        new_lo = lo
-        for art, ext in zip(marks, exts):
-            x_a = to_data.transform(((ext.x0 - box.x0) / box.width, 0.0))[0]
-            x_b = to_data.transform(((ext.x1 - box.x0) / box.width, 0.0))[0]
-            top = max((ext.y1 - box.y0) / box.height, getattr(art, 'tip', 0.0))
-            need = top + 0.05                                  # axes fraction to clear
-            under = (xs >= min(x_a, x_b)) & (xs <= max(x_a, x_b)) & np.isfinite(ys)
-            if not under.any() or need >= 0.9:
-                continue
-            q = float(np.percentile(ys[under], 1.0))
-            new_lo = min(new_lo, (q - need * hi) / (1.0 - need))
-        new_lo = max(new_lo, lo - max_grow * (hi - lo))
-        if new_lo < lo:
-            ax.set_ylim(new_lo, hi)
-
     def parameter_lines(self):
-        """The parameters as Hussain et al. (2016, Fig. 9) write them: the MAP
-        value, its unit and the 95 % range, rounded to it - the slip rate as a
-        rate, with its sense; the offset as they give it, with one file."""
+        """The parameters as Hussain et al. (2016) write them: the MAP value, its
+        unit, and the 95 % range - the slip rate as a rate, with its sense."""
         v, res = self.v, self.result
         summ = res['summary']
         if self.dip_slip:
             return self.dip_slip_lines()
         lines = []
-        order = ('S', 'd1') + (('a',) if len(res['sets']) == 1 else ()) + ('C', 'd2', 'x0')
-        for name in [n for n in order if n in summ]:
+        for name in [n for n in PHYSICAL if n in summ]:
             s = summ[name]
             unit = v.model_unit if UNITS[name] == 'mm/yr' else UNITS[name]
             val, lo, hi, extra = s['map'], s['lo'], s['hi'], ''
@@ -1541,27 +1401,24 @@ class ModelSection(Section):
                 else:
                     extra = f', {sense} (the range crosses 0: S > 0 is right-lateral)'
             # LOS data fitted as they are: the rates are what the LOS sees of them
-            seen = ' in the LOS' if v.data_los and name in ('S', 'C', 'a') else ''
+            seen = ' in the LOS' if v.data_los and name in ('S', 'C') else ''
             lines.append(f'{NAMES[name]}{seen} = {ci_text(val, lo, hi, unit)}{extra}')
         d = res['derived']['strain']
-        lines.append(f'strain rate{" in the LOS" if v.data_los else ""} = '
-                     + ci_text(d['map'], d['lo'], d['hi'], strain_unit(v.model_unit)))
+        lines.append(f'strain rate{" in the LOS" if v.data_los else ""} = {d["map"]:.2f} '
+                     f'{strain_unit(v.model_unit)} ({d["lo"]:.2f} – {d["hi"]:.2f}, 95% CI)')
         if self.offset is not None:
             lines += self.offset_lines()
         return lines
 
     def dip_slip_lines(self):
-        """The parameters of a reverse or normal fault, as Hussain et al. write
-        theirs: the slip rate along the dip, with the fault type; the locking
-        depth; the dip, towards A or A'; the far-field rates of the hanging wall
-        against the footwall - shortening and uplift (reverse), extension and
-        subsidence (normal)."""
+        """The parameters of a reverse or normal fault: the slip rate along the
+        dip, with the fault type; the locking depth; the dip, towards A or A';
+        the far-field rates of the hanging wall against the footwall -
+        shortening and uplift (reverse), extension and subsidence (normal)."""
         v, res = self.v, self.result
         summ, model = res['summary'], res['model']
         lines = []
-        for name in ('S', 'd1', 'dip', 'a', 'x0'):
-            if name == 'a' and len(res['sets']) > 1:
-                continue
+        for name in ('S', 'd1', 'dip', 'x0'):
             if name == 'dip':
                 text = (ci_text(summ['dip']['map'], summ['dip']['lo'], summ['dip']['hi'], 'deg')
                         if 'dip' in summ else f'{model.dip_fixed:g}° (fixed)')
@@ -1636,8 +1493,8 @@ class ModelSection(Section):
         lo, hi = self.ax_swath.get_xlim()
         xx = np.linspace(lo, hi, 801)
         best, band_lo, band_hi = strain_rate(res, xx)
-        ax.fill_between(xx, band_lo, band_hi, color=BAND_COLOR, alpha=0.8, lw=0)
-        ax.plot(xx, best, '-', color=MAP_COLOR, lw=1.4)
+        ax.fill_between(xx, band_lo, band_hi, color=BAND_COLOR, alpha=0.55, lw=0)
+        ax.plot(xx, best, ls='--', color=MAP_COLOR, lw=1.8)
         ax.axhline(0, color='k', lw=0.4)
         x0 = res['summary']['x0']['map'] if 'x0' in res['summary'] else 0.0
         ax.axvline(x0, color='k', ls=':', lw=1.1)

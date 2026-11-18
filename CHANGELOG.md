@@ -6,6 +6,28 @@ the project uses [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-11-18
+
+### Changed
+- **The `model` profile looks as it did before 0.5.6** - the look after
+  Hussain et al. (2016, Izmit, Fig. 9) that 0.5.6 brought is undone: the
+  pixels as red points (a colour per file), the median of each bin with ±1σ
+  (always drawn), the MAP model in bold black dashes, the GNSS blue, the
+  fault dotted, `A` and `A'` boxed in the top corners, the parameters in a
+  box in the plain font - `slip rate = 20.1 mm/yr (19.4 – 22.2, 95% CI),
+  right-lateral` - and the title (the swath, the pixels, the strike). What
+  0.5.6 added stays: the 68 % range over the 95 % one (grey, 25 % and 40 %
+  transparent; `--bands`), the creep rate, creep depth and creep offset in
+  the box, the legend inside (room made for it, as before) or beside the plot
+  when it is too full (`--legend`, the **l** key), the GNSS red on a
+  `--cmap-prof` density, the y axis saying what is plotted (`Fault-parallel
+  velocity (mm/yr)` …), and the panels of a reverse or normal fault - drawn
+  the same way, the dip written as `dip = 29.9° (27.4 – 33.0, 95% CI),
+  towards A'`. The x axis: `Distance from the fault (km)`.
+
+### Removed
+- `model --medians`: the medians are always drawn again, as before 0.5.6.
+
 ## [0.5.6] - 2026-11-17
 
 ### Added
