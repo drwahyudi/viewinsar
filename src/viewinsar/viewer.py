@@ -1171,9 +1171,10 @@ class swathProfileViewer:
         return factor
 
     def expects_velocity(self, fname):
-        """Are the data a velocity? `model` fits velocities, --gnss compares them
-        with GNSS velocities; otherwise the name says it (vel*, rate ...)."""
-        return (self.COMMAND == 'model' or bool(self.gnss_file)
+        """Are the data a velocity? `model` fits velocities, `stat` measures
+        creep rates, --gnss compares them with GNSS velocities; otherwise the
+        name says it (vel*, rate ...)."""
+        return (self.COMMAND in ('model', 'stat') or bool(self.gnss_file)
                 or velocity_name(fname, self.dset))
 
     def file_unit(self, fname, atr, values=None):
@@ -1515,17 +1516,37 @@ class swathProfileViewer:
         lon, lat = Transformer.from_crs(crs, 4326, always_xy=True).transform(xs, ys)
         return np.asarray(lon), np.asarray(lat)
 
-    def _los_geometry(self, index):
+    def geom_list(self):
+        """--geom as a list (one path for swath, one per file for model / stat)."""
+        files = self.geom_file or []
+        return [files] if isinstance(files, str) else list(files)
+
+    def geom_pool(self):
+        """--geom FOLDERS, not one per input file (geo_asc/ geo_dsc/ for four
+        tracks): every folder is searched for every file - for its own track
+        and pass (LOSGeometry._pick). None: --geom is one per file, in order."""
+        from .gnss import _is_one_geometry
+
+        files = self.geom_list()
+        if files and len(files) != len(self.file) and all(
+                os.path.isdir(f) and not _is_one_geometry(f) for f in files):
+            return files
+        return None
+
+    def find_los_geometry(self, index, verbose=None):
+        """The LOS geometry of file `index` (see LOSGeometry.for_file)."""
         from .gnss import LOSGeometry
+
+        files, pool = self.geom_list(), self.geom_pool()
+        return LOSGeometry.for_file(
+            self.file[index], self.atr_list[index],
+            geom_file=None if pool else (files[index] if index < len(files) else None),
+            geom_dirs=pool, inc=per_file(self.los_inc, index), az=per_file(self.los_az, index),
+            verbose=self.print_msg if verbose is None else verbose)
+
+    def _los_geometry(self, index):
         if index not in self._los:
-            files = self.geom_file or []
-            files = [files] if isinstance(files, str) else list(files)
-            given = files[index] if index < len(files) else None
-            self._los[index] = LOSGeometry.for_file(self.file[index], self.atr_list[index],
-                                                    geom_file=given,
-                                                    inc=per_file(self.los_inc, index),
-                                                    az=per_file(self.los_az, index),
-                                                    verbose=self.print_msg)
+            self._los[index] = self.find_los_geometry(index)
         return self._los[index]
 
     def los_vectors(self, index, rows, cols, lon=None, lat=None):

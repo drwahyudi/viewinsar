@@ -490,22 +490,48 @@ viewinsar stat geo_velocity.h5 --names North South --colors tab:green tab:purple
     --line-file fault_trace.geojson
 ```
 
-**The figure** is their Fig. 5: the **LOS creep rate** along the line, 1σ
-error bars, a series per file - descending tracks solid, ascending dashed (the
-file's `ORBIT_DIRECTION`, else its name - `asc`, `T014A`, `105D` ... - else its
-line of sight). Motion along an E-W fault shows with opposite signs in
-ascending and descending tracks, vertical motion with the same sign; so **two
-LOS geometries or more** - MintPy's `geometryGeo.h5` / `geometryRadar.h5`,
-LiCSBAS's `GEOCml*/E.geo …` or LiCSAR's `*.geo.E.tif` beside the data, or
-`--geom`, or `--los-inc` / `--los-az` - also **split** it, point by point and
-draw by draw, into a **fault-parallel** creep rate (red, + right-lateral) and a
-**vertical** one (blue, + block 2 up), assuming no motion across the fault:
+**The figure** is their Fig. 5: the **LOS creep rate** along the line in
+mm/yr, 1σ error bars, a series per file - descending tracks solid, ascending
+dashed (the file's `ORBIT_DIRECTION`, else its name - `asc`, `T014A`, `105D`
+... - else its line of sight). A file without a unit (a GeoTIFF) is taken as a
+velocity: mm/yr, or m/yr when 99 % of its values are below 1 (the run says
+which; `--data-unit` if not). Motion along an E-W fault shows with opposite
+signs in ascending and descending tracks, vertical motion with the same sign;
+so **where an ascending and a descending track both have a creep rate and an
+LOS geometry**, the creep is also **split**, point by point and draw by draw,
+into a **fault-parallel** creep rate (red, + right-lateral) and a **vertical**
+one (blue, + block 2 up), assuming no motion across the fault, as Hussain et
+al. did:
 
   `los_i = Δh (L_i · s) + Δu L_i,up`, fault-parallel = −Δh, vertical = Δu
 
 with `L_i` the LOS unit vector of file *i* (ground to satellite, the median
-over the profile's pixels) and `s` the line's direction there. Nominal angles
-from a name are not used for the split; the run says so.
+over the profile's pixels) and `s` the line's direction there. Elsewhere the
+run says why not, range by range - one track only, a track without an LOS
+geometry, a geometry that does not reach the point, tracks of one pass only,
+lines of sight too alike - and so do a note in the panel and the `why_not`
+column of `_split.csv`. Along a fault that runs N-S the fault-parallel rate is
+less certain (the satellites look E-W): its error bars show it.
+
+**Each track its own LOS geometry.** MintPy's `geometryGeo.h5` /
+`geometryRadar.h5`, LiCSBAS's `GEOCml*/E.geo …` or LiCSAR's / your own E, N, U
+GeoTIFFs beside the data, or `--geom`, or `--los-inc` / `--los-az`. When the
+names say the track - `039A.los.tif` and `039A.E.tif`, `039A_*.geo.E.tif` - a
+file takes its own track's set only, never another track's from the same
+folder, and the frames of a track mosaic (`039A_09001_…`, `039A_09202_…`) are
+joined into one; a geometry of the other pass (ascending for a descending
+file) is never taken. `--geom` gives one geometry per file, in order - or
+FOLDERS, fewer than the files (`--geom geo_asc/ geo_dsc/` for four tracks),
+all searched for every file. Nominal angles from a name are not used for the
+split. The run lists what each file got:
+
+```
+LOS geometry - for the split into fault-parallel and vertical:
+   039A.los       ascending   …/039A.E.tif (+ N, U; LiCSAR)
+   112A.los       ascending   …/112A.E.tif (+ N, U; LiCSAR)
+   061D.los       descending  …/061D.E.tif (+ N, U; LiCSAR)
+   134D.los       descending  …/134D.E.tif (+ N, U; LiCSAR)
+```
 
 **Click a point of the creep rate**: its profile opens in a window of its own,
 as their Fig. S3 - the pixels, the BLUE lines (red) and the bootstrap lines
@@ -517,7 +543,8 @@ numbers in the legend; the profile is outlined on the map.
 **Mind the line.** It must lie on the fault trace: *x* = 0 is where the two
 sides are compared, and a line 1 km off the trace puts that km of one side
 into the other - the creep comes out low. Draw it over the `--fault` traces,
-or take the trace itself with `--line-file`. A profile is perpendicular to the
+or take the trace itself with `--line-file`. The line is used where you click
+or give it, not moved to the centre of a pixel (a pixel can be a km wide). A profile is perpendicular to the
 line's direction over ±`--width` around its point, so a hand-digitised trace
 with small wiggles still gives steady profiles; where the line bends inside a
 profile, a pixel on its other side than its *x* says is left out (the run says
@@ -549,7 +576,7 @@ view.py flips it): there, `geometryRadar.h5` gives the lat/lon of the line
 | `--width` | `2.5` | the pixels within this distance either side of a profile are projected onto it, km |
 | `--boot` / `--seed` | `2000` / `0` | bootstrap draws per profile, and their seed |
 | `--min-pixels` | `10` | fewer pixels on a side: no creep rate at that point |
-| `--geom` / `--los-inc` / `--los-az` | found beside the data | the LOS geometry of each file, for the split (as in `model`) |
+| `--geom` / `--los-inc` / `--los-az` | found beside the data | the LOS geometry of each file, for the split: one per file, or folders searched for every file (above) |
 | `--line-yx` / `--line-lalo` | — | the line as row/col or lat/lon pairs, 2 points or more |
 | `--line-file` | — | the longest line of a vector file (any format / CRS `--fault` reads) |
 | `--names` / `--colors` | `Block 1` `Block 2` / blue, vermilion | the two blocks |
@@ -568,7 +595,7 @@ point and the parameters, e.g. `stat_Y3670X744_Y2967X696_sp5km_L5km_w2.5km`:
 | `….png` | the creep rate along the line (and the split) |
 | `…_map.png` | the map with the line, its points and their profiles |
 | `…_creep.csv` | a row per point and file: `dist_km`, row/col, lat/lon, `strike_deg` (the line's direction), `label`, `orbit`, `n_1` `n_2` (pixels a side), `creep` (the bootstrap mean) `creep_std` `creep_median` `creep_lo95` `creep_hi95` `creep_lo68` `creep_hi68`, `creep_blue` `creep_blue_std`, `slope_1` `slope_2` (per km) `intercept_1`, `sigma` (the scatter), `trace_km`, `dropped`, `clipped`; with the split, the LOS unit vector `los_east` `los_north` `los_up` |
-| `…_split.csv` | two LOS geometries or more: a row per point, `par` / `up` (from the least-squares rates) and `_mean` `_std` `_median` `_lo95` `_hi95` of the draws, the files used |
+| `…_split.csv` | two LOS geometries or more: a row per point, `par` / `up` (from the least-squares rates) and `_mean` `_std` `_median` `_lo95` `_hi95` of the draws, the files used, and `why_not` where there is no split |
 | `…_values.csv` | every pixel used: `file`, `point`, `block`, `x_km` (from the line, + towards block 2), `y_km` (along it), `value`, `row`, `col`, lat/lon |
 | `…_profiles.png` | every profile of the first file - pixels and both lines, its creep rate (`_profiles_2.png` … for the others) |
 | `…_profile7.png` | the profile on screen (point 7), when its window is open |
@@ -651,6 +678,38 @@ viewinsar model geo_vpar.h5 --comp par --strike 100 --rot 0.0215 \
     --d1-prior 17 5 --noise 6.35 35.8
 ```
 
+**A line of profiles, as `viewinsar stat`.** With `--spacing KM` the
+profiles are not drawn one by one: draw a line **along** the fault instead -
+left-click its points, <kbd>Enter</kbd> - or give it with `--line-lalo`,
+`--line-yx` or `--line-file` (with `--spacing`, the longest line of the file:
+the trace itself). Every `--spacing` km along it (centred on it) a profile
+crosses it at right angles - `--length` km either side (default 50), its swath
+`--width` km either side - and the fault of each profile is where it crosses
+the line, its strike the line's. Each profile is a section of its own, A-A',
+B-B' … with its window, its fit and its files, as above; their posteriors are
+written by the export rather than opened, one window each would be too many.
+Then a window **along the line**: the slip rate and locking depth of every
+profile (and *C*, *d₂* with `--creep`; the dip of a reverse or normal fault),
+the MAP and its 95 % range - the slip rate along strike.
+
+```bash
+# click the line along the fault, Enter: a profile every 20 km, +/-60 km long, +/-15 km wide
+viewinsar model geo_velocity.h5 --comp los --fault faults.shp --spacing 20 \
+    --length 60 --width 15
+
+# the trace as the line, two tracks fitted together, all saved
+viewinsar model T014A/geo_velocity.h5 T123D/geo_velocity.h5 --comp los \
+    --spacing 25 --length 50 --line-file fault_trace.geojson --nodisplay --save fits
+```
+
+With `--spacing`: <kbd>u</kbd> / <kbd>Backspace</kbd> removes the last point
+of the line, <kbd>n</kbd> starts a new one (its profiles close), <kbd>e</kbd>
+exports - every section, `model_sections_ABC….csv` (with each profile's
+`point` and `dist_km` along the line), `model_line_…_along.png` and
+`model_line_…_info.txt`. The fits take a while: a few seconds to a minute each
+with the default sampler (`--steps`, `--walkers`). Profiles closer than twice
+`--width` share pixels; the run says so.
+
 **The fault and the data.** The fault is where the profile crosses a `--fault`
 trace (the crossing nearest the middle of the profile), with the strike of the
 trace there - or `--x0` (km from the start of the profile) and `--strike`.
@@ -690,7 +749,12 @@ and an incidence + azimuth GeoTIFF pair (`incidenceAngle.tif` +
 with its subfolders (LiCSBAS's `GEOCml*/`, `GEOC/`, `metadata/` first; the
 interferogram folders of `GEOC/` skipped), and the first geometry that covers
 the data is taken - so `--geom` the LiCSBAS work folder, or a folder of
-geometry GeoTIFFs, is enough. `--los-inc` and `--los-az` give one
+geometry GeoTIFFs, is enough. Folders fewer than the input files (`--geom
+geo_asc/ geo_dsc/` for four tracks) are all searched for every file. Found or
+searched, a file whose name says its track (`039A.los.tif`, `105D_09094_…`,
+`T14A`) takes that track's geometry only - `039A.E.tif`, `039A_*.geo.E.tif`,
+the frames of a track mosaic joined into one - never another track's from the
+same folder, and never one of the other pass. `--los-inc` and `--los-az` give one
 pair of angles instead (one per file, or one for all; MintPy's convention:
 the azimuth of the ground-to-satellite vector, anticlockwise from north -
 about 100 for Sentinel-1 ascending, −100 descending).
@@ -906,6 +970,9 @@ the fault type, *S*, *d₁*, the dip, *x₀* and both rates.
 |---|---|---|
 | `strike`, `reverse` (`thrust`), `normal` | `strike` | the fault type, the first word |
 | `--width` | `20` | half width of the swath, km |
+| `--spacing` | off | a line of profiles along the fault (above): a profile every KM |
+| `--length` | `50` | with `--spacing`: how far each profile reaches either side of the line, km |
+| `--line-lalo` / `--line-yx` / `--line-file` | — | with `--spacing`: the line along the fault (without it, `--line-file` gives the sections) |
 | `--bin` | `1` | bin size along the profile, km |
 | `--comp` | `auto` | what the data are (above): one for all (strike), or one per file (reverse, normal) |
 | `--geom`, `--los-inc`, `--los-az` | found | the line of sight (above), one per file |

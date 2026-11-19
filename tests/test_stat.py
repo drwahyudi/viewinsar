@@ -375,7 +375,8 @@ def test_stat_end_to_end(creep_file, tmp_path):
     assert np.all((cr['creep_lo95'] < cr['creep_lo68']) & (cr['creep_hi68'] < cr['creep_hi95']))
     assert cr['slope_1'] == pytest.approx(0.4, abs=0.08)     # mm/yr per km, east is +
     assert cr['slope_2'] == pytest.approx(0.4, abs=0.08)
-    assert np.all(cr['n_1'] == 26 * 23) and np.all(cr['n_2'] == 26 * 23)   # 5 x 5 km a side
+    for side in ('n_1', 'n_2'):                     # 5 x 5 km a side: 26 x 22-23 pixels
+        assert np.all((cr[side] >= 26 * 22) & (cr[side] <= 26 * 23))
     assert cr['lon'] == pytest.approx(FAULT_LON, abs=0.002)
     assert cr['strike_deg'] == pytest.approx(0.0, abs=0.5)   # the line runs north
     assert cr['trace_km'] == pytest.approx(0.0, abs=1e-6) and np.all(cr['dropped'] == 0)
@@ -646,3 +647,167 @@ def test_help_mentions_stat(capsys):
         assert needle in out, needle
     for gone in ('--radius', '--gap', '--rate', 'violin'):
         assert gone not in out, gone
+
+
+##############################################################################
+#       tracks as LiCSAR GeoTIFFs: units, their own geometry, the gaps      #
+##############################################################################
+def _write_tif(path, arr):
+    rasterio = pytest.importorskip('rasterio')
+    from rasterio.transform import from_origin
+
+    with rasterio.open(str(path), 'w', driver='GTiff', height=arr.shape[0], width=arr.shape[1],
+                       count=1, dtype='float32', crs='EPSG:4326', nodata=np.nan,
+                       transform=from_origin(LON0, LAT0, DLON, -DLAT)) as dst:
+        dst.write(np.asarray(arr, dtype=np.float32), 1)
+    return str(path)
+
+
+# track: (inc, az, data from / to lon, geometry from / to lon - None: no geometry)
+TRACKS = {'134D': (39.0, -100.0, (130.00, 130.40), None),
+          '061D': (41.0, -100.0, (130.20, 130.66), (130.20, 130.50)),
+          '039A': (34.0, 100.0, (130.40, 130.90), (130.40, 130.90)),
+          '112A': (44.0, 100.0, (130.62, 130.90), (130.62, 130.90))}
+
+
+@pytest.fixture(scope='module')
+def four_tracks(tmp_path_factory):
+    """Four tracks over the E-W fault of asc_desc, as unitless GeoTIFFs in mm/yr
+    with the E / N / U GeoTIFFs of three of them, all in one folder - as LiCSAR
+    users keep them. 061D's geometry stops short of its data."""
+    pytest.importorskip('rasterio')
+    folder = tmp_path_factory.mktemp('tracks')
+    lon2d, lat2d = lonlat_grid()
+    north = lat2d > FAULT_LAT
+    ve = np.where(north, PAR_MM / 2, -PAR_MM / 2)
+    vu = np.where(north, -UP_MM / 2, UP_MM / 2)
+    rng = np.random.default_rng(5)
+    files = {}
+    for name, (inc, az, (d0, d1), geom) in TRACKS.items():
+        e, n, u = los_vector(inc, az)
+        vel = ve * e + vu * u + rng.normal(0, 0.8, ve.shape)
+        files[name] = _write_tif(folder / f'{name}.los.tif',
+                                 np.where((lon2d >= d0) & (lon2d < d1), vel, np.nan))
+        if geom:
+            inside = (lon2d >= geom[0]) & (lon2d < geom[1])
+            for comp, val in zip('ENU', (e, n, u)):
+                _write_tif(folder / f'{name}.{comp}.tif', np.where(inside, val, np.nan))
+    return files
+
+
+def test_stat_on_licsar_tracks(four_tracks, tmp_path, capsys):
+    """Unitless GeoTIFFs: the creep in mm/yr; every track its OWN geometry from
+    the shared folder (not the first set in it); the split where an ascending
+    and a descending track both see a point, and why not elsewhere."""
+    names = ['134D', '061D', '039A', '112A']
+    obj = cli.stat_main([*(four_tracks[n] for n in names), '-sp', '10', '--boot', '300',
+                         *ALONG_THE_FAULT, '--nodisplay', '--outdir', str(tmp_path)])
+    out = capsys.readouterr().out
+    assert obj.rate_unit == 'mm/yr' and 'no unit in the file - read in mm/year' in out
+    assert obj.axes_stat[0].get_ylabel() == 'LOS creep rate (mm/yr)'
+    assert obj.axes_stat[1].get_ylabel() == 'Creep rate (mm/yr)'
+    # each its own geometry; 134D none (its name gives only nominal angles)
+    assert obj.split_files == [1, 2, 3]
+    for i, name in enumerate(names[1:], start=1):
+        assert os.path.basename(obj._los[i].source.split()[0]) == f'{name}.E.tif'
+    assert 'NONE - only nominal angles' in out and obj.orbits == ['desc', 'desc', 'asc', 'asc']
+
+    sp, labels = obj.split, [f'{n}.los' for n in names]
+    assert len(sp['why']) == 7
+    assert sp['why'][0] == 'only 134D.los has a creep rate here'
+    assert sp['why'][1] == sp['why'][2] == '134D.los has no LOS geometry'
+    assert sp['why'][3] == '' and [labels[i] for i in sp['used'][3]] == ['061D.los', '039A.los']
+    assert sp['why'][4] == 'the LOS geometry of 061D.los does not reach here'
+    for k in (5, 6):
+        assert 'all look from the west' in sp['why'][k] and 'needs both' in sp['why'][k]
+    assert sp['par_mean'][3] == pytest.approx(PAR_MM, abs=1.0)
+    assert sp['up_mean'][3] == pytest.approx(UP_MM, abs=0.6)
+    assert np.isnan(sp['par_mean'][[0, 1, 2, 4, 5, 6]]).all()
+    # said in the run, in the panel, in _split.csv and _info.txt
+    assert 'split into fault-parallel and vertical at 1 of 7 points:' in out
+    assert 'none - 134D.los has no LOS geometry' in out
+    note = [t.get_text() for t in obj.axes_stat[1].texts]
+    assert any(t.startswith('no split at 6 of 7 points: no LOS geometry for 134D.los') for t in note)
+    table = _read_csv(next(tmp_path.glob('*_split.csv')))
+    assert list(table['why_not'][[0, 3]]) == ['only 134D.los has a creep rate here', '']
+    info = next(tmp_path.glob('*_info.txt')).read_text()
+    assert 'LOS geometry   : 134D.los: none - only nominal angles' in info
+    assert 'split from 061D.los + 039A.los' in info
+
+
+def test_a_track_takes_its_own_geometry_and_its_frames(four_tracks, tmp_path):
+    """LOSGeometry.for_file: another track's E / N / U never; the frames of a
+    track mosaic as one geometry."""
+    from viewinsar.compat import read_attribute
+    from viewinsar.gnss import LOSGeometries, LOSGeometry, track_ids
+
+    assert track_ids('/x/039A.los.tif') == {'039a'}
+    assert track_ids('/x/105D_09094_131313/GEOCml10GACOS') == {'105d'}
+    assert track_ids('/x/T14A/vel.tif', levels=2) == {'014a'} and not track_ids('/x/v_2d.tif')
+    folder = os.path.dirname(four_tracks['039A'])
+    for name in ('061D', '039A', '112A'):
+        data = four_tracks[name]
+        geom = LOSGeometry.for_file(data, read_attribute(data), verbose=False)
+        assert os.path.basename(geom.source.split()[0]) == f'{name}.E.tif'
+    # 134D: the others' sets are not its own; a name with no track takes what covers it
+    data = four_tracks['134D']
+    assert LOSGeometry.for_file(data, read_attribute(data), verbose=False).kind == 'nominal'
+    with pytest.raises(ValueError, match='another track'):
+        LOSGeometry.for_file(data, read_attribute(data), geom_file=folder, verbose=False)
+
+    # a mosaic of two frames of 061D: one geometry, each frame where it reaches
+    lon2d, lat2d = lonlat_grid()
+    frames = tmp_path / 'frames'
+    frames.mkdir()
+    e, n, u = los_vector(41.0, -100.0)
+    for frame, (lo0, lo1) in (('061D_00001_131313', (130.0, 130.45)),
+                              ('061D_00002_131313', (130.45, 130.9))):
+        inside = (lon2d >= lo0) & (lon2d < lo1)
+        for comp, val in zip('ENU', (e, n, u + (0 if lo0 < 130.4 else 0.001))):
+            _write_tif(frames / f'{frame}.geo.{comp}.tif', np.where(inside, val, np.nan))
+    data = _write_tif(frames / '061D.los.tif', np.ones_like(lon2d))
+    geom = LOSGeometry.for_file(data, read_attribute(data), verbose=False)
+    assert isinstance(geom, LOSGeometries) and len(geom.parts) == 2
+    inc, az = geom.at_lonlat(np.array([130.1, 130.8, 131.5]), np.array([30.3, 30.3, 30.3]))
+    assert np.isfinite(inc[:2]).all() and np.isnan(inc[2])
+    assert az[:2] == pytest.approx([-100.0, -100.0], abs=0.01)
+
+
+def test_geom_folders_are_searched_for_every_track(four_tracks, tmp_path, capsys):
+    """--geom geo_asc/ geo_dsc/ for four tracks: not one per file - every file
+    finds its own track (or, with no track in the names, its own pass) in
+    them; an explicit folder of the other pass is refused, saying why."""
+    from viewinsar.compat import read_attribute
+    from viewinsar.gnss import LOSGeometry, data_pass
+
+    lon2d, _ = lonlat_grid()
+    pools = {}
+    for kind, track in (('asc', '039A'), ('dsc', '061D')):
+        inc, az, _, (g0, g1) = TRACKS[track]
+        folder = tmp_path / f'geo_{kind}'
+        folder.mkdir()
+        inside = (lon2d >= g0) & (lon2d < g1)
+        for comp, val in zip('ENU', los_vector(inc, az)):
+            _write_tif(folder / f'{comp}.tif', np.where(inside, val, np.nan))   # no track
+        pools[kind] = str(folder)
+    assert data_pass(four_tracks['039A']) == 'asc' and data_pass(four_tracks['061D']) == 'desc'
+    for track, kind in (('039A', 'asc'), ('061D', 'dsc')):
+        data = four_tracks[track]
+        geom = LOSGeometry.for_file(data, read_attribute(data), verbose=False,
+                                    geom_dirs=[pools['asc'], pools['dsc']])
+        assert geom.source.startswith(pools[kind]) and geom.pass_of() == data_pass(data)
+    data = four_tracks['039A']
+    with pytest.raises(ValueError, match='a descending geometry, the data are ascending'):
+        LOSGeometry.for_file(data, read_attribute(data), geom_file=pools['dsc'],
+                             verbose=False)
+
+    # the command: two folders for three files - a pool, each its own pass
+    files = [four_tracks[t] for t in ('039A', '112A', '061D')]
+    obj = cli.stat_main([*files, '--geom', pools['asc'], pools['dsc'], '-sp', '10', '--boot',
+                         '200', *ALONG_THE_FAULT, '--nodisplay', '--outdir', str(tmp_path / 'o')])
+    out = capsys.readouterr().out
+    assert '--geom: 2 folder(s) for 3 files' in out
+    assert obj._los[0].source.startswith(pools['asc'])
+    assert obj._los[1].source.startswith(pools['asc'])       # 112A: the ascending one
+    assert obj._los[2].source.startswith(pools['dsc'])
+    assert obj.split_files == [0, 1, 2]

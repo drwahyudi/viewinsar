@@ -1012,13 +1012,17 @@ Its uncertainty: a percentile bootstrap that resamples each block on its own,
 n1 of its n1 pixels and n2 of n2 (--boot draws), as Hussain et al. - the least-
 squares one (the BLUE) is too narrow when the errors are large or correlated.
 
-The figure: the LOS creep rate along the line, a series per file, 1-sigma
-error bars (descending tracks solid, ascending dashed). Two or more LOS
-geometries - ascending and descending, found beside the data or given with
---geom or --los-inc / --los-az - also give it split into fault-parallel (+
-right-lateral) and vertical (+ block 2 up), assuming no motion across the
-fault. Click a point of it: its profile, the pixels with both fits (BLUE red,
-bootstrap green) and the PDFs of the creep rate (their Fig. S3).
+The figure: the LOS creep rate along the line in mm/yr (a file without a
+unit is taken as a velocity: --data-unit if not), a series per file, 1-sigma
+error bars (descending tracks solid, ascending dashed). Where an ascending AND
+a descending track both have a creep rate and an LOS geometry, it is also
+split into fault-parallel (+ right-lateral) and vertical (+ block 2 up),
+assuming no motion across the fault; the run says why not elsewhere. The
+geometry: found beside the data - each track its own, by the track its name
+says (039A.los.tif: 039A.E.tif, 039A_*.geo.E.tif ..., the frames of a track
+joined) - or given with --geom or --los-inc / --los-az. Click a point of the
+creep rate: its profile, the pixels with both fits (BLUE red, bootstrap
+green) and the PDFs of the creep rate (their Fig. S3).
 """
 
 STAT_EXAMPLE = """\
@@ -1100,9 +1104,9 @@ def create_stat_parser(prog=f'{PROG} stat'):
                              'm/yr, mm ... - for a file that does not say it (a GeoTIFF),\n'
                              'or says a wrong one (e.g. mm/yr labelled m/year). Default:\n'
                              'the file\'s own; mm/yr for a LiCSBAS velocity (vel*, vstd*)\n'
-                             'without a unit, inside its LiCSBAS folder; for any other\n'
-                             'velocity without one (model, --gnss, or a vel* name), m/yr\n'
-                             'when 99%% of its values are below 1, else mm/yr.')
+                             'without a unit, inside its LiCSBAS folder; any other file\n'
+                             'without one is a velocity (stat measures rates): m/yr when\n'
+                             '99%% of its values are below 1, else mm/yr.')
     parser.add_argument('--data-scale', dest='data_scale', type=float, nargs='+',
                         metavar='FACTOR',
                         help='multiply the data by FACTOR before anything - the map, the\n'
@@ -1160,7 +1164,12 @@ def create_stat_parser(prog=f'{PROG} stat'):
                           'FOLDER, searched with its subfolders for the one that\n'
                           'covers the file (default: found beside each file or in\n'
                           'its LiCSBAS folder, else its attributes; the nominal\n'
-                          'angles of a name - asc, desc ... - are not used).')
+                          'angles of a name - asc, desc ... - are not used). A name\n'
+                          'that says its track takes that track\'s geometry only:\n'
+                          '039A.los.tif -> 039A.E.tif, 039A_*.geo.E.tif (frames\n'
+                          'joined), never 061D.E.tif in the same folder; and never\n'
+                          'one of the other pass. FOLDERS, fewer than the files\n'
+                          '(--geom geo_asc/ geo_dsc/): all searched for every file.')
     geo.add_argument('--los-inc', dest='los_inc', type=float, nargs='+', metavar='DEG',
                      help='one incidence angle for all the pixels of a file instead,\n'
                           'one per file (or one for all).')
@@ -1330,7 +1339,13 @@ named by the first word: strike (the default), reverse (or thrust), normal.
 Draw the profile ACROSS the fault on the map (two clicks), or give it - or
 several, A-A', B-B', C-C' ... - up front with --start-lalo / --end-lalo,
 --profile (repeat it) or --line-file (one section per line); each section is
-fitted on its own, with windows of its own. Every pixel of the swath
+fitted on its own, with windows of its own. Or, as `viewinsar stat`, a line
+ALONG the fault with --spacing KM: left-click its points (Enter), or give it
+with --line-lalo / --line-yx / --line-file; a profile crosses it every KM,
+--length km either side (default 50), --width km wide - the fault of each is
+where it crosses the line - each fitted; then the model along the line (the
+slip rate and locking depth of every profile, with their 95 % ranges).
+Every pixel of the swath
 (+/-WIDTH km) becomes a point: velocity against its distance from the
 fault. The points are binned (--bin km, the median of each bin, as Ou et
 al. 2022) and the bins fitted with the affine-invariant ensemble MCMC
@@ -1400,6 +1415,15 @@ examples:
   viewinsar model geo_velocity.h5 --comp los --fault faults.shp \\
       --line-file profiles.gmt --nodisplay --save fits    # one per segment
 
+  # as stat: a line along the fault, a profile across it every 20 km (+/-60 km
+  # long, +/-15 km wide), each fitted - then the model along the line
+  viewinsar model geo_velocity.h5 --comp los --fault faults.shp --spacing 20 \\
+      --length 60 --width 15
+  viewinsar model T014A/geo_velocity.h5 T123D/geo_velocity.h5 --comp los \\
+      --spacing 25 --length 50 --line-file fault_trace.geojson --nodisplay --save
+  viewinsar model geo_velocity.h5 --comp los --spacing 20 \\
+      --line-lalo 40.70 29.90 40.73 30.40 40.70 30.70
+
   # LiCSBAS, as it is: cum_filt.h5 (its velocity, vel), results/vel.filt.mskd or
   # a GeoTIFF of it - the grid, the unit (mm/yr), results/mask and the LOS of
   # every pixel (GEOCml*/E.geo, N.geo, U.geo) are found by themselves
@@ -1450,7 +1474,9 @@ examples:
 
 mouse / keyboard: as `viewinsar swath` - two left clicks draw a section (and
 fit it), "=" starts another, "n" redoes the current one, "e" exports; "l" on a
-profile moves its legend: inside, outside, off, in turn.
+profile moves its legend: inside, outside, off, in turn. With --spacing, as
+stat: left clicks draw the line along the fault, Enter makes and fits the
+profiles, "u" / Backspace removes the last point, "n" starts a new line.
 
 output (written by "e" or --save, into the --save folder - made if it does not
 exist - or --outdir, else the current folder), for each section X, named after
@@ -1477,7 +1503,12 @@ its line, e.g. model_A_Y470X150_Y130X700_w25km:
   model_sections_AB.csv  two sections or more: one row each - its ends, where
                          it crosses the fault, the strike, the sense of slip,
                          S, d1 (C, d2, x0) and the strain with their 95 % ranges
-                         (reverse / normal: S, d1, dip, x0, h_rate, v_rate)
+                         (reverse / normal: S, d1, dip, x0, h_rate, v_rate);
+                         --spacing: its point and dist_km along the line first
+  --spacing, named after the line, e.g. model_line_Y90X10_Y59X214_sp20km_L50km_w15km:
+  <line>_along.png       the model along the line: S, d1 (C, d2 / dip) of every
+                         profile, MAP and 95 % range
+  <line>_info.txt        the line's vertices, the parameters, each profile's point
 
 map options: anything not listed above goes to view.py, as for `viewinsar swath`
 (--colormap --vlim --unit --mask --sub-lat --sub-lon ...).
@@ -1605,8 +1636,30 @@ def create_model_parser(prog=f'{PROG} model [strike|reverse|normal]'):
                       help='the sections as "lon lat" lines, GMT format, one per\n'
                            'segment (split by ">"), from its first to its last point\n'
                            '- or any vector file (.geojson .kml .shp .gpkg), one\n'
-                           'per line.')
+                           'per line. With --spacing: the line ALONG the fault (the\n'
+                           'longest line of the file), as in stat.')
     add_profile_options(line)
+
+    many = parser.add_argument_group(
+        'Line of profiles', 'as `viewinsar stat`: a line ALONG the fault, and a profile\n'
+        'across it every --spacing km, each fitted on its own')
+    many.add_argument('--spacing', dest='spacing', type=float, metavar='KM',
+                      help='a profile every KM along a line drawn along the fault\n'
+                           '(left-click its points on the map, Enter) or given with\n'
+                           '--line-lalo / --line-yx / --line-file - instead of the\n'
+                           'profiles drawn one by one ("=" for the next). Centred on\n'
+                           'the line, at right angles to it; the fault is the line. A\n'
+                           'is on the left of the line (walking from its first point\n'
+                           'to its last), A\' on the right.')
+    many.add_argument('--length', dest='length_km', type=float, metavar='KM',
+                      help='how far each profile reaches either side of the line, in\n'
+                           'km (default: 50). Its swath: --width either side.')
+    many.add_argument('--line-lalo', dest='line_lalo', type=float, nargs='+',
+                      metavar='LAT LON',
+                      help='the line along the fault as lat lon pairs (or northing\n'
+                           'easting on a UTM file).')
+    many.add_argument('--line-yx', dest='line_yx', type=float, nargs='+', metavar='Y X',
+                      help='the line along the fault as row col pairs.')
 
     swath = parser.add_argument_group('Swath', 'the pixels that go into the fit')
     swath.add_argument('--width', dest='width', type=float, default=20.0,
@@ -1677,7 +1730,10 @@ def create_model_parser(prog=f'{PROG} model [strike|reverse|normal]'):
                            'covers the file (default: found beside each file or in\n'
                            'its LiCSBAS folder, else its attributes, else nominal\n'
                            'angles for the orbit its name says - asc, desc ... - for\n'
-                           'the GNSS only: --comp auto then fits the LOS as it is).')
+                           'the GNSS only: --comp auto then fits the LOS as it is).\n'
+                           'Each file its own track and pass (039A.los.tif ->\n'
+                           '039A.E.tif); FOLDERS fewer than the files: all searched\n'
+                           'for every file.')
     data.add_argument('--los-inc', dest='los_inc', type=float, nargs='+', metavar='DEG',
                       help='one incidence angle for all the pixels of a file instead,\n'
                            'one per file (or one for all).')
@@ -2049,13 +2105,57 @@ def model_cmd_line_parse(iargs=None):
         raise ValueError(f'--los-inc / --los-az: {len(inps.los_inc)} values for '
                          f'{len(inps.file)} input file(s)')
 
-    collect_profiles(inps)
-    if not inps.disp_fig and not inps.profiles:
-        raise ValueError('--nodisplay needs the profiles up front (--start-lalo / --end-lalo, '
-                         '--start-yx / --end-yx, --line-file or --profile)')
+    check_model_line(inps)
+    if inps.spacing is None:
+        collect_profiles(inps)
+        if not inps.disp_fig and not inps.profiles:
+            raise ValueError('--nodisplay needs the profiles up front (--start-lalo / '
+                             '--end-lalo, --start-yx / --end-yx, --line-file or --profile; '
+                             'or --spacing with a line along the fault)')
 
     if view_extra and inps.print_msg:
         print(f'options forwarded to view.py: {" ".join(view_extra)}')
+    return inps
+
+
+def check_model_line(inps):
+    """--spacing: the profiles come from a line along the fault, as in stat -
+    not with the profiles given one by one, nor with --x0 (the fault is the
+    line). --line-file is then that line."""
+    lined = [opt for opt, val in (('--line-lalo', inps.line_lalo), ('--line-yx', inps.line_yx))
+             if val]
+    if inps.spacing is None:
+        if lined or inps.length_km is not None:
+            raise ValueError(f"{', '.join(lined) or '--length'}: the line of profiles of "
+                             '--spacing - give --spacing KM too')
+        inps.line_file = None
+        return inps
+    for opt, value in (('--spacing', inps.spacing), ('--length', inps.length_km)):
+        if value is not None and not value > 0:
+            raise ValueError(f'{opt} must be positive, got {value}')
+    if inps.length_km is None:
+        inps.length_km = 50.0
+    others = [opt for opt, val in (('--start-lalo', inps.start_lalo),
+                                   ('--start-yx', inps.start_yx), ('--profile', inps.profile),
+                                   ('--profile-yx', getattr(inps, 'profile_yx', None)))
+              if val]
+    if others:
+        raise ValueError(f"--spacing makes the profiles from a line along the fault; "
+                         f"{', '.join(others)} give them one by one - one or the other")
+    if inps.x0_km is not None:
+        raise ValueError('--x0 with --spacing: on a line of profiles the fault is the line')
+    inps.line_yx = _pairs(inps.line_yx, '--line-yx')
+    inps.line_lalo = _pairs(inps.line_lalo, '--line-lalo')
+    inps.line_file = inps.lola_file
+    given = lined + (['--line-file'] if inps.line_file else [])
+    if len(given) > 1:
+        raise ValueError('give the line once: --line-lalo, --line-yx OR --line-file')
+    if inps.line_file and not os.path.exists(inps.line_file):
+        raise ValueError(f'--line-file: no such file: {inps.line_file}')
+    if not inps.disp_fig and not given:
+        raise ValueError('--nodisplay with --spacing needs the line along the fault up front '
+                         '(--line-lalo, --line-yx or --line-file)')
+    inps.profiles = []
     return inps
 
 
@@ -2512,9 +2612,10 @@ stat - fault creep along a line, from short profiles across it
   through each side, and the creep rate is their offset at the line - block 2 (RIGHT,
   walking from the first point to the last) minus block 1 (LEFT) - with a bootstrap
   that resamples each side on its own (--boot), as Hussain et al. (2016).
-  the figure    the LOS creep rate along the line, a series per file, 1-sigma error
-                bars (descending solid, ascending dashed); ascending + descending
-                (--geom, --los-inc / --los-az): split into fault-parallel and vertical
+  the figure    the LOS creep rate along the line (mm/yr), a series per file, 1-sigma
+                error bars (descending solid, ascending dashed); where ascending AND
+                descending tracks have an LOS geometry (found per track, --geom,
+                --los-inc / --los-az): split into fault-parallel and vertical
   a profile     click a point of the creep rate: its pixels, the least-squares
                 (BLUE) and bootstrap lines, the PDFs (arrows: other points / files)
   options       --names / --colors of the blocks, --ylim, --keep-zero, --min-pixels,
@@ -2542,7 +2643,10 @@ model - slip rate and locking depth from profiles across a fault
                 S cos(dip), uplift / subsidence S sin(dip)
   profiles      as swath: two clicks, or up front --start-lalo / --end-lalo,
                 --profile (repeat it: A-A', B-B' ... each fitted on its own) and
-                --line-file (one per line)
+                --line-file (one per line); or, as stat, --spacing KM: a line along
+                the fault (clicks + Enter, --line-lalo / --line-yx / --line-file), a
+                profile across it every KM (--length, --width), each fitted, and
+                the model along the line
   the fault     where the profile crosses --fault FILE, with its strike there; or
                 --x0 KM / --strike DEG
   the data      strike: --comp auto|los|par|ve|vn|as-is - auto (default) turns a
@@ -2557,7 +2661,8 @@ model - slip rate and locking depth from profiles across a fault
                 --noise auto|white|SILL LENGTH
   the sampler   --walkers, --steps, --burn, --seed
   keys          as swath: left click x2 draws a profile and fits it | "=" another |
-                "n" redo the current one | "e" export
+                "n" redo the current one | "e" export; --spacing: clicks draw the
+                line, Enter fits its profiles, "u" undo, "n" a new line
   GNSS          --gnss FILE --vel par|ve|vn|vu|los (reverse / normal: perp|vu),
                 fitted with an offset of their own (--gnss-nofit: shown only),
                 --gnss-width
@@ -2573,7 +2678,9 @@ model - slip rate and locking depth from profiles across a fault
                 marginals in blue, the MAP in red - one of each per section
   output        model_<A>_...: .png, _posterior.png, _params.csv / .txt, _samples.csv,
                 _bins.csv, _points.csv, _gnss.csv; model_map_ABC.png, and
-                model_sections_ABC.csv (two sections or more: one row each)
+                model_sections_ABC.csv (two sections or more: one row each);
+                --spacing: model_line_..._along.png (the model along the line) and
+                _info.txt
   examples      {prog} model velocity.h5 --comp los --fault faults.shp --width 25
                 {prog} model asc.h5 desc.h5 --comp los --fault faults.shp --gnss gnss.csv
                 {prog} model velocity.h5 --comp los --fault faults.shp --creep \\

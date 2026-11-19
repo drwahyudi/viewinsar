@@ -29,6 +29,7 @@ from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.offsetbox import AnchoredText
 
+from .lineview import LineTools
 from .model import (
     NAMES,
     UNITS,
@@ -378,6 +379,8 @@ class ModelSection(Section):
         self.map_marks = []
         self.legend_where = None      # the "l" key: in / out / off (else --legend)
         self.legend_at = None         # where the legend went: in / out / off
+        self.on_line = False          # a profile of --spacing: the fault is the line
+        self.line_point = self.line_dist = None      # its point, km along the line
         self.clear_model()
 
     def clear_model(self):
@@ -578,7 +581,9 @@ class ModelSection(Section):
             raise ValueError('the pixel size is unknown, so are the distances in km')
 
         # 1. the fault along the profile
-        if v.x0_km is not None:
+        if self.on_line:              # a profile of --spacing: where it crosses the line
+            self.x_fault, self.fault_how = length / 2, 'the line along the fault'
+        elif v.x0_km is not None:
             self.x_fault, self.fault_how = float(v.x0_km), '--x0'
         elif self.crossings.size:
             k = int(np.argmin(np.abs(self.crossings - length / 2)))
@@ -610,6 +615,8 @@ class ModelSection(Section):
         strike, self.strike_how = None, ''
         if v.strike is not None:
             strike, self.strike_how = float(v.strike) % 360.0, '--strike'
+        elif self.on_line:            # at right angles to the profile, by construction
+            strike, self.strike_how = (self.prof_az + 90.0) % 360.0, 'the line along the fault'
         elif v.faults:
             strike = v.trace_strike(self.frame)
             if strike is not None:
@@ -981,7 +988,10 @@ class ModelSection(Section):
             self.draw_strain()
         if self.ax_topo is not None:
             self.draw_topo()
-        self.draw_posterior()
+        if v.line_mode:               # a window each would be too many: made for the export
+            self.fig_post = None
+        else:
+            self.draw_posterior()
         self.mark_fault_on_map()
         self.fig.canvas.draw_idle()
         self.fig.canvas.flush_events()
@@ -1517,7 +1527,7 @@ class ModelSection(Section):
         ax.axvline(x0, color='k', ls=':', lw=1.1)
         return
 
-    def draw_posterior(self):
+    def draw_posterior(self, window=True):
         """The posterior, as Hussain et al. (2016, central NAF, Fig. 9): the joint
         distribution of every pair of parameters as a 2D histogram (jet; each panel scaled to
         its own peak, as their bin areas differ and a strong correlation such as
@@ -1535,7 +1545,10 @@ class ModelSection(Section):
         gap = 0.3                                      # inches: room for the MAP titles
         head = 0.22 + 2 * 1.3 * fsize / 72.0           # inches: the two caption lines
         size = (1.75 * num + 1.0, 1.6 * num + 0.65 + head + gap)
-        if self.fig_post is None or not plt.fignum_exists(self.fig_post.number):
+        if not window:                   # for the export only: no window
+            from matplotlib.figure import Figure
+            self.fig_post = Figure(figsize=size)
+        elif self.fig_post is None or not plt.fignum_exists(self.fig_post.number):
             self.fig_post = _new_figure(f'Posterior {self.name}', size)
             self.fig_post.canvas.mpl_connect('key_press_event', v.on_key)
             if v.disp_fig:               # made after plt.show(): show it ourselves
@@ -1674,6 +1687,8 @@ class ModelSection(Section):
         out = f'{base}{v.fig_ext}'
         self.fig.savefig(out, bbox_inches='tight', dpi=v.fig_dpi)
         written.append(out)
+        if self.fig_post is None and v.line_mode:
+            self.draw_posterior(window=False)
         if self.fig_post is not None:
             out = f'{base}_posterior{v.fig_ext}'
             self.fig_post.savefig(out, bbox_inches='tight', dpi=v.fig_dpi)
@@ -1898,7 +1913,7 @@ class ModelSection(Section):
 
 
 ##############################################################################
-class ModelViewer(swathProfileViewer):
+class ModelViewer(LineTools, swathProfileViewer):
     """Interactive dislocation-model fits of profiles across a fault.
 
     Example:
@@ -1921,6 +1936,9 @@ class ModelViewer(swathProfileViewer):
                 if sec.fig is not None and sec.fig is figure:
                     sec.cycle_legend()
             return
+        if self.line_mode:
+            self.on_line_key(event)
+            return
         super().on_key(event)
 
     def __init__(self, inps, view_cmd):
@@ -1928,6 +1946,211 @@ class ModelViewer(swathProfileViewer):
         self._los = {}
         self.gnss_comp_used = None
         self.data_los = False            # LOS data, fitted as they are (--comp auto)
+        # --spacing: a line along the fault, a profile across it every SPACING km
+        self.vertices, self.line_artists = [], []
+        self.line, self.line_done = None, False
+        self.fig_along = None
+
+    ##---------- a line of profiles (--spacing), as stat
+    @property
+    def line_mode(self):
+        """--spacing: the profiles come from a line along the fault."""
+        return getattr(self, 'spacing', None) is not None
+
+    def plot(self):
+        if not self.line_mode:
+            return super().plot()
+        self.make_map()
+        if self.vertices:
+            self.draw_line_on_map()
+            self.run_line()
+        if self.save_fig:
+            if any(s.has_data for s in self.sections):
+                self.save_outputs()
+            elif self.disp_fig:
+                print(f'--save: nothing fitted yet - "e" exports into {export_dir(self.outdir)}')
+        if self.disp_fig:
+            print(self.help_msg())
+            plt.show()
+        return
+
+    def select_point(self, event):
+        """--spacing: a left click adds a point to the line along the fault."""
+        if not self.line_mode:
+            return super().select_point(event)
+        if (event.inaxes is not self.ax_img or event.xdata is None or event.button != 1
+                or self._toolbar_busy()):
+            return
+        if self.line_done:                    # a click after Enter starts a new line
+            self.clear_line()
+        yx = self.click_rowcol(event)
+        self.vertices.append(yx)
+        self.vprint(f'line point {len(self.vertices)}: y/x = {yx[0]:.2f}, {yx[1]:.2f}')
+        self.draw_line_on_map()
+        return
+
+    def on_line_key(self, event):
+        if event.key in ('enter', 'return'):
+            if self.line_done:
+                print('the profiles of this line are fitted - "n" (or a click) for a new line')
+            else:
+                self.run_line()
+        elif event.key in ('u', 'backspace'):
+            if self.vertices and not self.line_done:
+                self.vertices.pop()
+                self.draw_line_on_map()
+        elif event.key == 'n':
+            self.clear_line()
+            print('new line - left-click its points along the fault, then press Enter.')
+        elif event.key == 'e':
+            self.save_outputs()
+        elif event.key in ('=', '+'):
+            print('--spacing: the profiles come from the line along the fault (without '
+                  '--spacing, "=" starts the next profile)')
+        return
+
+    def run_line(self):
+        """A profile across the line every --spacing km, --length km either side
+        of it, at right angles to its direction over +/- --width - each a
+        section of its own (A-A', B-B' ...), fitted; then the model along it."""
+        from .stat import grid_mirrored, polyline_frame, profile_axes, sample_points, to_yx
+
+        if len(self.vertices) < 2:
+            print('the line needs at least two points.')
+            return
+        try:
+            frame = polyline_frame(self.atr, self.vertices,
+                                   mirrored=grid_mirrored(self.atr, self.lookup))
+            dist, points, normals = sample_points(frame, self.spacing, smooth_km=self.width)
+        except ValueError as err:
+            print(f'cannot use this line: {err}')
+            return
+        self.line = dict(frame=frame, dist_km=dist, points=points, normals=normals,
+                         length_km=frame['cum'][-1] * frame['scale'])
+        self.line_done = True
+        half = self.length_km / frame['scale']
+        num = len(dist)
+        print(f"line: {self.line['length_km']:.1f} km - {num} profile(s) every "
+              f'{self.spacing:g} km, {self.length_km:g} km either side of it, the pixels '
+              f'within {self.width:g} km of each')
+        if self.spacing < 2 * self.width:
+            print(f'NOTE: spacing {self.spacing:g} km < 2 x width: neighbouring swaths '
+                  'overlap and share pixels')
+        for k in range(num):
+            across = profile_axes(normals[k])[0]                # towards the right side
+            start = to_yx(frame, points[k] - across * half)
+            end = to_yx(frame, points[k] + across * half)
+            sec = self.SECTION_CLASS(self, len(self.sections))
+            self.sections.append(sec)
+            sec.start_yx = [float(start[0]), float(start[1])]
+            sec.end_yx = [float(end[0]), float(end[1])]
+            sec.on_line, sec.line_point, sec.line_dist = True, k, float(dist[k])
+            sec.draw_on_map()
+            self.vprint(f'\n----- section {sec.name} ({k + 1} of {num}), '
+                        f'{dist[k]:.1f} km along the line')
+            try:
+                sec.draw()
+            except (ValueError, IndexError) as err:   # one bad profile: go on with the rest
+                print(f'WARNING: section {sec.name}: {err}')
+                sec.clear_data()
+            if self.disp_fig and sec.fig is not None:  # made after plt.show(): show it
+                try:
+                    sec.fig.show()
+                except Exception:        # noqa: BLE001 - a backend without windows
+                    pass
+        fitted = [s for s in self.sections if s.on_line and s.has_data]
+        print(f'line: {len(fitted)} of {num} profile(s) fitted')
+        self.fig_map.canvas.draw_idle()
+        self.draw_along()
+        return
+
+    def clear_line(self):
+        """Forget the line and its profiles - their windows close."""
+        for sec in self.sections:
+            sec.clear_map_artists()
+            for art in sec.map_marks:
+                try:
+                    art.remove()
+                except (ValueError, NotImplementedError):
+                    pass
+            for fig in (sec.fig, sec.fig_post):
+                if fig is not None:
+                    plt.close(fig)
+        self.sections = []
+        self.vertices, self.line, self.line_done = [], None, False
+        self._remove(self.line_artists)
+        if self.fig_along is not None:
+            plt.close(self.fig_along)
+            self.fig_along = None
+        self.fig_map.canvas.draw_idle()
+        return
+
+    def along_names(self):
+        """The parameters drawn along the line, in this order."""
+        fitted = [s for s in self.sections if s.on_line and s.has_data]
+        names = set().union(*(s.result['summary'] for s in fitted)) if fitted else set()
+        order = ('S', 'd1', 'dip') if self.dip_slip else ('S', 'd1', 'C', 'd2')
+        return [n for n in order if n in names]
+
+    def draw_along(self):
+        """The model along the line: a panel per parameter - the MAP of every
+        profile with its 95 % range, the profiles named over the points."""
+        names = self.along_names()
+        secs = [s for s in self.sections if s.on_line]
+        if not names or not secs:
+            return
+        size = (max(self.fig_size[0], 8.0), 1.0 + 2.1 * len(names))
+        if self.fig_along is None or not plt.fignum_exists(self.fig_along.number):
+            self.fig_along = _new_figure('Along the line', size)
+            self.fig_along.canvas.mpl_connect('key_press_event', self.on_key)
+            if self.disp_fig:
+                try:
+                    self.fig_along.show()
+                except Exception:        # noqa: BLE001
+                    pass
+        fig = self.fig_along
+        fig.clf()
+        axes = fig.subplots(len(names), 1, sharex=True, squeeze=False)[:, 0]
+        fig.subplots_adjust(left=0.12, right=0.97, top=1 - 0.5 / size[1],
+                            bottom=0.55 / size[1], hspace=0.08)
+        dist = np.array([s.line_dist for s in secs])
+        unit = _unit_text(self.model_unit).strip()
+        sense = (not self.dip_slip and all(s.sense_known for s in secs if s.has_data))
+        hi_top = None
+        for ax, name in zip(axes, names):
+            val, lo, hi = (np.array([s.result['summary'][name][key] if s.has_data and name in
+                                     s.result['summary'] else np.nan for s in secs])
+                           for key in ('map', 'lo', 'hi'))
+            hi_top = hi if hi_top is None else hi_top        # the top of the first panel
+            yerr = np.vstack([val - lo, hi - val])
+            cont = ax.errorbar(dist, val, yerr=yerr, fmt='o-', color='k', ms=5, lw=1.2,
+                               elinewidth=1.0, capsize=3, mfc='w', mew=1.2, zorder=4)
+            cont.lines[0].set_gid(f'along_{name}')
+            u = {'mm/yr': unit, 'km': 'km', 'deg': '°'}.get(UNITS.get(name, ''), '')
+            label = describe(name).capitalize() + (f' ({u})' if u else '')
+            if name == 'S' and sense:
+                label += '\n+ right-lateral'
+            ax.set_ylabel(label, fontsize=self.font_size)
+            if name in ('S', 'C'):
+                ax.axhline(0, color='0.5', lw=0.6, zorder=1)
+            ax.tick_params(which='both', direction='in', labelsize=max(self.font_size - 1, 6),
+                           top=True, right=True)
+        lo, hi = axes[0].get_ylim()                  # room for the names over the points
+        axes[0].set_ylim(lo, hi + 0.18 * (hi - lo))
+        for sec, x, y, top in zip(secs, dist, axes[0].lines[0].get_ydata(), hi_top):
+            if np.isfinite(y):
+                axes[0].annotate(sec.label, xy=(x, top), xytext=(0, 4),
+                                 textcoords='offset points', ha='center', va='bottom',
+                                 fontsize=max(self.font_size - 3, 6), fontweight='bold')
+        step = self.spacing
+        axes[-1].set_xlim(min(0.0, dist.min() - 0.6 * step),
+                          max(self.line['length_km'], dist.max() + 0.6 * step))
+        axes[-1].set_xlabel('Distance along the line (km)', fontsize=self.font_size)
+        axes[0].set_title(f'{len(secs)} profiles every {step:g} km, \u00b1{self.length_km:g} km'
+                          f' \u00d7 \u00b1{self.width:g} km | MAP and 95% range',
+                          fontsize=max(self.font_size - 1, 6))
+        fig.canvas.draw_idle()
+        return
 
     ##---------- units
     @property
@@ -1966,6 +2189,8 @@ class ModelViewer(swathProfileViewer):
         if self.comp == 'as-is' and self.print_msg:
             print('NOTE: --comp as-is: the data are fitted as they are; for LOS data '
                   '--comp los gives the fault-parallel velocity (and the sense of slip)')
+        if self.line_mode:
+            self.vertices = self.cli_line()
         return
 
     @property
@@ -2217,6 +2442,20 @@ class ModelViewer(swathProfileViewer):
 
     ##---------- windows
     def help_msg(self):
+        if self.line_mode:
+            msg = '\n' + '-' * 74
+            msg += '\n  left click     : add a point to the line ALONG the fault'
+            msg += (f'\n  key Enter      : a profile across it every {self.spacing:g} km '
+                    f'(+/-{self.length_km:g} km,')
+            msg += f'\n                   +/-{self.width:g} km wide) -> each fitted, and the model'
+            msg += '\n                   along the line'
+            msg += '\n  key "u" / Back : remove the last point'
+            msg += '\n  key "n"        : start a new line (its profiles close)'
+            msg += '\n  key "l"        : the legend of a profile: in / out / off'
+            msg += '\n  key "e"        : export the map, every fit and posterior, the tables and'
+            msg += f'\n                   the model along the line, into {export_dir(self.outdir)}'
+            msg += '\n' + '-' * 74
+            return msg
         msg = '\n' + '-' * 74
         msg += '\n  left click x2 : draw a profile ACROSS the fault -> the model is fitted'
         msg += '\n  key "="  or  "+" : start ANOTHER section in a new window'
@@ -2231,6 +2470,8 @@ class ModelViewer(swathProfileViewer):
         for sec in self.sections:
             if sec.fig_post is not None:
                 plt.close(sec.fig_post)
+        if self.fig_along is not None:
+            plt.close(self.fig_along)
         return
 
     ##---------- output
@@ -2240,6 +2481,8 @@ class ModelViewer(swathProfileViewer):
         written = super().save_outputs()
         fitted = [s for s in self.sections if s.has_data]
         if len(fitted) < 2:
+            if self.line_mode and self.line is not None:
+                written += self.save_line()
             return written
         out = os.path.join(self.outdir,
                            f'{self.COMMAND}_sections_{"".join(s.label for s in fitted)}.csv')
@@ -2248,9 +2491,10 @@ class ModelViewer(swathProfileViewer):
             names, derived = ('S', 'd1', 'dip', 'x0'), ('h_rate', 'v_rate')
         else:
             names, derived = ('S', 'd1', 'C', 'd2', 'x0'), ('strain',)
-        head = ['section', 'start_lat', 'start_lon', 'end_lat', 'end_lon', 'fault_km',
-                'fault_lat', 'fault_lon', 'strike_deg',
-                'fault_type' if self.dip_slip else 'sense', 'pixels', 'rate_unit']
+        head = (['point', 'dist_km'] if self.line_mode else []) + [
+            'section', 'start_lat', 'start_lon', 'end_lat', 'end_lon', 'fault_km',
+            'fault_lat', 'fault_lon', 'strike_deg',
+            'fault_type' if self.dip_slip else 'sense', 'pixels', 'rate_unit']
         for name in names + derived + self.offset_names(fitted):
             head += [f'{name}_map', f'{name}_lower_95', f'{name}_upper_95']
         with open(out, 'w') as fid:
@@ -2265,6 +2509,47 @@ class ModelViewer(swathProfileViewer):
                   'km, strain in ' + ('microstrain/yr)' if self.model_unit == 'mm/yr' else
                                       f'{self.model_unit}/km)'))
         written.append(out)
+        if self.line_mode and self.line is not None:
+            written += self.save_line()
+        return written
+
+    @property
+    def line_base(self):
+        (y0, x0), (y1, x1) = self.vertices[0], self.vertices[-1]
+        return os.path.join(self.outdir, f'{self.COMMAND}_line_Y{int(round(y0))}X'
+                                         f'{int(round(x0))}_Y{int(round(y1))}X{int(round(x1))}_'
+                                         f'sp{self.spacing:g}km_L{self.length_km:g}km_'
+                                         f'w{self.width:g}km')
+
+    def save_line(self):
+        """--spacing: the model along the line, and where the line is."""
+        base, written = self.line_base, []
+        if self.fig_along is not None:
+            out = f'{base}_along{self.fig_ext}'
+            self.fig_along.savefig(out, bbox_inches='tight', dpi=self.fig_dpi)
+            written.append(out)
+        out = f'{base}_info.txt'
+        with open(out, 'w') as fid:
+            fid.write(f"line           : {self.line['length_km']:.4f} km, "
+                      f'{len(self.vertices)} vertices\n')
+            for i, (r, c) in enumerate(self.vertices):
+                ll = self.pixel_lonlat(0, [r], [c]) if 'Y_FIRST' in self.atr or self.lookup \
+                    else None
+                where = (f', lat/lon {float(np.ravel(ll[1])[0]):.6f}, '
+                         f'{float(np.ravel(ll[0])[0]):.6f}') if ll is not None else ''
+                fid.write(f'vertex {i + 1:<8d}: y/x {r:.2f}, {c:.2f}{where}\n')
+            fid.write(f'profiles       : every {self.spacing:g} km along the line (centred on '
+                      f'it), {self.length_km:g} km either side of it, the pixels within '
+                      f'{self.width:g} km of each; at right angles to the line over +/- '
+                      f'{self.width:g} km; the fault of each = where it crosses the line\n')
+            for sec in self.sections:
+                if sec.on_line:
+                    state = 'fitted' if sec.has_data else 'no model'
+                    fid.write(f'section {sec.label:<7s}: point {sec.line_point + 1}, '
+                              f'{sec.line_dist:.2f} km along the line - {state}\n')
+        written.append(out)
+        for path in written:
+            print(f'saved: {path}')
         return written
 
     def _section_row(self, sec, names, derived=('strain',)):
@@ -2285,7 +2570,8 @@ class ModelViewer(swathProfileViewer):
             return f'{lat:.6f}', f'{lon:.6f}'
 
         (y0, x0), (y1, x1) = sec.start_yx, sec.end_yx
-        row = [sec.label, *lonlat(y0, x0), *lonlat(y1, x1)]
+        row = ([str(sec.line_point + 1), f'{sec.line_dist:.4f}'] if self.line_mode else [])
+        row += [sec.label, *lonlat(y0, x0), *lonlat(y1, x1)]
         geom = line_geometry(self.atr, sec.start_yx, sec.end_yx, self.width)
         t = sec.x_fault / (geom['length'] * geom['dist_scale'])
         row += [f'{sec.x_fault:.4f}', *lonlat(y0 + t * (y1 - y0), x0 + t * (x1 - x0)),

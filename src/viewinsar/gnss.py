@@ -557,6 +557,40 @@ def _pass_of(tokens):
     return found.pop() if len(found) == 1 else None
 
 
+_TRACK_RE = re.compile(r'(?:(\d{3})|t(\d{1,3}))([ad])')
+
+
+def track_ids(path, levels=1):
+    """The Sentinel-1 / LiCSAR track a name says - {'039a'} for 039A.los.tif,
+    T39A_vel.tif or 039A_09234_131313.geo.E.tif: from the name of the file (or
+    folder) itself, else from the nearest of its `levels` folders above that
+    says one (105D_09094_131313/GEOCml10GACOS)."""
+    for tokens in _name_tokens(path, levels):
+        out = set()
+        for t in tokens:
+            m = _TRACK_RE.fullmatch(t)
+            if m:
+                out.add(f'{int(m.group(1) or m.group(2)):03d}{m.group(3)}')
+        if out:
+            return out
+    return set()
+
+
+def data_pass(data_file, atr=None):
+    """'asc' / 'desc' of a data file: its ORBIT_DIRECTION, else its name or its
+    folders' (asc, desc, 039A, T14D ...); None when nothing says."""
+    direction = str((atr or {}).get('ORBIT_DIRECTION', '')).strip().lower()
+    if direction.startswith('asc'):
+        return 'asc'
+    if direction.startswith(('desc', 'dsc')):
+        return 'desc'
+    for tokens in _name_tokens(data_file):
+        found = _pass_of(tokens)
+        if found:
+            return found
+    return None
+
+
 def _mission_of(tokens):
     for i, t in enumerate(tokens):
         if t.startswith(('alos2', 'palsar2', 'scansar')) or t in ('alos', 'palsar', 'wd1', 'wd2'):
@@ -661,21 +695,39 @@ class LOSGeometry:
         self._lookup = None
 
     @classmethod
-    def for_file(cls, data_file, atr, geom_file=None, inc=None, az=None, verbose=True):
+    def for_file(cls, data_file, atr, geom_file=None, inc=None, az=None, verbose=True,
+                 geom_dirs=None):
+        """The geometry of a data file: --los-inc / --los-az; --geom (a file, or
+        a folder searched); geom_dirs - folders searched for every file, its
+        own track and pass; else found beside the data, else its attributes,
+        else nominal angles for the orbit its name says."""
         if inc is not None and az is not None:
             return cls(float(inc), float(az), source=f'given: incidence {inc}, azimuth {az}',
                        constant=True, kind='given')
+        if geom_dirs:
+            from .licsbas import geometry_in_folder
+
+            found, tried = [], []
+            for folder in geom_dirs:
+                found += [p for p in geometry_in_folder(folder) if p not in found]
+            geom = cls._pick(cls._expand(found), data_file, atr, tried=tried)
+            if geom is None:
+                raise ValueError(f"--geom {' '.join(geom_dirs)}: no geometry of "
+                                 f'{os.path.basename(data_file)} in them - '
+                                 + ('; '.join(tried) or 'no geometry at all'))
+            if verbose:
+                print(f'LOS geometry of {os.path.basename(data_file)}: {geom.source}')
+            return geom
         if geom_file and os.path.isdir(geom_file) and not _is_one_geometry(geom_file):
             return cls._from_folder(geom_file, data_file, atr, verbose)
-        for path in ([geom_file] if geom_file else cls._candidates(data_file)):
+        if geom_file:
             try:
-                geom = cls.from_path(path)
-                if not geom_file and not geom.covers(atr, data_file):
-                    continue
+                geom = cls.from_path(geom_file)
             except (OSError, KeyError, ValueError) as err:
-                if geom_file:
-                    raise ValueError(f'{geom_file}: {err}') from err
-                continue
+                raise ValueError(f'{geom_file}: {err}') from err
+        else:
+            geom = cls._pick(cls._expand(cls._candidates(data_file)), data_file, atr)
+        if geom is not None:
             if verbose:
                 print(f'LOS geometry of {os.path.basename(data_file)}: {geom.source}')
             return geom
@@ -720,27 +772,98 @@ class LOSGeometry:
 
     @classmethod
     def _from_folder(cls, folder, data_file, atr, verbose=True):
-        """--geom FOLDER: the first geometry in it (or below it) that covers the data."""
+        """--geom FOLDER: the geometry in it (or below it) that covers the data -
+        of the data's own track when the names say one (see _pick)."""
         from .licsbas import geometry_in_folder
 
         found, tried = geometry_in_folder(folder), []
-        for path in found:
-            try:
-                geom = cls.from_path(path)
-            except (OSError, KeyError, ValueError) as err:
-                tried.append(f'{os.path.relpath(path, folder)}: {err}')
-                continue
-            if geom.covers(atr, data_file):
-                if verbose:
-                    print(f'LOS geometry of {os.path.basename(data_file)}: {geom.source} '
-                          f'(found in --geom {folder})')
-                return geom
-            tried.append(f'{os.path.relpath(path, folder)}: does not cover the data')
         if not found:
             raise ValueError(f'--geom {folder}: no LOS geometry in it or in its subfolders - '
                              + GEOMETRY_KINDS)
-        raise ValueError(f'--geom {folder}: none of its geometries covers '
-                         f'{os.path.basename(data_file)} - ' + '; '.join(tried))
+        geom = cls._pick(found, data_file, atr, tried=tried, root=folder)
+        if geom is None:
+            raise ValueError(f'--geom {folder}: none of its geometries covers '
+                             f'{os.path.basename(data_file)} - ' + '; '.join(tried))
+        if verbose:
+            print(f'LOS geometry of {os.path.basename(data_file)}: {geom.source} '
+                  f'(found in --geom {folder})')
+        return geom
+
+    @staticmethod
+    def _expand(paths):
+        """Candidates with every E / N / U GeoTIFF set of a folder on its own -
+        a folder may hold the sets of several tracks or frames."""
+        from .licsbas import all_enu_tifs, has_enu_geo
+
+        out = []
+        for path in paths:
+            sets = ([t[0] for t in all_enu_tifs(path)]
+                    if os.path.isdir(path) and not has_enu_geo(path) else [])
+            for one in sets or [path]:
+                if one not in out:
+                    out.append(one)
+        return out
+
+    @classmethod
+    def _pick(cls, paths, data_file, atr, tried=None, root=None):
+        """The geometry of a data file among candidate paths, or None.
+
+        When the data's name says its track (039A.los.tif, 105D_09094_131313
+        ...), a geometry whose name says ANOTHER track is never taken - the
+        sets of several tracks often share a folder - and those of its own
+        come first: several of them (the frames of a track mosaic) become one
+        (LOSGeometries), each where it reaches. Otherwise: the first that
+        covers the middle of the data, as before.
+        """
+        want = track_ids(data_file, levels=2)
+        want_pass = data_pass(data_file, atr)
+        tried = [] if tried is None else tried
+        name = (lambda p: os.path.relpath(p, root)) if root else os.path.basename  # noqa: E731
+        mine, others = [], []
+        for path in paths:
+            ids = track_ids(path)
+            if want and ids and not ids & want:
+                tried.append(f'{name(path)}: another track ({", ".join(sorted(ids))})')
+                continue
+            (mine if want and ids & want else others).append(path)
+        def other_pass(geom, path):
+            seen = geom.pass_of(atr) if want_pass else None
+            if seen and seen != want_pass:
+                words = {'asc': 'ascending', 'desc': 'descending'}
+                tried.append(f'{name(path)}: {"an" if seen == "asc" else "a"} {words[seen]} '
+                             f'geometry, the data are {words[want_pass]}')
+                return True
+            return False
+
+        frames = []
+        for path in mine:
+            try:
+                geom = cls.from_path(path)
+            except (OSError, KeyError, ValueError) as err:
+                tried.append(f'{name(path)}: {err}')
+                continue
+            if other_pass(geom, path):
+                continue
+            if geom.covers(atr, data_file):
+                frames.insert(sum(f.covers(atr, data_file) for f in frames), geom)
+            elif geom.overlaps(atr, data_file):
+                frames.append(geom)
+            else:
+                tried.append(f'{name(path)}: does not cover the data')
+        if frames:
+            return frames[0] if len(frames) == 1 else LOSGeometries(frames)
+        for path in others:
+            try:
+                geom = cls.from_path(path)
+            except (OSError, KeyError, ValueError) as err:
+                tried.append(f'{name(path)}: {err}')
+                continue
+            if other_pass(geom, path):
+                continue
+            if geom.covers(atr, data_file):
+                return geom
+            tried.append(f'{name(path)}: does not cover the data')
+        return None
 
     @classmethod
     def from_path(cls, path):
@@ -822,6 +945,44 @@ class LOSGeometry:
         col = (x - float(self.atr['X_FIRST'])) / float(self.atr['X_STEP'])
         return bool(0 <= row < self.inc.shape[0] and 0 <= col < self.inc.shape[1])
 
+    def pass_of(self, atr=None):
+        """'asc' / 'desc' from the line of sight: a right-looking SAR sees the
+        ground from the west on an ascending pass. None when it cannot say."""
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            inc = float(np.nanmedian(self.inc)) if np.size(self.inc) > 1 else float(self.inc)
+            az = float(np.nanmedian(self.az)) if np.size(self.az) > 1 else float(self.az)
+        east = -np.sin(np.radians(inc)) * np.sin(np.radians(az))
+        if not np.isfinite(east) or abs(east) < 0.05:
+            return None
+        sides = [str(a.get('ANTENNA_SIDE', '-1')).strip() for a in (self.atr, atr) if a]
+        right = not sides or sides[0] != '1'
+        return 'asc' if (east < 0) == right else 'desc'
+
+    def overlaps(self, atr, data_file=None):
+        """Does the geometry reach any part of a (geocoded) data file?"""
+        if self.constant or self.atr is None or 'Y_FIRST' not in self.atr \
+                or 'Y_FIRST' not in atr:
+            return self.covers(atr, data_file)
+        from .raster import crs_of, same_crs
+
+        length, width = int(atr['LENGTH']), int(atr['WIDTH'])
+        fx, fy = np.meshgrid(np.linspace(0, 1, 5), np.linspace(0, 1, 5))
+        x = float(atr['X_FIRST']) + float(atr['X_STEP']) * width * fx.ravel()
+        y = float(atr['Y_FIRST']) + float(atr['Y_STEP']) * length * fy.ravel()
+        crs_d = crs_of(atr, data_file)
+        crs_g = self.crs if self.crs is not None else 4326
+        if crs_d is not None and not same_crs(crs_d, crs_g):
+            from pyproj import Transformer
+            x, y = Transformer.from_crs(crs_d, crs_g, always_xy=True).transform(x, y)
+        gx = float(self.atr['X_FIRST']) + float(self.atr['X_STEP']) * np.array(
+            [0, self.inc.shape[1]])
+        gy = float(self.atr['Y_FIRST']) + float(self.atr['Y_STEP']) * np.array(
+            [0, self.inc.shape[0]])
+        return bool(np.nanmin(x) < gx.max() and np.nanmax(x) > gx.min()
+                    and np.nanmin(y) < gy.max() and np.nanmax(y) > gy.min())
+
     def at_rowcol(self, rows, cols):
         """The angles at pixels of the geometry's own grid (nearest)."""
         if self.constant:
@@ -860,6 +1021,40 @@ class LOSGeometry:
         inc, az = np.full(lon.shape, np.nan), np.full(lon.shape, np.nan)
         if inside.any():
             inc[inside], az[inside] = self.at_rowcol(rows[inside], cols[inside])
+        return inc, az
+
+    def unit_vector_at(self, lon, lat):
+        return los_unit_vector(*self.at_lonlat(lon, lat))
+
+
+class LOSGeometries:
+    """The geometries of the frames of one track, as one (a track mosaic):
+    at every place the first of them that reaches it."""
+
+    def __init__(self, parts):
+        self.parts = list(parts)
+        first = self.parts[0]
+        self.kind, self.crs, self.constant, self.atr = first.kind, first.crs, False, None
+        self.inc, self.az, self.lat, self.lon = first.inc, first.az, None, None
+        self.source = ' + '.join(str(g.source) for g in self.parts)
+
+    def covers(self, atr, data_file=None):
+        return any(g.covers(atr, data_file) for g in self.parts)
+
+    def pass_of(self, atr=None):
+        return self.parts[0].pass_of(atr)
+
+    def overlaps(self, atr, data_file=None):
+        return any(g.overlaps(atr, data_file) for g in self.parts)
+
+    def at_lonlat(self, lon, lat):
+        lon, lat = np.asarray(lon, dtype=np.float64), np.asarray(lat, dtype=np.float64)
+        inc, az = self.parts[0].at_lonlat(lon, lat)
+        for geom in self.parts[1:]:
+            miss = ~np.isfinite(inc)
+            if not miss.any():
+                break
+            inc[miss], az[miss] = geom.at_lonlat(lon[miss], lat[miss])
         return inc, az
 
     def unit_vector_at(self, lon, lat):

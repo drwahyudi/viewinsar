@@ -10,6 +10,7 @@ descending track across a right-lateral fault striking N80E (20 mm/yr below
 import json
 import os
 
+import matplotlib
 import numpy as np
 import pytest
 from matplotlib import colors as mcolors
@@ -934,6 +935,138 @@ def test_model_interactive(products, tmp_path):
     assert len(obj.sections) == 2 and not obj.sections[1].has_data
     key('n')
     assert not obj.sections[1].has_data
+    obj.close()
+
+
+def _along_fault(*km):
+    """lat, lon of points km along the N80E fault of the products from its
+    reference point (130.45 E, 30.30 N), as --line-lalo takes them."""
+    out = []
+    for t in km:
+        out += [f'{FLAT + t * np.cos(np.radians(STRIKE)) / KM_LAT:.5f}',
+                f'{FLON + t * np.sin(np.radians(STRIKE)) / KM_LON:.5f}']
+    return out
+
+
+LINE = ['--spacing', '20', '--length', '25', '--width', '8']
+
+
+def test_model_line_options(products):
+    """--spacing: the profiles from a line along the fault, as in stat."""
+    asc = products['asc']
+    inps = cli.model_cmd_line_parse([asc, '--noverbose', '--spacing', '20', '--line-lalo',
+                                     *_along_fault(-40, 40)])
+    assert (inps.spacing, inps.length_km, inps.width) == (20.0, 50.0, 20.0)
+    assert len(inps.line_lalo) == 2 and inps.profiles == [] and inps.line_file is None
+    inps = cli.model_cmd_line_parse([asc, '--noverbose', '--spacing', '10', '--length', '30',
+                                     '--line-file', products['fault'], '--nodisplay'])
+    assert inps.line_file == products['fault'] and inps.length_km == 30.0
+    # without --spacing, --line-file is the sections, as before
+    inps = cli.model_cmd_line_parse([asc, '--noverbose', '--line-file', products['fault']])
+    assert inps.line_file is None and len(inps.profiles) == 1
+    bad = [['--spacing', '0'], ['--spacing', '10', '--length', '-1'],
+           ['--length', '30'], ['--line-lalo', '30.2', '130.1', '30.3', '130.8'],
+           ['--spacing', '10', *PROFILE], ['--spacing', '10', '--x0', '20'],
+           ['--spacing', '10', '--nodisplay'],
+           ['--spacing', '10', '--line-yx', '1', '2', '3', '4', '--line-file',
+            products['fault']]]
+    for extra in bad:
+        with pytest.raises(ValueError):
+            cli.model_cmd_line_parse([asc, '--noverbose', *extra])
+
+
+def test_model_line_of_profiles(products, tmp_path):
+    """A line along the fault, a profile across it every 20 km: each fitted, the
+    fault of each where it crosses the line; then the model along the line."""
+    from matplotlib.figure import Figure
+
+    out = tmp_path / 'out'
+    obj = cli.model_main([products['asc'], '--comp', 'los', *LINE, '--line-lalo',
+                          *_along_fault(-40, 40), *FAST, '--nodisplay', '--noverbose',
+                          '--outdir', str(out)])
+    assert obj.line_mode and obj.line['length_km'] == pytest.approx(80.0, rel=0.01)
+    assert [s.label for s in obj.sections] == ['A', 'B', 'C', 'D']
+    assert [s.line_dist for s in obj.sections] == pytest.approx([10, 30, 50, 70], abs=0.01)
+    for sec in obj.sections:
+        assert sec.on_line and sec.has_data, sec.name
+        assert sec.fault_how == sec.strike_how == 'the line along the fault'
+        geom_len = 50.0                               # +/- 25 km, the fault in the middle
+        assert sec.x_fault == pytest.approx(geom_len / 2, abs=0.05)
+        assert sec.strike % 180 == pytest.approx(STRIKE, abs=1.0)
+        summ = sec.result['summary']
+        assert summ['S']['map'] == pytest.approx(S_TRUE, abs=2.5), sec.name
+        assert summ['d1']['map'] == pytest.approx(D1_TRUE, abs=3.5), sec.name
+        # no posterior window - made for the export only
+        assert isinstance(sec.fig_post, Figure) and not hasattr(sec.fig_post, 'number')
+    names = set(os.listdir(out))
+    base = os.path.basename(obj.line_base)
+    assert base.endswith('_sp20km_L25km_w8km')
+    for tail in ('_along.png', '_info.txt'):
+        assert f'{base}{tail}' in names, tail
+    for sec in obj.sections:
+        assert f'{os.path.basename(sec.outfile_base)}_posterior.png' in names
+    table = _csv(out / 'model_sections_ABCD.csv')
+    assert list(table['point']) == [1, 2, 3, 4]
+    assert table['dist_km'] == pytest.approx([10, 30, 50, 70], abs=0.01)
+    assert list(table['sense']) == ['right-lateral'] * 4
+    # the fault of each profile is on the line: on the N80E trace
+    assert table['fault_lat'] == pytest.approx(
+        FLAT + (table['fault_lon'] - FLON) * KM_LON / KM_LAT / np.tan(np.radians(STRIKE)),
+        abs=0.005)
+    # the model along the line: S and d1 of every profile, MAP and 95 % range
+    ax_s, ax_d = obj.fig_along.axes
+    line = [ln for ln in ax_s.get_lines() if ln.get_gid() == 'along_S'][0]
+    assert np.asarray(line.get_ydata()) == pytest.approx(table['S_map'], abs=1e-4)
+    assert 'Slip rate (mm/yr)' in ax_s.get_ylabel() and 'right-lateral' in ax_s.get_ylabel()
+    assert ax_d.get_ylabel() == 'Locking depth (km)'
+    assert [t.get_text() for t in ax_s.texts] == ['A', 'B', 'C', 'D']
+    info = (out / f'{base}_info.txt').read_text()
+    assert 'section A      : point 1, 10.00 km along the line - fitted' in info
+    obj.close()
+
+
+def test_model_line_drawn_on_the_map(products, tmp_path):
+    """Clicks along the fault, Enter: the profiles are made and fitted; "n" a
+    new line - the profiles go; "=" is not for a line."""
+    from matplotlib.backend_bases import KeyEvent, MouseButton, MouseEvent
+
+    from viewinsar.modelview import ModelViewer
+
+    inps = cli.model_cmd_line_parse([products['asc'], '--comp', 'los', *LINE, *FAST,
+                                     '--noverbose', '--outdir', str(tmp_path)])
+    inps.disp_fig = False
+    obj = ModelViewer(inps, cli.get_view_cmd(inps))
+    obj.open()
+    obj.plot()
+    assert obj.sections == [] and obj.vertices == []
+    obj.fig_map.canvas.draw()
+
+    def click(lat, lon):
+        x, y = obj.ax_img.transData.transform((float(lon), float(lat)))
+        obj.select_point(MouseEvent('button_release_event', obj.fig_map.canvas, x, y,
+                                    button=MouseButton.LEFT))
+
+    def key(name):
+        obj.on_key(KeyEvent('key_press_event', obj.fig_map.canvas, key=name))
+
+    pts = _along_fault(-30, 0, 30, 45)
+    for k in range(0, len(pts), 2):
+        click(pts[k], pts[k + 1])
+    assert len(obj.vertices) == 4
+    key('u')
+    assert len(obj.vertices) == 3
+    key('enter')
+    assert obj.line_done and [s.label for s in obj.sections] == ['A', 'B', 'C']
+    assert all(s.has_data for s in obj.sections)
+    assert np.median([s.result['summary']['S']['map'] for s in obj.sections]) == \
+        pytest.approx(S_TRUE, abs=2.5)
+    key('=')                                       # only a note: the line makes them
+    assert len(obj.sections) == 3
+    key('e')
+    assert any(p.name.endswith('_along.png') for p in tmp_path.iterdir())
+    key('n')
+    assert obj.sections == [] and obj.vertices == [] and not obj.line_done
+    assert not any(isinstance(p, matplotlib.patches.Polygon) for p in obj.ax_img.patches)
     obj.close()
 
 

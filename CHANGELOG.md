@@ -6,6 +6,54 @@ the project uses [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-11-19
+
+### Added
+- **`viewinsar model --spacing KM`: a line of profiles, as `viewinsar
+  stat`.** Instead of drawing the profiles one by one ("=" for the next),
+  draw a line ALONG the fault - left clicks, Enter - or give it with
+  `--line-lalo`, `--line-yx` or `--line-file` (with `--spacing`, the longest
+  line of the file: the trace). A profile crosses it every KM, at right
+  angles, `--length` km either side (default 50) and `--width` km wide; the
+  fault of each is where it crosses the line, its strike the line's. Each is
+  a section of its own (A-A', B-B' …): its window, its fit, its files - the
+  posteriors written by the export, not opened. Then a window along the line:
+  the slip rate and locking depth of every profile (C, d2 with `--creep`;
+  the dip of a reverse or normal fault), the MAP with its 95 % range -
+  `model_line_…_along.png`, with `model_line_…_info.txt`; and each profile's
+  `point` and `dist_km` in `model_sections_….csv`. Keys: "u" / Backspace
+  removes the last point, "n" starts a new line.
+- `stat` and `model` share the line (`lineview.LineTools`): clicked or given,
+  where it was put.
+
+### Changed
+- `stat` takes a file without a unit (a GeoTIFF such as `039A.los.tif`) as a
+  velocity, as `model` does - mm/yr, or m/yr when 99 % of its values are
+  below 1 - so the axes say `LOS creep rate (mm/yr)` and `Creep rate (mm/yr)`,
+  not `LOS offset (1)`.
+- The split into fault-parallel and vertical needs an ascending AND a
+  descending track at the point (Hussain et al. split only there); the run
+  says, range by range, why there is none elsewhere - one track only, a track
+  without an LOS geometry, a geometry that does not reach the point, tracks of
+  one pass only, lines of sight too alike - and so do a note in the panel and
+  `why_not` in `_split.csv`. The run lists the LOS geometry of every file.
+- The line is used where it is clicked or given (`--line-lalo`), not moved to
+  the centre of the pixel it falls in: on coarse data that moved it up to a
+  pixel (a km) off the fault.
+
+### Fixed
+- **Each file its own LOS geometry** (`stat`, `model`): with the E, N, U
+  GeoTIFFs of several tracks in one folder (`039A.E.tif`, `061D.E.tif` ...),
+  every file took the FIRST set in the folder - 039A's for all four tracks -
+  so the split into fault-parallel and vertical came out only where that
+  track was, and wrong. Now a name that says its track (039A, 105D_09094_…,
+  T14A) takes that track's set only, the frames of a track mosaic are joined
+  into one, and a geometry of the other pass is never taken.
+- `--geom FOLDER FOLDER` with fewer folders than files (`--geom geo_asc/
+  geo_dsc/` for four tracks) searches all of them for every file; before, the
+  first folder went to the first file, the second to the second (an
+  ascending track got the descending folder) and the rest searched nothing.
+
 ## [0.5.8] - 2026-11-19
 
 ### Changed

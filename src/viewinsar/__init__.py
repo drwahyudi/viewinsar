@@ -20,7 +20,7 @@ pulled in when the viewer is used, so ``viewinsar.swath`` stays importable with
 numpy alone.
 """
 
-__version__ = '0.5.8'
+__version__ = '0.5.9'
 __author__ = 'Donny Wahyudi'
 __license__ = 'GPL-3.0-or-later'
 

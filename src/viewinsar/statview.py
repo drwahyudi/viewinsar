@@ -25,6 +25,7 @@ on its own. Three windows:
 
 import csv
 import os
+import warnings
 
 import numpy as np
 from matplotlib import patches, patheffects
@@ -34,8 +35,9 @@ from matplotlib.figure import Figure
 from matplotlib.legend import Legend
 from matplotlib.lines import Line2D
 
-from .fault import load_faults, load_faults_radar
-from .gnss import LOSGeometry, _name_tokens, _pass_of
+from .compat import is_unitless
+from .gnss import _name_tokens, _pass_of
+from .lineview import LineTools
 from .model import split_offsets
 from .modelview import azimuth_of, keep_default_keys, local_en
 from .stat import (
@@ -50,10 +52,8 @@ from .stat import (
 )
 from .swath import is_projected
 from .viewer import (
-    NO_LOOKUP,
     _new_figure,
     export_dir,
-    per_file,
     swathProfileViewer,
     velocity_factor,
 )
@@ -87,7 +87,7 @@ def _fmt(value, digits=2):
     return f'{value:.{digits}f}'.replace('-', '−')
 
 
-class StatViewer(swathProfileViewer):
+class StatViewer(LineTools, swathProfileViewer):
     """The creep rate along a line on a fault (see the module docstring).
 
     Example:
@@ -113,6 +113,7 @@ class StatViewer(swathProfileViewer):
         self.result = None            # the first file's
         self.split = None             # the creep split into fault-parallel and vertical
         self.split_files = []         # the files with an LOS geometry for the split
+        self.geom_why = {}            # file -> why it has none (no geometry, nominal)
         self.orbits = []              # 'asc' / 'desc' / None, per file
         self.factor, self.rate_unit = 1.0, 'mm/yr'
         self.fig_stat = self.ax_stat = None
@@ -136,8 +137,7 @@ class StatViewer(swathProfileViewer):
         if factor is None:
             self.factor, self.rate_unit = 1.0, str(self.disp_unit or '').strip() or 'value'
             print(f'NOTE: the data are in {self.disp_unit!r}, not a velocity: the offsets are '
-                  'in that unit. A file without a unit (a GeoTIFF) takes one with '
-                  '--data-unit, e.g. --data-unit mm/yr')
+                  'in that unit (--data-unit mm/yr if they are velocities)')
         else:
             self.factor, self.rate_unit = factor, 'mm/yr'
             if factor != 1.0:
@@ -150,39 +150,52 @@ class StatViewer(swathProfileViewer):
         """The LOS geometry of every file, when there are several: two or more
         (ascending and descending) split the creep into fault-parallel and
         vertical. Nominal angles - from a name, asc or desc - are left out."""
-        self.split_files = []
+        self.split_files, self.geom_why = [], {}
         if len(self.file) == 1 and (self.geom_file or self.los_inc):
             print('NOTE: --geom / --los-inc / --los-az split the creep of two or more files '
                   '(ascending and descending) - not used with one')
         if len(self.file) > 1:
+            files, pool = self.geom_list(), self.geom_pool()
+            if pool:
+                print(f"--geom: {len(pool)} folder(s) for {len(self.file)} files - each file "
+                      'takes its own track from them')
             for i in range(len(self.file)):
-                files = self.geom_file or []
-                files = [files] if isinstance(files, str) else list(files)
                 try:
-                    geom = LOSGeometry.for_file(
-                        self.file[i], self.atr_list[i],
-                        geom_file=files[i] if i < len(files) else None,
-                        inc=per_file(self.los_inc, i), az=per_file(self.los_az, i),
-                        verbose=False)
+                    geom = self.find_los_geometry(i, verbose=False)
                 except ValueError as err:
-                    if i < len(files):                       # named, and wrong: say why
+                    if i < len(files) and not pool:          # named, and wrong: say why
                         raise
-                    self.vprint(f'{self.labels[i]}: no LOS geometry - not in the split '
-                                f'into fault-parallel and vertical ({str(err)[:60]}...)')
+                    self.geom_why[i] = 'no LOS geometry found'
+                    print(f'   {self.labels[i]}: {str(err)[:300]}')
                     continue
                 if geom.kind == 'nominal':
-                    print(f'NOTE: {self.labels[i]}: only nominal angles ({geom.source}) - '
-                          'left out of the split into fault-parallel and vertical; --geom '
-                          'or --los-inc / --los-az give its geometry')
+                    self.geom_why[i] = 'only nominal angles (from its name)'
                     continue
                 self._los[i] = geom
                 self.split_files.append(i)
-                self.vprint(f'LOS geometry of {self.labels[i]}: {geom.source}')
-            if len(self.split_files) == 1:
-                print('NOTE: one file with an LOS geometry: no split into fault-parallel '
-                      'and vertical (that takes two or more)')
         self.orbits = [self.orbit_of(i) for i in range(len(self.file))]
+        if len(self.file) > 1:
+            print('LOS geometry - for the split into fault-parallel and vertical:')
+            for i in range(len(self.file)):
+                pas = {'asc': 'ascending', 'desc': 'descending'}.get(self.orbits[i], '?')
+                what = (self._los[i].source if i in self._los else
+                        f'NONE - {self.geom_why[i]}: --geom or --los-inc / --los-az')
+                print(f'   {self.labels[i]:<14s} {pas:<11s} {what}')
+            if len(self.split_files) < 2:
+                print('NOTE: fewer than two files with an LOS geometry: no split into '
+                      'fault-parallel and vertical')
         return
+
+    @property
+    def unit_word(self):
+        """' mm/yr' - or nothing for data without a unit."""
+        return '' if is_unitless(self.rate_unit) or self.rate_unit == 'value' else (
+            f' {self.rate_unit}')
+
+    @property
+    def unit_paren(self):
+        """' (mm/yr)' - or nothing for data without a unit."""
+        return f' ({self.unit_word.strip()})' if self.unit_word else ''
 
     @property
     def measured(self):
@@ -218,46 +231,6 @@ class StatViewer(swathProfileViewer):
                 # a right-looking SAR sees from the west on an ascending pass
                 return 'asc' if (east < 0) == right else 'desc'
         return None
-
-    def cli_line(self):
-        """The line given on the command line, as [row, col] vertices (or [])."""
-        if self.line_yx:
-            return [list(pair) for pair in self.line_yx]
-        if self.line_lalo:
-            lats, lons = [p[0] for p in self.line_lalo], [p[1] for p in self.line_lalo]
-            if 'Y_FIRST' in self.atr:
-                rows, cols = self.coord.lalo2yx(lats, lons)
-                return [[int(r), int(c)] for r, c in zip(np.atleast_1d(rows), np.atleast_1d(cols))]
-            if self.lookup is None:
-                raise ValueError(f'--line-lalo on radar-coded data: {NO_LOOKUP}')
-            rows, cols = self.lookup.to_rowcol(np.array(lons), np.array(lats))
-            if not np.all(np.isfinite(np.r_[rows, cols])):
-                raise ValueError('--line-lalo: a point falls outside the radar frame')
-            return [[float(r), float(c)] for r, c in zip(rows, cols)]
-        if self.line_file:
-            return self.line_from_file(self.line_file)
-        return []
-
-    def line_from_file(self, fname):
-        """The longest line in a vector file, as [row, col] vertices."""
-        if 'Y_FIRST' in self.atr:
-            traces = load_faults([fname], self.atr, verbose=self.print_msg,
-                                 data_crs=self.data_crs)
-            x0, y0 = float(self.atr['X_FIRST']), float(self.atr['Y_FIRST'])
-            dx, dy = float(self.atr['X_STEP']), float(self.atr['Y_STEP'])
-            to_pix = lambda xy: np.c_[(xy[:, 1] - y0) / dy - 0.5, (xy[:, 0] - x0) / dx - 0.5]  # noqa: E731
-        else:
-            if self.lookup is None:
-                raise ValueError(f'--line-file on radar-coded data: {NO_LOOKUP}')
-            traces = load_faults_radar([fname], self.lookup, verbose=self.print_msg)
-            to_pix = lambda xy: np.c_[xy[:, 1], xy[:, 0]]  # noqa: E731
-        if not traces:
-            raise ValueError(f'--line-file: no line of {os.path.basename(fname)} '
-                             'falls on the data')
-        longest = max(traces, key=lambda t: np.sum(np.hypot(*np.diff(t, axis=0).T)))
-        if len(traces) > 1:
-            print(f'--line-file: {len(traces)} lines on the data - using the longest')
-        return to_pix(longest).tolist()
 
     ##---------- main
     def plot(self):
@@ -313,7 +286,7 @@ class StatViewer(swathProfileViewer):
         return
 
     def reset_stat_axes(self, message=None):
-        unit = f' ({self.rate_unit})' if self.rate_unit != 'value' else ''
+        unit = self.unit_paren
         for k, ax in enumerate(self.axes_stat):
             ax.cla()
             if ax is self.axes_stat[-1]:
@@ -328,10 +301,6 @@ class StatViewer(swathProfileViewer):
         return
 
     ##---------- events
-    def _toolbar_busy(self, fig=None):
-        toolbar = getattr((fig or self.fig_map).canvas, 'toolbar', None)
-        return bool(toolbar is not None and getattr(toolbar, 'mode', ''))
-
     def select_point(self, event):
         """Left click: one more point of the line."""
         if (event.inaxes is not self.ax_img or event.xdata is None or event.button != 1
@@ -339,9 +308,9 @@ class StatViewer(swathProfileViewer):
             return
         if self.finished:                       # a click after Enter starts a new line
             self.clear_line()
-        yx = self.event_yx(event)[0]
+        yx = self.click_rowcol(event)
         self.vertices.append(yx)
-        self.vprint(f'line point {len(self.vertices)}: y/x = {yx}')
+        self.vprint(f'line point {len(self.vertices)}: y/x = {yx[0]:.2f}, {yx[1]:.2f}')
         self.draw_line_on_map()
         return
 
@@ -426,15 +395,6 @@ class StatViewer(swathProfileViewer):
         for fig in (self.fig_map, self.fig_stat):
             fig.canvas.draw_idle()
         return
-
-    @staticmethod
-    def _remove(artists):
-        for art in artists:
-            try:
-                art.remove()
-            except (ValueError, NotImplementedError):
-                pass
-        artists.clear()
 
     ##---------- compute
     def finish(self):
@@ -546,18 +506,20 @@ class StatViewer(swathProfileViewer):
             if lonlat is None:
                 raise
             vec = self.los_vectors(index, rows, cols, lon=lonlat[0], lat=lonlat[1])
-        with np.errstate(invalid='ignore'):
+        with warnings.catch_warnings():          # all NaN: the geometry does not reach
+            warnings.simplefilter('ignore', RuntimeWarning)
             return np.array([np.nanmedian(np.asarray(c, dtype=np.float64)) for c in vec])
 
     def split_creep(self):
         """The LOS creep rates of two or more geometries as one fault-parallel
         and one vertical rate at every point - assuming no motion across the
-        fault, as Hussain et al. (2016) split theirs - draw by draw of the
-        bootstraps, and from the least-squares rates.
+        fault, as Hussain et al. (2016) split theirs where they had ascending
+        AND descending tracks - draw by draw of the bootstraps, and from the
+        least-squares rates.
 
         los_i = dh (L_i . s) + du L_i,up, s the line's direction there: the
         fault-parallel creep is -dh (+ right-lateral), the vertical du (+ the
-        block 2 side up)."""
+        block 2 side up). Where there is no split, why[k] says why."""
         files = [i for i in self.split_files if self.results[i] is not None]
         if len(files) < 2:
             return None
@@ -567,31 +529,48 @@ class StatViewer(swathProfileViewer):
             'par', 'par_mean', 'par_std', 'par_median', 'par_lo', 'par_hi', 'up', 'up_mean',
             'up_std', 'up_median', 'up_lo', 'up_hi')}
         out.update(files=files, used=[[] for _ in range(n_pt)], strike=azim,
-                   los={i: np.full((n_pt, 3), np.nan) for i in files}, close=[])
+                   los={i: np.full((n_pt, 3), np.nan) for i in files}, why=[''] * n_pt)
         for k in range(n_pt):
-            draws, blue, horiz, up = [], [], [], []
-            for i in files:
-                prof = self.results[i]['profiles'][k]
-                if prof['fit'] is None or not np.all(np.isfinite(strike[k])):
+            fitted = [i for i, res in enumerate(self.results)
+                      if res is not None and res['profiles'][k]['fit'] is not None]
+            draws, blue, horiz, up, seen, notes = [], [], [], [], [], []
+            for i in fitted:
+                if i not in files:
+                    notes.append(f'{self.labels[i]} has no LOS geometry')
                     continue
+                prof = self.results[i]['profiles'][k]
                 try:
                     los = self.los_at(i, prof)
                 except (ValueError, ImportError):      # no lon/lat for the geometry
-                    continue
-                if not np.all(np.isfinite(los)):
+                    los = np.full(3, np.nan)
+                if not (np.all(np.isfinite(los)) and np.all(np.isfinite(strike[k]))):
+                    notes.append(f'the LOS geometry of {self.labels[i]} does not reach here')
                     continue
                 out['los'][i][k] = los
                 draws.append(prof['fit']['boot'][:, 3])
                 blue.append(prof['fit']['offset'])
                 horiz.append(los[0] * strike[k, 0] + los[1] * strike[k, 1])
                 up.append(los[2])
-                out['used'][k].append(i)
-            if len(draws) < 2:
+                seen.append(i)
+            if len(fitted) < 2:
+                out['why'][k] = ('no track has a creep rate here' if not fitted else
+                                 f'only {self.labels[fitted[0]]} has a creep rate here')
+                continue
+            if len(seen) < 2:
+                out['why'][k] = '; '.join(notes)
+                continue
+            east = np.array([out['los'][i][k][0] for i in seen])
+            if not (east.min() < 0 < east.max()):         # all from one side
+                names = ' + '.join(self.labels[i] for i in seen)
+                out['why'][k] = (f'{names} all look from the {"west" if east.max() < 0 else "east"}'
+                                 ' (all ascending or all descending) - the split needs both')
                 continue
             point = split_offsets(blue, horiz, up)
-            if point is None:                    # the geometries are too alike
-                out['close'].append(k)
+            if point is None:
+                out['why'][k] = ('the lines of sight are too alike here to tell the fault-'
+                                 'parallel motion from the vertical (the fault runs along them)')
                 continue
+            out['used'][k] = seen
             dh, du = split_offsets(np.vstack(draws), horiz, up)
             par = -dh
             out['par'][k], out['up'][k] = -float(point[0][0]), float(point[1][0])
@@ -599,9 +578,21 @@ class StatViewer(swathProfileViewer):
                 lo, med, hi = np.percentile(vals, [2.5, 50, 97.5])
                 out[f'{name}_mean'][k], out[f'{name}_std'][k] = vals.mean(), vals.std(ddof=1)
                 out[f'{name}_median'][k], out[f'{name}_lo'][k], out[f'{name}_hi'][k] = med, lo, hi
-        if not np.isfinite(out['par']).any():
-            print('NOTE: no point with two LOS geometries apart enough (ascending and '
-                  'descending) to split the creep into fault-parallel and vertical')
+        return out
+
+    def split_ranges(self):
+        """[(first point, last point, what)] - the split, or why there is none,
+        along the line: consecutive points alike in one range."""
+        sp, out = self.split, []
+        if sp is None:
+            return out
+        for k in range(len(self.line['dist_km'])):
+            what = (sp['why'][k] if sp['why'][k] else
+                    'split from ' + ' + '.join(self.labels[i] for i in sp['used'][k]))
+            if out and out[-1][2] == what and out[-1][1] == k - 1:
+                out[-1] = (out[-1][0], k, what)
+            else:
+                out.append((k, k, what))
         return out
 
     def report(self):
@@ -640,27 +631,17 @@ class StatViewer(swathProfileViewer):
             print(f'   NOTE: spacing {self.spacing:g} km < 2 x width: neighbouring profiles '
                   'overlap and share pixels')
         sp = self.split
-        if sp is not None and np.isfinite(sp['par']).any():
-            self.vprint(f"   split into fault-parallel and vertical at "
-                        f"{int(np.isfinite(sp['par']).sum())} of {n_pt} points, from "
-                        + ', '.join(self.labels[i] for i in sp['files']))
+        if sp is not None:
+            dist = line['dist_km']
+            print(f"split into fault-parallel and vertical at {int(np.isfinite(sp['par']).sum())}"
+                  f' of {n_pt} points:')
+            for k0, k1, what in self.split_ranges():
+                where = (f'{dist[k0]:.1f} km (point {k0 + 1})' if k0 == k1 else
+                         f'{dist[k0]:.1f}-{dist[k1]:.1f} km (points {k0 + 1}-{k1 + 1})')
+                print(f"   {where}: {what if what.startswith('split') else 'none - ' + what}")
         return
 
     ##---------- draw: the map
-    def draw_line_on_map(self):
-        self._remove(self.line_artists)
-        if self.vertices:
-            yx = np.asarray(self.vertices, dtype=np.float64)
-            xs, ys = self._yx2disp(yx[:, 0], yx[:, 1])
-            halo = [patheffects.Stroke(linewidth=3.6, foreground='w', alpha=0.7),
-                    patheffects.Normal()]
-            self.line_artists += self.ax_img.plot(xs, ys, '-', color='k', lw=1.8, zorder=9,
-                                                  path_effects=halo)
-            self.line_artists += self.ax_img.plot(xs, ys, 'o', ms=3.5, mfc='w', mec='k',
-                                                  mew=0.8, zorder=10)
-        self.fig_map.canvas.draw_idle()
-        return
-
     def block_style(self, b, alpha=1.0):
         """Fill and edge of block b, on the map and in the profiles."""
         red, green, blue, _ = to_rgba(self.block_colors[b])
@@ -792,11 +773,16 @@ class StatViewer(swathProfileViewer):
 
     def draw_split(self, ax):
         sp, dist = self.split, self.line['dist_km']
+        note = self.split_note()
         if sp is None or not np.isfinite(sp['par']).any():
-            ax.text(0.5, 0.5, 'no point with two LOS geometries apart enough\n'
-                    '(ascending and descending) to split the creep', ha='center',
-                    va='center', color='0.55', fontsize=self.font_size, transform=ax.transAxes)
+            ax.text(0.5, 0.5, 'no split into fault-parallel and vertical\n' + note,
+                    ha='center', va='center', color='0.45', transform=ax.transAxes,
+                    fontsize=max(self.font_size - 2, 6), wrap=True)
             return
+        if note:
+            ax.text(0.01, 0.02, note, ha='left', va='bottom', color='0.4', zorder=6,
+                    fontsize=max(self.font_size - 4, 6), transform=ax.transAxes,
+                    bbox=dict(boxstyle='square,pad=0.2', fc='w', ec='none', alpha=0.8))
         for name, color, label in (
                 ('par', PAR_COLOR, 'Fault-parallel (+ right-lateral)'),
                 ('up', UP_COLOR, f'Vertical (+ {self.block_names[1]} up)')):
@@ -807,6 +793,32 @@ class StatViewer(swathProfileViewer):
         ax.axhline(0, color='k', lw=0.6, zorder=1)
         ax.legend(fontsize=max(self.font_size - 3, 6), loc='best', framealpha=0.85)
         return
+
+    def split_note(self):
+        """Why the split is missing at some points - a line or two for the panel."""
+        sp, n_pt = self.split, len(self.line['dist_km'])
+        if sp is None:
+            missing = [self.labels[i] for i in sorted(self.geom_why)]
+            return (f"no LOS geometry for {', '.join(missing)} (--geom or --los-inc / --los-az)"
+                    if missing else '')
+        gaps = [k for k in range(n_pt) if sp['why'][k]]
+        if not gaps:
+            return ''
+        reasons = []
+        nogeo = sorted({i for i in self.geom_why for k in gaps
+                        if f'{self.labels[i]} has no LOS geometry' in sp['why'][k]})
+        if nogeo:
+            reasons.append('no LOS geometry for ' + ', '.join(self.labels[i] for i in nogeo)
+                           + ' (--geom or --los-inc / --los-az)')
+        for key, text in (('does not reach', 'an LOS geometry that does not reach the point'),
+                          ('all look from', 'tracks of one pass only (ascending or '
+                                            'descending)'),
+                          ('has a creep rate here', 'one track only'),
+                          ('too alike', 'lines of sight too alike')):
+            if any(key in sp['why'][k] for k in gaps):
+                reasons.append(text)
+        return (f'no split at {len(gaps)} of {n_pt} points: ' + '; '.join(reasons)
+                + ' - see the run or _split.csv')
 
     ##---------- draw: one profile (Hussain et al. 2016, Fig. S3)
     def show_profile(self, index, k):
@@ -877,7 +889,7 @@ class StatViewer(swathProfileViewer):
         bootstrap lines, (b) the PDFs of the creep rate of both."""
         ax1, ax2 = fig.subplots(1, 2, gridspec_kw=dict(width_ratios=[1.45, 1]))
         fig.subplots_adjust(left=0.08, right=0.98, bottom=0.15, top=0.84, wspace=0.25)
-        unit = f' ({self.rate_unit})' if self.rate_unit != 'value' else ''
+        unit = self.unit_paren
         prof = self.results[index]['profiles'][k]
         fit = self.draw_profile_axes(ax1, index, k)
         ax1.set_xlabel(f'Distance from the line (km), + towards {self.block_names[1]}',
@@ -925,7 +937,7 @@ class StatViewer(swathProfileViewer):
         nrow = int(np.ceil(num / ncol))
         fig = Figure(figsize=(2.6 * ncol + 0.5, 1.95 * nrow + 0.9), layout='constrained')
         axes = fig.subplots(nrow, ncol, sharex=True, sharey=True, squeeze=False).ravel()
-        u = f' {self.rate_unit}' if self.rate_unit != 'value' else ''
+        u = self.unit_word
         fsize = max(self.font_size - 4, 5)
         for k, ax in enumerate(axes):
             if k >= num:
@@ -947,7 +959,7 @@ class StatViewer(swathProfileViewer):
         lo, hi = np.percentile(allv, [1, 99])
         span = max(hi - lo, 1e-9)
         axes[0].set_ylim(lo - 0.1 * span, hi + 0.3 * span)
-        unit = f' ({self.rate_unit})' if self.rate_unit != 'value' else ''
+        unit = self.unit_paren
         fig.supxlabel(f'Distance from the line (km), + towards {self.block_names[1]}',
                       fontsize=self.font_size - 1)
         fig.supylabel(f'LOS velocity{unit}', fontsize=self.font_size - 1)
@@ -1009,7 +1021,7 @@ class StatViewer(swathProfileViewer):
         base = self.outfile_base
         os.makedirs(os.path.dirname(base) or '.', exist_ok=True)
         written = [self.save_creep(base)]
-        if self.split is not None and np.isfinite(self.split['par']).any():
+        if self.split is not None:
             written.append(self.save_split(base))
         written.append(self.save_values(base))
         written += self.save_info_and_figures(base)
@@ -1065,18 +1077,18 @@ class StatViewer(swathProfileViewer):
         lalo = self._lalo(prow, pcol)
         cols = ['point', 'dist_km', *self._tag, 'strike_deg', 'files', 'par', 'par_mean',
                 'par_std', 'par_median', 'par_lo95', 'par_hi95', 'up', 'up_mean', 'up_std',
-                'up_median', 'up_lo95', 'up_hi95']
+                'up_median', 'up_lo95', 'up_hi95', 'why_not']
         with open(out, 'w', newline='') as fid:
             writer = csv.writer(fid)
             writer.writerow(cols)
             for k in range(len(self.line['dist_km'])):
                 where = [lalo[0][k], lalo[1][k]] if lalo else [np.nan, np.nan]
-                used = '+'.join(self.labels[i] for i in sp['used'][k]) if np.isfinite(
-                    sp['par'][k]) else ''
+                used = '+'.join(self.labels[i] for i in sp['used'][k])
                 row = [k + 1, self.line['dist_km'][k], *where, sp['strike'][k], used]
                 for name in ('par', 'up'):
                     row += [sp[name][k], sp[f'{name}_mean'][k], sp[f'{name}_std'][k],
                             sp[f'{name}_median'][k], sp[f'{name}_lo'][k], sp[f'{name}_hi'][k]]
+                row.append(sp['why'][k])
                 writer.writerow([_cell(v) for v in row])
         return out
 
@@ -1160,11 +1172,17 @@ class StatViewer(swathProfileViewer):
                           'across the fault (Hussain et al. 2016); par = -dh, the fault-'
                           f'parallel creep (+ right-lateral), up = du (+ {names[1]} up); par '
                           '/ up from the least-squares rates, _mean / _std / ... from the '
-                          'bootstrap draws\n')
-                for i in sp['files']:
-                    geom = self._los.get(i)
-                    if geom is not None:
-                        fid.write(f'LOS geometry   : {self.labels[i]}: {geom.source}\n')
+                          'bootstrap draws; only where ascending AND descending tracks with an '
+                          'LOS geometry have a creep rate - why_not says why elsewhere\n')
+                dist = self.line['dist_km']
+                for k0, k1, what in self.split_ranges():
+                    fid.write(f'split          : {dist[k0]:.1f}-{dist[k1]:.1f} km (points '
+                              f'{k0 + 1}-{k1 + 1}): {what}\n')
+            for i in range(len(self.file) if len(self.file) > 1 else 0):
+                geom = self._los.get(i)
+                fid.write(f'LOS geometry   : {self.labels[i]}: '
+                          + (geom.source if geom is not None else
+                             f"none - {self.geom_why.get(i, '?')}") + '\n')
         written.append(out)
 
         # the figures
