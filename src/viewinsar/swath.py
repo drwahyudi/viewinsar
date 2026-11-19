@@ -348,7 +348,7 @@ def nice_step(vrange, num_bin=54):
 
 
 def swath_density(dist, value, bin_x, bin_y=None, ylim=None, x_offset=0.):
-    """2-D point-density histogram of a swath profile, with per-bin statistics.
+    """2-D pixel-density histogram of a swath profile, with per-bin statistics.
 
     The X bin edges are built outward from x = 0 in both directions, so x = 0 is
     ALWAYS a cell boundary - which matters once the profile is referenced to a

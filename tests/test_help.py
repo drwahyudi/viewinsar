@@ -143,6 +143,41 @@ def test_model_examples_cover_every_fault_type():
     assert faults == {'strike', 'reverse', 'normal'}
 
 
+def _stat_examples():
+    """Every `viewinsar stat ...` command in its help epilog, joined across \\."""
+    cmds, buf = [], ''
+    for raw in cli.STAT_EXAMPLE.splitlines():
+        line = raw.strip()
+        if buf:
+            buf += ' ' + line.rstrip('\\').strip()
+            if not line.endswith('\\'):
+                cmds.append(buf)
+                buf = ''
+        elif line.startswith('viewinsar stat '):
+            if line.endswith('\\'):
+                buf = line.rstrip('\\').strip()
+            else:
+                cmds.append(line)
+    return cmds
+
+
+def test_there_are_stat_examples():
+    assert len(_stat_examples()) >= 8
+
+
+@pytest.mark.parametrize('cmd', _stat_examples())
+def test_every_stat_example_parses(cmd):
+    """No example of `viewinsar stat -h` may use an option that neither stat
+    nor view.py knows - nor one that is gone (--radius, --gap, --rate)."""
+    args = shlex.split(cmd, comments=True)[2:]   # drop "viewinsar stat"
+    assert not set(args) & set(cli.DROPPED['stat']), cmd
+    _, unknown = cli.create_stat_parser().parse_known_args(args)
+    if unknown:
+        view_cli = pytest.importorskip('mintpy.cli.view', reason='checked against view.py')
+        _, still = view_cli.create_parser().parse_known_args(['placeholder.h5', *unknown])
+        assert not still, f'example uses unknown option(s) {still}:\n  {cmd}'
+
+
 def test_help_lines_fit_a_terminal():
     """RawTextHelpFormatter does not wrap, so keep every line readable."""
     helps = [('swath -h', _swath_help()), ('-h', cli.top_level_help())]
@@ -183,7 +218,7 @@ def test_top_level_help_covers_every_command():
         assert named, name
         assert not named - known, f'{name}: unknown option(s) {sorted(named - known)}'
     top = cli.top_level_help()
-    for needle in ('--profile', '--line-file', '--rate', '--creep', 'posteriors',
+    for needle in ('--profile', '--line-file', '--boot', '--creep', 'posteriors',
                    'model_sections_ABC.csv', '--save [DIR]', '--radius KM', 'LiCSBAS',
                    'pip install "viewinsar[mintpy]"', '--help-all'):
         assert needle in top, needle

@@ -6,6 +6,53 @@ the project uses [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-11-19
+
+### Changed
+- **`viewinsar stat` measures fault creep, as Hussain et al. (2016) did on
+  the North Anatolian Fault.** The circles and violins are gone. Every
+  `--spacing` km along the line (5) a short profile crosses it at right
+  angles - `--length` km either side (5), the pixels within `--width` km of
+  it (2.5) projected onto it - and a straight line through each side gives
+  the creep rate as their offset at the line, solved as their eq. 2 (one
+  linear system: both slopes, the intercept of block 1, the creep). Its
+  uncertainty: a percentile bootstrap that resamples each side on its own
+  (`--boot` draws, 2000; `--seed`), the creep rate the mean of the draws; the
+  least-squares (BLUE) value and its sigma are written beside it.
+- The figure is their Fig. 5: the LOS creep rate along the line with 1σ
+  error bars, a series per file - descending solid, ascending dashed (from
+  `ORBIT_DIRECTION`, the name, or the line of sight). With two LOS geometries
+  or more (ascending and descending: found beside the data, `--geom`, or
+  `--los-inc` / `--los-az`) a second panel splits it into fault-parallel (red,
+  + right-lateral) and vertical (blue, + block 2 up), draw by draw, assuming
+  no motion across the fault; nominal angles from a name are not used.
+- A click on a point of the creep rate opens its profile, as their Fig. S3:
+  the pixels, the BLUE (red) and bootstrap (green) lines, the fault location
+  and the PDFs of the creep rate from both (arrows: the other points and
+  files); the profile is outlined on the map. The map shows every profile as
+  two halves in the colours of their blocks, its point as a black circle.
+- The creep rate is **block 2 minus block 1** (the old `--rate` was block 1
+  minus block 2): x runs towards block 2, as eq. 2 with block 1 first.
+- Output: `_creep.csv` (a row per point and file), `_split.csv`,
+  `_values.csv` (every pixel with its x and y in the profile),
+  `_profiles.png` (every profile of a file), `_profile7.png` (the one on
+  screen), `_info.txt`, the figure and the map, named
+  `stat_…_sp5km_L5km_w2.5km`. The rates are in mm/yr.
+- **`Pixel density`** on the colour bar of every swath / cross-section
+  density, and of `model --cmap-prof` (was `Point density`).
+- `model --creep-offset` measures its offset with the same two-line fit as
+  `stat` (`model.fit_two_lines`): the same numbers as before.
+
+### Added
+- Python: `fit_two_lines` and `two_line_matrix` (eq. 2, BLUE and bootstrap),
+  `creep_along_line`, `creep_profiles`, `profile_pixels`, `profile_outline`
+  and `trace_offset` (`viewinsar.stat`).
+
+### Removed
+- `stat --radius`, `--gap`, `--rate`, `--rate-err` (and `-r`, `-rate`) - left
+  out with a note, values and all, so older commands still run; `stat_line`,
+  the circles and the violins.
+
 ## [0.5.7] - 2026-11-18
 
 ### Changed

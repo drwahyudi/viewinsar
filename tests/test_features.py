@@ -124,7 +124,7 @@ def test_nlook_guards_against_an_absurd_sample_grid(velocity_attrs):
 
 
 def test_auto_cmax_adapts_to_the_sampling(coarse_velocity_file, tmp_path):
-    """With --cmax left alone the colour scale must follow the point density."""
+    """With --cmax left alone the colour scale must follow the pixel density."""
     from viewinsar.viewer import swathProfileViewer
 
     base = ['--start-lalo', '30.30', '130.15', '--end-lalo', '30.30', '130.75',
@@ -142,6 +142,22 @@ def test_auto_cmax_adapts_to_the_sampling(coarse_velocity_file, tmp_path):
 
     assert cmax_for(['--nlook', '6']) > 3 * cmax_for([])
     assert cmax_for(['--cmax', '42']) == 42.0          # an explicit value still wins
+
+
+def test_the_density_colour_bar_says_pixel_density(coarse_velocity_file, tmp_path):
+    """The colour bar of a swath / cross-section profile counts pixels."""
+    from viewinsar.viewer import swathProfileViewer
+
+    inps = cli.cmd_line_parse([coarse_velocity_file, '--start-lalo', '30.30', '130.15',
+                               '--end-lalo', '30.30', '130.75', '-w', '8', '--noverbose',
+                               '--nodisplay', '--outdir', str(tmp_path)])
+    inps.save_fig = False
+    obj = swathProfileViewer(inps, cli.get_view_cmd(inps))
+    obj.open()
+    obj.plot()
+    label = obj.sections[0].ax_cbar.get_ylabel()
+    obj.close()
+    assert label.startswith('Pixel density\n[count / ') and 'Point' not in label
 
 
 ##############################################################################

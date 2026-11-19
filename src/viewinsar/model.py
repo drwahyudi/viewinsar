@@ -51,7 +51,7 @@ __all__ = ['ProfileModel', 'DipSlipModel', 'forward', 'dip_slip', 'bin_profile',
            'exponential_covariance',
            'fit_noise_covariance', 'ensemble_sample', 'autocorr_time', 'fit_profile',
            'summarize_samples', 'model_band', 'model_bands', 'strain_rate', 'fault_offset',
-           'split_offsets',
+           'fit_two_lines', 'two_line_matrix', 'split_offsets',
            'describe', 'NAMES', 'UNITS']
 
 NAMES = {'S': 'slip rate', 'd1': 'locking depth', 'C': 'creep rate', 'd2': 'creep depth',
@@ -820,36 +820,99 @@ def _lines(x, v):
     return slope, mv - slope * mx
 
 
-def fault_offset(x_a, v_a, x_b, v_b, n_boot=2000, seed=0, min_points=3):
-    """The step at x = 0 between two straight lines, as Hussain et al. (2016)
-    measure fault creep: one line through the points on one side (x < 0), one
-    through those on the other (x > 0), each with its own slope; the offset is
-    the second line minus the first at x = 0. Its spread: a percentile
-    bootstrap that resamples each side on its own, n_a of n_a and n_b of n_b
-    (Hussain et al. 2016, after Bekaert et al. 2015) - the points taken as
-    independent.
+TWO_LINES = ('slope_a', 'slope_b', 'intercept_a', 'offset')   # fit_two_lines' parameters
 
-    Returns dict(offset, lo, hi, std, boot, line_a, line_b, n_a, n_b), the
-    lines as (slope, intercept); None with fewer than min_points a side.
+
+def two_line_matrix(x_a, x_b):
+    """The design matrix of Hussain et al. (2016, eq. 2): a row per point -
+    [x, 0, 1, 0] for side a, [0, x, 1, 1] for side b - for the parameters
+    (slope_a, slope_b, intercept_a, offset): side a is the line
+    slope_a x + intercept_a, side b slope_b x + intercept_a + offset."""
+    x_a = np.asarray(x_a, dtype=np.float64).ravel()
+    x_b = np.asarray(x_b, dtype=np.float64).ravel()
+    mat = np.zeros((x_a.size + x_b.size, 4))
+    mat[:x_a.size, 0] = x_a
+    mat[x_a.size:, 1] = x_b
+    mat[:, 2] = 1.0
+    mat[x_a.size:, 3] = 1.0
+    return mat
+
+
+def fit_two_lines(x_a, v_a, x_b, v_b, n_boot=2000, seed=0, min_points=3):
+    """The offset at x = 0 between two straight lines, one either side of a
+    fault - side a (x < 0) and side b (x > 0) - as Hussain et al. (2016, eq.
+    2) measure fault creep:
+
+        v_a = slope_a x + intercept_a                 (side a)
+        v_b = slope_b x + intercept_a + offset        (side b)
+
+    solved two ways. Least squares (two_line_matrix): the best linear unbiased
+    estimator (BLUE) for independent errors of one variance, its covariance
+    sigma^2 (G^T G)^-1 from the residuals - too narrow when the errors are
+    correlated or large (their Fig. S3). And a percentile bootstrap that
+    resamples each side on its own, n_a of n_a and n_b of n_b (Bekaert et al.
+    2015): every draw gives all four parameters, their spread the one
+    Hussain et al. use.
+
+    Returns dict - params (4,) and cov (4, 4): the BLUE, as TWO_LINES; sigma:
+    the scatter about the lines; boot (n_boot, 4): the bootstrap draws;
+    offset (the BLUE) and offset_std (its own 1 sigma); mean, median, std,
+    lo / hi (2.5 / 97.5 %), lo68 / hi68 (16 / 84 %) of the offset draws;
+    n_a, n_b; line_a, line_b as (slope, intercept). None with fewer than
+    min_points a side.
     """
     x_a, v_a = np.asarray(x_a, dtype=np.float64), np.asarray(v_a, dtype=np.float64)
     x_b, v_b = np.asarray(x_b, dtype=np.float64), np.asarray(v_b, dtype=np.float64)
     n_a, n_b = x_a.size, x_b.size
     if min(n_a, n_b) < min_points:
         return None
-    line_a, line_b = _lines(x_a, v_a), _lines(x_b, v_b)
+    mat, data = two_line_matrix(x_a, x_b), np.r_[v_a, v_b]
+    params = np.linalg.lstsq(mat, data, rcond=None)[0]
+    resid = data - mat @ params
+    var = float(resid @ resid) / max(data.size - 4, 1)
+    try:
+        cov = var * np.linalg.inv(mat.T @ mat)
+    except np.linalg.LinAlgError:
+        cov = np.full((4, 4), np.nan)
+
     rng = np.random.default_rng(seed)
-    boot = np.empty(n_boot)
+    boot = np.empty((n_boot, 4))
     chunk = max(1, min(n_boot, 1_000_000 // max(n_a, n_b)))
     for start in range(0, n_boot, chunk):
         m = min(chunk, n_boot - start)
         ia, ib = rng.integers(0, n_a, (m, n_a)), rng.integers(0, n_b, (m, n_b))
-        boot[start:start + m] = _lines(x_b[ib], v_b[ib])[1] - _lines(x_a[ia], v_a[ia])[1]
-    lo, hi = np.percentile(boot, [2.5, 97.5])
-    return dict(offset=float(line_b[1] - line_a[1]), lo=float(lo), hi=float(hi),
-                std=float(boot.std(ddof=1)), boot=boot, n_a=n_a, n_b=n_b,
-                line_a=(float(line_a[0]), float(line_a[1])),
-                line_b=(float(line_b[0]), float(line_b[1])))
+        slope_a, icpt_a = _lines(x_a[ia], v_a[ia])
+        slope_b, icpt_b = _lines(x_b[ib], v_b[ib])
+        boot[start:start + m] = np.c_[slope_a, slope_b, icpt_a, icpt_b - icpt_a]
+    off = boot[:, 3]
+    lo, lo68, med, hi68, hi = np.percentile(off, [2.5, 16, 50, 84, 97.5])
+    return dict(params=params, cov=cov, sigma=float(np.sqrt(var)), boot=boot, names=TWO_LINES,
+                offset=float(params[3]), offset_std=float(np.sqrt(cov[3, 3])),
+                mean=float(off.mean()), median=float(med),
+                std=float(off.std(ddof=1)) if n_boot > 1 else 0.0, lo=float(lo),
+                hi=float(hi), lo68=float(lo68), hi68=float(hi68), n_a=n_a, n_b=n_b,
+                line_a=(float(params[0]), float(params[2])),
+                line_b=(float(params[1]), float(params[2] + params[3])))
+
+
+def fault_offset(x_a, v_a, x_b, v_b, n_boot=2000, seed=0, min_points=3):
+    """The step at x = 0 between two straight lines, as Hussain et al. (2016)
+    measure fault creep (fit_two_lines - their eq. 2): one line through the
+    points on one side (x < 0), one through those on the other (x > 0), each
+    with its own slope; the offset is the second line minus the first at
+    x = 0. Its spread: a percentile bootstrap that resamples each side on its
+    own, n_a of n_a and n_b of n_b (Hussain et al. 2016, after Bekaert et al.
+    2015) - the points taken as independent.
+
+    Returns dict(offset, lo, hi, std, boot, line_a, line_b, n_a, n_b), the
+    lines as (slope, intercept); None with fewer than min_points a side.
+    """
+    fit = fit_two_lines(x_a, v_a, x_b, v_b, n_boot=n_boot, seed=seed, min_points=min_points)
+    if fit is None:
+        return None
+    return dict(offset=fit['offset'], lo=fit['lo'], hi=fit['hi'], std=fit['std'],
+                boot=fit['boot'][:, 3].copy(), n_a=fit['n_a'], n_b=fit['n_b'],
+                line_a=fit['line_a'], line_b=fit['line_b'])
 
 
 def split_offsets(los_offsets, horizontal, up, min_angle=10.0):

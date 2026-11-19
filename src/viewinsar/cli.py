@@ -34,7 +34,7 @@ Interactive SWATH (buffered) profile viewer for InSAR (MintPy, LiCSBAS ...).
 Draw a line on the map with two clicks. The line is buffered by +/-WIDTH km
 (flat caps); every valid pixel inside that corridor is projected onto it to get
 its distance along the profile - QGIS LRS / ArcGIS "Locate Features Along
-Routes" - and the cloud is drawn as a 2-D point-density profile with the
+Routes" - and the cloud is drawn as a 2-D pixel-density profile with the
 density-weighted median (red) and the 25th-75th percentile envelope.
 
 The map, every cross-section and the point time series each open in their OWN
@@ -246,14 +246,33 @@ _OLD_SECTION = {'-profile': '--profile', '-nlook': '--nlook', '-topoxsect': '--t
 OLD_SPELLINGS = {
     'swath': {**_OLD_EVERY, **_OLD_MAP, **_OLD_SECTION},
     'model': {**_OLD_EVERY, **_OLD_MAP, **_OLD_SECTION},
-    'stat': {**_OLD_EVERY, **_OLD_MAP, '-rate': '--rate', '-sp': '--spacing',
-             '-r': '--radius'},
+    'stat': {**_OLD_EVERY, **_OLD_MAP, '-sp': '--spacing'},
     'tseries': {**_OLD_EVERY, '-r': '--radius', '-m': '--ref-date', '-p': '--point',
                 '-c': '--colormap', '-u': '--unit', '--vel': '--vel-file'},
     'list': {'-n': '--num'},
 }
-# options that are gone: left out, with a note (0.5.1: swath draws no GNSS line)
-DROPPED = {'swath': {'--gnss-nofit': 'the profiles draw no line through the GNSS any more'}}
+# options that are gone: left out, with a note - and the values they took
+# (0.5.1: swath draws no GNSS line; 0.5.8: stat fits two lines across the fault)
+_STAT_NOW = 'stat measures the creep on profiles across the line now (--length, --width)'
+DROPPED = {
+    'swath': {'--gnss-nofit': ('the profiles draw no line through the GNSS any more', 0)},
+    'stat': {'--radius': (_STAT_NOW, 1), '-r': (_STAT_NOW, 1), '--gap': (_STAT_NOW, 1),
+             '--rate': ('the creep rate is what stat draws now', 0),
+             '-rate': ('the creep rate is what stat draws now', 0),
+             '--rate-err': ('its error bars come from a bootstrap now (--boot)', 1)},
+}
+
+
+def _is_value(tok):
+    """A token that is a value, not an option: a word, or a number (-2.5)."""
+    tok = str(tok)
+    if not tok.startswith('-'):
+        return True
+    try:
+        float(tok)
+    except ValueError:
+        return False
+    return True
 
 
 def modern_options(argv, command):
@@ -262,11 +281,18 @@ def modern_options(argv, command):
     note that says which, once. A one-letter option glued to its value (-w15)
     is split as argparse would."""
     table, gone = OLD_SPELLINGS.get(command, {}), DROPPED.get(command, {})
-    out, said = [], {}
+    out, said, skip = [], {}, 0
     for tok in argv:
         head, eq, tail = str(tok).partition('=')
-        if tok in gone:
-            print(f'NOTE: {tok} is not needed any more - {gone[tok]}')
+        if skip:                        # the value of an option that is gone
+            skip -= 1
+            if _is_value(tok):
+                continue
+            skip = 0
+        if tok in gone or (eq and head in gone):
+            note, num = gone[head if eq else tok]
+            print(f'NOTE: {head if eq else tok} is not needed any more - {note}')
+            skip = 0 if eq else num
             continue
         if tok in table:
             new, old = [table[tok]], tok
@@ -381,7 +407,7 @@ def create_swath_parser(prog=f'{PROG} swath'):
                             'cells - so a sparse profile stays readable and\n'
                             '--nlook does not turn the panel white.')
     swath.add_argument('--pcmap', dest='pcmap', default='viridis', metavar='CMAP',
-                       help='colormap of the point density (default: %(default)s).')
+                       help='colormap of the pixel density (default: %(default)s).')
     swath.add_argument('--x-offset', dest='x_offset', type=float, default=0.0, metavar='KM',
                        help='shift the distances by KM so a known feature (a\n'
                             'fault) sits at x = 0, marked by a dashed line\n'
@@ -962,75 +988,92 @@ def swath_main(iargs=None):
 #                                 stat                                       #
 ##############################################################################
 STAT_DESCRIPTION = """\
-Block statistics on both sides of a line - typically drawn along a fault.
+The creep rate along a fault, from short profiles across a line drawn on it -
+as Hussain et al. (2016) measured the creep of the North Anatolian Fault.
 
 Draw the line on the map (left-click its points, Enter to finish), or give it
-with --line-lalo / --line-yx / --line-file. Every SPACING km along it a point
-is placed (centred on the line), and at each point two circles of RADIUS km,
-one on each side, their edges GAP km (default 1) clear of the line. On the
-inside of a bend a circle is pushed further out, so no circle ever reaches
-across the line or within GAP of it. Block 1 is the LEFT side of the line,
-walking from its first point to its last; block 2 the RIGHT.
+with --line-lalo / --line-yx / --line-file - ON the fault trace (--fault shows
+it, --line-file takes it): the two sides are compared at the line. Every
+--spacing km along it (centred on the line) a profile crosses it at right
+angles: --length km (default 5) either side of the line, the pixels within
+--width km (default 2.5) either side of the profile projected onto it. Block 1
+is the LEFT side of the line, walking from its first point to its last; block
+2 the RIGHT.
 
-The values in each circle are drawn as a violin - block 1 and block 2 side by
-side at every point, each in the colour of its circles on the map - with
-strikes at the median (in the block's colour), the mean (solid) and the mode
-(dotted: the peak of the density, where the violin is widest). The medians of
-each block are joined by a dashed line along the line.
+A straight line through the pixels of each block, and the creep rate is their
+offset at the line - block 2 minus block 1 - one linear system (their eq. 2):
 
-Several files (tracks, frames, or the east and up velocities) get the same
-circles, a row of violins each. With --rate the violins give way to the RATE:
-the median of block 1 minus that of block 2 at every point, with error bars,
-one series per file - the slip (or creep) rate across the fault along its
-trace, as Hussain et al. (2016) measured the creep of the North Anatolian
-Fault.
+    | v1 |   | x1  0  1  0 |  | slope 1 |
+    |    | = |             |  | slope 2 |      x: the distance from the line
+    | v2 |   | 0  x2  1  1 |  | b1      |      along the profile, + towards
+                              | creep   |      block 2
+
+Its uncertainty: a percentile bootstrap that resamples each block on its own,
+n1 of its n1 pixels and n2 of n2 (--boot draws), as Hussain et al. - the least-
+squares one (the BLUE) is too narrow when the errors are large or correlated.
+
+The figure: the LOS creep rate along the line, a series per file, 1-sigma
+error bars (descending tracks solid, ascending dashed). Two or more LOS
+geometries - ascending and descending, found beside the data or given with
+--geom or --los-inc / --los-az - also give it split into fault-parallel (+
+right-lateral) and vertical (+ block 2 up), assuming no motion across the
+fault. Click a point of it: its profile, the pixels with both fits (BLUE red,
+bootstrap green) and the PDFs of the creep rate (their Fig. S3).
 """
 
 STAT_EXAMPLE = """\
 examples:
-  # draw the line along a fault shown on the map: circles every 5 km, 2 km across
-  viewinsar stat velocity.h5 --spacing 5 --radius 2 --fault faults.shp
-  viewinsar stat geo_velocity.h5 --spacing 10 --radius 3 --gap 1 --dem \\
-      --colormap RdBu_r --vlim -40 40
+  # draw the line along a fault shown on the map: a profile every 5 km
+  viewinsar stat velocity.h5 --fault faults.shp
+  viewinsar stat geo_velocity.h5 --spacing 2 --length 4 --width 1.5 --dem \\
+      --colormap RdBu_r --vlim -1 1
 
   # the line given up front: lat/lon or y/x pairs, or the longest line of a
   # vector file (.shp .geojson .gpkg .kml .gmt ..., e.g. drawn in QGIS)
-  viewinsar stat geo_velocity.h5 --spacing 5 --radius 2 --save --nodisplay \\
-      --line-lalo -1.20 119.95 -1.55 120.05 -1.80 120.20
-  viewinsar stat velocity.h5 --spacing 5 --radius 2 --line-yx 3670 744 3300 720 2967 696
-  viewinsar stat velocity.h5 --spacing 5 --radius 2 --line-file fault_trace.geojson \\
-      --svg --save
+  viewinsar stat geo_velocity.h5 --save --nodisplay \\
+      --line-lalo 40.70 29.90 40.73 30.40 40.70 30.70
+  viewinsar stat velocity.h5 --line-yx 3670 744 3300 720 2967 696
+  viewinsar stat velocity.h5 --line-file fault_trace.geojson --svg --save
 
-  # your own names and colours for the two blocks
-  viewinsar stat velocity.h5 --spacing 5 --radius 2 --names "West block" "East block" \\
-      --colors tab:green tab:purple
-
-  # the rate across the fault (block 1 - block 2) of the east and up velocities
-  viewinsar stat geo_ve.h5 geo_vu.h5 --labels East Up --rate --spacing 5 --radius 2 \\
+  # ascending and descending: the LOS creep of each, and split into
+  # fault-parallel and vertical
+  viewinsar stat T036D/geo_velocity.h5 T131A/geo_velocity.h5 --labels T036D T131A \\
+      --line-file fault_trace.geojson
+  viewinsar stat desc.tif asc.tif --los-inc 39 34 --los-az -100 100 --data-unit mm/yr \\
       --line-file fault_trace.geojson
 
-mouse / keyboard (in either window):
-  left click       : add a point to the line
-  Enter            : finish the line -> points, circles and violins
-  "u" or Backspace : remove the last point
-  "n"              : start a new line (so does a click after Enter)
-  "e"              : export (see "output")
+  # your own names and colours for the two blocks, more bootstrap draws
+  viewinsar stat velocity.h5 --names North South --colors tab:green tab:purple \\
+      --boot 5000 --line-file fault_trace.geojson
+
+mouse / keyboard:
+  left click (map)  : add a point to the line
+  Enter             : finish the line -> the profiles and the creep rate
+  "u" or Backspace  : remove the last point
+  "n"               : start a new line (so does a click after Enter)
+  left click on a point of the creep rate: its profile, in a window of its own -
+                      there left / right arrow: the point before / after,
+                      up / down arrow: the other files
+  "e"               : export (see "output")
 
 output (written by "e" or --save, into the --save folder - made if it does not
 exist - or --outdir, else the current folder), named after the line's first and
-last point, e.g. stat_Y3670X744_Y2967X696_sp5km_r2km:
-  <name>.png          the violins (.svg with --svg)
-  <name>_map.png      the map, with the line, the points and the circles
-  <name>_stats.csv    one row per point: dist_km along the line, its position,
-                      count / median / mean / mode / std / q25 / q75 / min /
-                      max of each block (_b1, _b2), the circle offsets, and
-                      median_b1_minus_b2
-  <name>_values.csv   every pixel used: point, block, value, row, col,
-                      dist_to_line_km (never below the gap), and lat/lon
-  <name>_rate.csv     --rate: one row per point, rate (block 1 - block 2) and
-                      rate_err of every file (rate_1, rate_err_1, rate_2 ...)
-  <name>_info.txt     the line, the parameters, and which side is which block
-  a second file's tables are <name>_2_stats.csv and <name>_2_values.csv, ...
+last point, e.g. stat_Y3670X744_Y2967X696_sp5km_L5km_w2.5km:
+  <name>.png           the creep rate along the line (.svg with --svg)
+  <name>_map.png       the map: the line, its points and their profiles
+  <name>_creep.csv     a row per point and file: dist_km along the line, row /
+                       col, lat / lon, strike, the creep rate (the bootstrap
+                       mean, its 1 sigma, median, 68 and 95 % ranges), the
+                       least-squares (BLUE) one and its sigma, both slopes,
+                       the pixels of each block
+  <name>_split.csv     two or more LOS geometries: the creep split into
+                       fault-parallel (+ right-lateral) and vertical (+ block
+                       2 up) at every point
+  <name>_values.csv    every pixel used: file, point, block, x_km (from the
+                       line, + towards block 2), y_km, value, row, col, lat/lon
+  <name>_profiles.png  every profile of the first file (_profiles_2.png ...)
+  <name>_profile7.png  the profile on screen (point 7), when its window is open
+  <name>_info.txt      the line, the parameters, which side is which block
 
 map options: anything not listed above goes to view.py, as for `viewinsar swath`
 (--colormap --vlim --unit --mask --sub-lat --sub-lon ...).
@@ -1045,19 +1088,10 @@ def create_stat_parser(prog=f'{PROG} stat'):
     parser.add_argument('file', nargs='+',
                         help='input file(s): velocity.h5, a GeoTIFF, a time-series epoch\n'
                              '... geocoded or in radar coordinates. Several files -\n'
-                             'tracks, frames, or east and up velocities - each get the\n'
-                             'same circles; with --rate one series each.')
+                             'tracks, frames - each get the same profiles, a series each.')
     parser.add_argument('--labels', dest='labels', nargs='+', metavar='NAME',
                         help='names of the input files in the legends (default: the\n'
                              'file names).')
-    parser.add_argument('--rate', dest='rate', action='store_true',
-                        help='plot the RATE instead of the violins: median of block 1 -\n'
-                             'median of block 2 at every point, with error bars, one\n'
-                             'series per file - the slip (creep) rate across the fault.')
-    parser.add_argument('--rate-err', dest='rate_err', default='iqr', choices=['iqr', 'sem'],
-                        help='--rate error bars: iqr (default) the robust spread of the\n'
-                             'pixels, sqrt(s1^2 + s2^2) with s = IQR / 1.349; sem the\n'
-                             'standard error of the medians (pixels taken as independent).')
     parser.add_argument('--dset', dest='dset',
                         help='dataset to read (default: the one matching FILE_TYPE;\n'
                              'see `viewinsar list FILE`).')
@@ -1091,31 +1125,62 @@ def create_stat_parser(prog=f'{PROG} stat'):
                       help='the longest line in a vector file - any format and CRS\n'
                            'that --fault reads (.shp .geojson .gpkg .kml .gmt ...).')
 
-    circ = parser.add_argument_group('Circles', 'where the blocks are sampled')
-    circ.add_argument('--spacing', dest='spacing', type=float, default=5.0,
+    prof = parser.add_argument_group('Profiles', 'across the line, where the creep is '
+                                     'measured (Hussain et al. 2016)')
+    prof.add_argument('--spacing', dest='spacing', type=float, default=5.0,
                       metavar='KM',
-                      help='distance between the points along the line, in km\n'
-                           '(default: %(default)s). The points are centred on it.')
-    circ.add_argument('--radius', dest='radius', type=float, default=2.0, metavar='KM',
-                      help='radius of the circles, in km (default: %(default)s).')
-    circ.add_argument('--gap', dest='gap', type=float, default=1.0, metavar='KM',
-                      help='space between the line and every circle, in km\n'
-                           '(default: %(default)s): a circle centre sits RADIUS + GAP\n'
-                           'from its point, more on the inside of a bend.')
-    circ.add_argument('--keep-zero', dest='keep_zero', action='store_true',
+                      help='distance between the points along the line - a profile\n'
+                           'at each - in km (default: %(default)s). Centred on the\n'
+                           'line.')
+    prof.add_argument('--length', dest='length_km', type=float, default=5.0, metavar='KM',
+                      help='how far each profile reaches either side of the line, in\n'
+                           'km (default: %(default)s).')
+    prof.add_argument('--width', dest='width_km', type=float, default=2.5, metavar='KM',
+                      help='the pixels within this distance either side of a profile\n'
+                           'are projected onto it, in km (default: %(default)s).')
+    prof.add_argument('--boot', dest='n_boot', type=int, default=2000, metavar='NUM',
+                      help='bootstrap draws for the uncertainty of each creep rate\n'
+                           '(default: %(default)s).')
+    prof.add_argument('--seed', dest='seed', type=int, default=0, metavar='NUM',
+                      help='seed of the bootstrap: the same NUM, the same draws\n'
+                           '(default: %(default)s).')
+    prof.add_argument('--min-pixels', dest='min_pixels', type=int, default=10, metavar='NUM',
+                      help='fewer pixels than this on a side of a profile: no creep\n'
+                           'rate there (default: %(default)s).')
+    prof.add_argument('--keep-zero', dest='keep_zero', action='store_true',
                       help='keep exactly-zero pixels (dropped by default).')
 
-    look = parser.add_argument_group('Plot', 'the violins')
+    geo = parser.add_argument_group('LOS geometry', 'the split into fault-parallel and '
+                                    'vertical (two or more files)')
+    geo.add_argument('--geom', dest='geom_file', nargs='+', metavar='PATH',
+                     help='the LOS geometry, one per input file in order: MintPy\'s\n'
+                          'geometryGeo.h5, LiCSBAS\'s E.geo, N.geo, U.geo (a GEOCml*\n'
+                          'folder), E / N / U GeoTIFFs ({frame}.geo.E.tif, E.geo.tif,\n'
+                          'E.tif ...), an incidence + azimuth GeoTIFF pair - or a\n'
+                          'FOLDER, searched with its subfolders for the one that\n'
+                          'covers the file (default: found beside each file or in\n'
+                          'its LiCSBAS folder, else its attributes; the nominal\n'
+                          'angles of a name - asc, desc ... - are not used).')
+    geo.add_argument('--los-inc', dest='los_inc', type=float, nargs='+', metavar='DEG',
+                     help='one incidence angle for all the pixels of a file instead,\n'
+                          'one per file (or one for all).')
+    geo.add_argument('--los-az', dest='los_az', type=float, nargs='+', metavar='DEG',
+                     help='and the azimuth angle (MintPy convention: of the ground-\n'
+                          'to-satellite vector, from north, anti-clockwise; Sentinel-1\n'
+                          'about 100 ascending, -100 descending).')
+
+    look = parser.add_argument_group('Plot', 'the creep rate and the profiles')
     look.add_argument('--names', dest='block_names', nargs=2, metavar=('NAME1', 'NAME2'),
                       default=['Block 1', 'Block 2'],
                       help='names of block 1 (left) and block 2 (right)\n'
                            '(default: "Block 1" "Block 2").')
     look.add_argument('--colors', dest='block_colors', nargs=2, metavar=('COLOR1', 'COLOR2'),
                       default=['#0072B2', '#D55E00'],
-                      help='colours of block 1 and block 2, any matplotlib colour\n'
-                           '(default: blue #0072B2 and vermilion #D55E00).')
+                      help='colours of block 1 and block 2 on the map and in the\n'
+                           'profiles, any matplotlib colour (default: blue #0072B2\n'
+                           'and vermilion #D55E00).')
     look.add_argument('--ylim', dest='ylim', type=float, nargs=2, metavar=('YMIN', 'YMAX'),
-                      help='value range of the violin plot (default: auto).')
+                      help='range of the creep-rate axis (default: auto).')
 
     mapg = parser.add_argument_group('Map', 'the guides drawn on the map')
     mapg.add_argument('--dem', dest='dem_file', nargs='?', const=AUTO_DEM, metavar='DEM',
@@ -1152,7 +1217,8 @@ def create_stat_parser(prog=f'{PROG} stat'):
     out.add_argument('--dpi', dest='fig_dpi', type=int, default=300, metavar='NUM',
                      help='resolution of raster figures (default: %(default)s).')
     out.add_argument('--figsize', dest='fig_size', metavar=('WID', 'LEN'), type=float, nargs=2,
-                     help='size of the violin window, in inches (default: 9 4.8).')
+                     help='size of the creep-rate window, in inches (default: 9 4.8;\n'
+                          '9 7.4 with the split).')
     out.add_argument('--figsize-map', dest='fig_size_map', metavar=('WID', 'LEN'),
                      type=float, nargs=2,
                      help='size of the map window, in inches (default: auto).')
@@ -1181,12 +1247,15 @@ def stat_cmd_line_parse(iargs=None):
     check_save_options(inps)
     if inps.svg:
         inps.fig_ext = '.svg'
-    if inps.spacing <= 0:
-        raise ValueError(f'--spacing must be positive, got {inps.spacing}')
-    if inps.radius <= 0:
-        raise ValueError(f'--radius must be positive, got {inps.radius}')
-    if inps.gap < 0:
-        raise ValueError(f'--gap must not be negative, got {inps.gap}')
+    for opt, value in (('--spacing', inps.spacing), ('--length', inps.length_km),
+                       ('--width', inps.width_km)):
+        if not value > 0:
+            raise ValueError(f'{opt} must be positive, got {value}')
+    if inps.n_boot < 100:
+        raise ValueError(f'--boot: at least 100 draws, got {inps.n_boot}')
+    if inps.min_pixels < 3:
+        raise ValueError(f'--min-pixels: at least 3 (a line and its scatter), got '
+                         f'{inps.min_pixels}')
     bad = [c for c in inps.block_colors if not is_color_like(c)]
     if bad:
         raise ValueError(f'--colors: not a colour: {", ".join(bad)}')
@@ -1202,6 +1271,9 @@ def stat_cmd_line_parse(iargs=None):
                          '(--line-yx, --line-lalo or --line-file)')
     check_map_options(inps)
     read_file_info(inps)
+    for opt, values in (('--geom', inps.geom_file), ('--los-inc / --los-az', inps.los_inc)):
+        if values and len(values) > len(inps.file):
+            raise ValueError(f'{opt}: {len(values)} for {len(inps.file)} input file(s)')
 
     # what the shared map machinery of the swath viewer expects to find
     for key, value in dict(nlook=1, topoxsect=None, timeseries=None, yx=None,
@@ -1277,7 +1349,7 @@ inside, outside, off, in turn); a second one the posterior distributions, as
 Hussain et al. (2016, central NAF, Fig. 9): every pair of parameters as a 2D
 histogram (jet), the marginals as blue histograms along the bottom, the MAP
 in red.
-With --cmap-prof CMAP the pixels are a point DENSITY in that colormap
+With --cmap-prof CMAP the pixels are a pixel DENSITY in that colormap
 instead, as in swath (--nlook fills it in), under red ranges, with bigger
 medians and the GNSS red.
 
@@ -1345,7 +1417,7 @@ examples:
   viewinsar model T014A/geo_velocity.h5 T123D/geo_velocity.h5 --comp los \\
       --fault faults.shp --labels T014A T123D
 
-  # the pixels as a point density (as swath), filled in for ml10 data; the
+  # the pixels as a pixel density (as swath), filled in for ml10 data; the
   # ranges red, bigger medians
   viewinsar model TS_GEOCml10GACOS/cum_filt.h5 --fault faults.shp --width 20 \\
       --cmap-prof magma --nlook 10
@@ -1713,7 +1785,7 @@ def create_model_parser(prog=f'{PROG} model [strike|reverse|normal]'):
                       help='a panel with the shear strain rate dv/dx of the model.')
     look.add_argument('--cmap-prof', dest='cmap_prof', nargs='?', const='viridis',
                       metavar='CMAP',
-                      help='draw the pixels as a point DENSITY in this colormap, as\n'
+                      help='draw the pixels as a pixel DENSITY in this colormap, as\n'
                            'swath does (alone: viridis) - with the 95 / 68 %% ranges in\n'
                            'red, bigger medians and the GNSS red, and no points.\n'
                            'Default: the pixels as red points, the ranges grey, the\n'
@@ -2365,7 +2437,7 @@ def list_main(iargs=None):
 
 SUBCOMMANDS = {
     'swath': (swath_main, 'interactive swath (buffered) profile viewer'),
-    'stat': (stat_main, 'block statistics on both sides of a line (violins)'),
+    'stat': (stat_main, 'fault creep along a line, from short profiles across it'),
     'model': (model_main, 'fit slip rate and locking depth to a profile (MCMC)'),
     'tseries': (tseries_main, 'time series of a pixel or a circle (LiCSBAS / MintPy)'),
     'list': (list_main, 'list the datasets available in a file'),
@@ -2375,7 +2447,7 @@ SUBCOMMANDS = {
 RULE = '-' * 88
 
 TOP_HELP = """\
-viewinsar {version} - swath profiles, fault-block statistics, slip-rate models and
+viewinsar {version} - swath profiles, fault creep along a line, slip-rate models and
 time series of InSAR data (MintPy, LiCSBAS); MintPy itself is optional.
 
 usage: {prog} <command> [options]
@@ -2401,7 +2473,7 @@ file without a unit).
 swath - swath (buffered) profiles
 {rule}
   Two clicks on the map draw a section: every pixel within +/-WIDTH km of the line
-  is projected onto it and drawn as a point-density profile with the median and the
+  is projected onto it and drawn as a pixel-density profile with the median and the
   25th-75th percentiles. Each section opens in its own window: A-A', B-B', C-C' ...
   the line      two left clicks; or up front --start-lalo / --end-lalo (--start-yx /
                 --end-yx), --profile LAT0 LON0 LAT1 LON1 (repeat it: B-B', C-C' ...),
@@ -2432,29 +2504,30 @@ swath - swath (buffered) profiles
                 {prog} swath velocity.h5 --line-file profiles.gmt --nodisplay --save
 
 {rule}
-stat - the two sides of a fault: block 1 against block 2
+stat - fault creep along a line, from short profiles across it
 {rule}
   Click points along the fault (Enter to finish), or give the line with --line-lalo,
-  --line-yx or --line-file. Every --spacing km along it two circles of --radius km,
-  one on each side and --gap km clear of the line: block 1 on the LEFT (walking
-  from the first point to the last), block 2 on the RIGHT. Each pair is drawn as two
-  violins (the median, mean and mode marked), the medians of each block joined along
-  the line.
-  --rate        the rate across the fault instead: median of block 1 - median of
-                block 2 at every point, one series per file (e.g. ve.h5 vu.h5),
-                with error bars (--rate-err iqr|sem)
-  several files the same circles on each: a row of violins per file
-  options       --names / --colors of the blocks, --ylim, --keep-zero, --dem [DEM]
-                relief, --fault FILE on the map, --lookup (radar-coded data)
+  --line-yx or --line-file. Every --spacing km along it a profile crosses it: --length
+  km either side (default 5), the pixels within --width km of it (2.5). A straight line
+  through each side, and the creep rate is their offset at the line - block 2 (RIGHT,
+  walking from the first point to the last) minus block 1 (LEFT) - with a bootstrap
+  that resamples each side on its own (--boot), as Hussain et al. (2016).
+  the figure    the LOS creep rate along the line, a series per file, 1-sigma error
+                bars (descending solid, ascending dashed); ascending + descending
+                (--geom, --los-inc / --los-az): split into fault-parallel and vertical
+  a profile     click a point of the creep rate: its pixels, the least-squares
+                (BLUE) and bootstrap lines, the PDFs (arrows: other points / files)
+  options       --names / --colors of the blocks, --ylim, --keep-zero, --min-pixels,
+                --dem [DEM] relief, --fault FILE on the map, --lookup (radar-coded)
   keys          left click: add a point | Enter: finish | "u" / Backspace: undo |
                 "n": new line | "e": export
-  output        stat_..._stats.csv (each point: count, median, mean, mode, std,
-                quartiles of each block), _values.csv (every pixel), _rate.csv
-                (--rate), _info.txt, the figure and the map
-  examples      {prog} stat velocity.h5 --spacing 5 --radius 2 --fault faults.shp
-                {prog} stat velocity.h5 --spacing 5 --radius 2 \\
+  output        stat_..._creep.csv (each point and file: the creep rate, its 1 sigma,
+                68 / 95 % ranges, the BLUE, the slopes), _split.csv, _values.csv
+                (every pixel), _profiles.png, _info.txt, the figure and the map
+  examples      {prog} stat velocity.h5 --fault faults.shp
+                {prog} stat velocity.h5 --spacing 2 --length 4 \\
                     --line-file trace.geojson --save
-                {prog} stat ve.h5 vu.h5 --labels East Up --rate --spacing 5 --radius 2
+                {prog} stat desc.h5 asc.h5 --labels T036D T131A --line-file trace.geojson
 
 {rule}
 model - slip rate and locking depth from profiles across a fault

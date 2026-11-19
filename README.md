@@ -6,7 +6,7 @@ products, built on [MintPy](https://github.com/insarlab/MintPy).**
 `plot_transection.py` samples a single line of pixels. `viewinsar` samples a
 **corridor**: you draw the same line with two clicks, it gets buffered by
 ±*W* km, every valid pixel inside the buffer is linearly referenced onto the
-line, and the resulting cloud is shown as a 2-D point-density profile with the
+line, and the resulting cloud is shown as a 2-D pixel-density profile with the
 density-weighted median and the 25th–75th percentile envelope.
 
 In GIS terms, one click-click does this:
@@ -28,11 +28,13 @@ The pieces come from three MintPy tools: the map is `view.py`, the
 click-to-draw interaction is `plot_transection.py`, and the optional
 displacement time series is `tsview.py`.
 
-`viewinsar stat` compares the two sides of a fault: draw a line along it, and
-every *SP* km a pair of circles is placed, one on each side, **1 km clear of the
-line**; the values in each circle become a violin, block 1 against block 2,
-with the block medians joined by dashed lines (see
-[Block statistics](#block-statistics-viewinsar-stat)).
+`viewinsar stat` measures **fault creep along a line**, as Hussain et al.
+(2016) did on the North Anatolian Fault: draw the line on the fault, and every
+*SP* km a short profile crosses it; a straight line through the pixels of each
+side, and their offset at the fault is the creep rate, with a bootstrap for its
+uncertainty - along the line, per track, and split into fault-parallel and
+vertical when there are ascending and descending tracks (see
+[Fault creep along a line](#fault-creep-along-a-line-viewinsar-stat)).
 
 `viewinsar tseries` is LiCSBAS_plot_ts.py for LiCSBAS and MintPy time series,
 with circles: `--radius 2` and a double click gives, at every date, the median of
@@ -44,8 +46,7 @@ Several files at once - the frames of a track, or several tracks - make one
 density with a median line for each, and are drawn together on the map; GNSS
 velocities (`--gnss`, any table or point format) appear on the map and, inside
 a swath, on its profile with their error bars (see
-[Several files and GNSS](#several-files-and-gnss)). `viewinsar stat -rate`
-turns the two sides of a fault into the rate across it.
+[Several files and GNSS](#several-files-and-gnss)).
 
 `viewinsar model` fits the **slip rate and locking depth** of an elastic
 dislocation - and the rate and depth of shallow creep - to a profile across a
@@ -143,10 +144,10 @@ viewinsar swath geo_velocity.h5 --topoxsect dem.tif --svg --save
 viewinsar swath T014A/geo_velocity.h5 T123D/geo_velocity.h5 --labels T014A T123D
 viewinsar swath geo_velocity.h5 --gnss gnss.csv --vel los
 
-# block statistics on both sides of a fault: circles every 5 km, 2 km radius
-viewinsar stat geo_velocity.h5 --spacing 5 --radius 2 --fault faults.shp
-# ... or the rate across it (block 1 - block 2), of the east and up velocities
-viewinsar stat geo_ve.h5 geo_vu.h5 --rate --spacing 5 --radius 2 --line-file fault_trace.geojson
+# fault creep along a line: a profile across it every 5 km, two lines and their offset
+viewinsar stat geo_velocity.h5 --spacing 5 --fault faults.shp
+# ... of an ascending and a descending track: also split into fault-parallel and vertical
+viewinsar stat T036D/geo_velocity.h5 T131A/geo_velocity.h5 --line-file fault_trace.geojson
 
 # slip rate and locking depth of a fault, by MCMC, from a profile across it
 viewinsar model geo_velocity.h5 --comp los --fault faults.shp --width 25
@@ -235,7 +236,7 @@ and scripts keep running:
 |---|---|
 | `-fault`, `-gnss`, `-vel` / `--gnss-comp`, `-nlook`, `-topoxsect` / `--topo`, `-profile`, `-svg`, `-save` | `--fault`, `--gnss`, `--vel`, `--nlook`, `--topoxsect`, `--profile`, `--svg`, `--save` |
 | `-d`, `-w` / `--buffer`, `-o` | `--dem`, `--width`, `--outfile` |
-| `stat`: `-sp`, `-r`, `-rate` | `--spacing`, `--radius`, `--rate` |
+| `stat`: `-sp` | `--spacing` (0.5.8: `--radius`, `--gap`, `--rate`, `--rate-err` are gone - left out with a note) |
 | `tseries`: `-r`, `-m`, `-p`, `-c`, `-u`, `--vel` | `--radius`, `--ref-date`, `--point`, `--colormap`, `--unit`, `--vel-file` |
 | `list`: `-n` | `--num` |
 
@@ -432,48 +433,99 @@ bins never straddle the fault.
 
 ---
 
-## Block statistics: `viewinsar stat`
+## Fault creep along a line: `viewinsar stat`
 
-How different are the two sides of a fault? Draw a line along it, and
+How fast does a fault creep, and where along it? Draw a line **on the fault
+trace**, and - as Hussain et al. (2016) measured the creep of the Izmit
+rupture of the North Anatolian Fault -
 
-1. every `--spacing` km along the line a **point** is placed (red on the map),
-   centred on the line so the first and last sit equally far from its ends;
-2. at every point, two **circles** of radius `--radius` km: one on each side, its
-   edge `--gap` km (default **1 km**) clear of the line;
-3. **block 1** is everything on the **left** of the line, walking from its
-   first point to its last, **block 2** everything on the right;
-4. the pixels inside each circle become a **violin**, block 1 and block 2 side
-   by side at each point, each block in **the colour of its circles on the
-   map** (the map and the violins share one legend style, and the map names
-   the blocks next to their circles);
-5. each violin has **strikes** at its **median** (in the block's colour), its
-   **mean** (solid) and its **mode** (dotted: the peak of the kernel density,
-   where the violin is widest), and the medians of each block are joined by a
-   **dashed line** along the line.
+1. every `--spacing` km along the line (default 5) a **point** is placed (a
+   black circle on the map), centred on the line so the first and last sit
+   equally far from its ends;
+2. at every point a short **profile** crosses the line at right angles,
+   `--length` km (5) either side of it, and the pixels within `--width` km
+   (2.5) either side of the profile are projected onto it - on the map each
+   profile is a rectangle in two halves, one per block;
+3. **block 1** is the **left** of the line, walking from its first point to its
+   last, **block 2** the right; *x* is the distance from the line along the
+   profile, + towards block 2;
+4. a **straight line through each side**, and the **creep rate is their offset
+   at the line** - block 2 minus block 1 - solved as one linear system, their
+   eq. 2:
+
+   ```
+   | v1 |   | x1  0  1  0 |   | slope 1 |
+   |    | = |             | . | slope 2 |
+   | v2 |   | 0  x2  1  1 |   | b1      |
+                                | creep   |
+   ```
+
+5. its uncertainty from a **percentile bootstrap** that resamples each side on
+   its own, *n₁* of its *n₁* pixels and *n₂* of *n₂* (`--boot` draws, 2000;
+   after Bekaert et al. 2015): the creep rate is the mean of the draws, ±1σ
+   their standard deviation. The least-squares solution (the BLUE) is written
+   too, with its σ - as Hussain et al. show (their Fig. S3), it is too narrow
+   when the errors are large or correlated.
 
 ```bash
-# draw the line on the map: left-click along the fault, Enter to finish
-viewinsar stat geo_velocity.h5 --spacing 5 --radius 2 --fault faults.shp --colormap RdBu_r --vlim -1 1
+# draw the line on the map (over the fault traces): left-click along it, Enter
+viewinsar stat geo_velocity.h5 --fault faults.shp --colormap RdBu_r --vlim -1 1
 
 # or give it: lat/lon or y/x pairs, or the longest line of a vector file
-viewinsar stat geo_velocity.h5 --spacing 5 --radius 2 --save --nodisplay \
-    --line-lalo -1.20 119.95 -1.55 120.05 -1.80 120.20
-viewinsar stat geo_velocity.h5 --spacing 5 --radius 2 --line-file fault_trace.geojson --svg --save
+viewinsar stat geo_velocity.h5 --save --nodisplay \
+    --line-lalo 40.70 29.90 40.73 30.40 40.70 30.70
+viewinsar stat geo_velocity.h5 --line-file fault_trace.geojson --svg --save
 
-# your own names and colours
-viewinsar stat geo_velocity.h5 --spacing 5 --radius 2 --names "West block" "East block"
+# shorter, narrower profiles every 2 km
+viewinsar stat geo_velocity.h5 --spacing 2 --length 4 --width 1.5 --line-file fault_trace.geojson
+
+# an ascending and a descending track: the LOS creep of each, and the split
+viewinsar stat T036D/geo_velocity.h5 T131A/geo_velocity.h5 --labels T036D T131A \
+    --line-file fault_trace.geojson
+viewinsar stat desc.tif asc.tif --los-inc 39 34 --los-az -100 100 --data-unit mm/yr \
+    --line-file fault_trace.geojson
+
+# your own names and colours for the blocks
+viewinsar stat geo_velocity.h5 --names North South --colors tab:green tab:purple \
+    --line-file fault_trace.geojson
 ```
 
-**Every circle stays on its own side.** A circle centre starts `r + gap` out
-from its point, along the line's normal. On the inside of a bend that can
-bring it within `r + gap` of *another* part of the line, so the circle is
-pushed further out along the same normal until it clears **every** part of
-the line by the gap; where there is no such spot (a hairpin), it is left out,
-and the run says so. A circle is also never placed on the far side of
-another strand of the line. So every pixel used is at least the gap away from
-the line, and on its own side of it - `_values.csv` lists that distance for
-each one. The normal follows the line's direction over ±*r* around the point,
-so a hand-digitised trace with small wiggles still gives steady circles.
+**The figure** is their Fig. 5: the **LOS creep rate** along the line, 1σ
+error bars, a series per file - descending tracks solid, ascending dashed (the
+file's `ORBIT_DIRECTION`, else its name - `asc`, `T014A`, `105D` ... - else its
+line of sight). Motion along an E-W fault shows with opposite signs in
+ascending and descending tracks, vertical motion with the same sign; so **two
+LOS geometries or more** - MintPy's `geometryGeo.h5` / `geometryRadar.h5`,
+LiCSBAS's `GEOCml*/E.geo …` or LiCSAR's `*.geo.E.tif` beside the data, or
+`--geom`, or `--los-inc` / `--los-az` - also **split** it, point by point and
+draw by draw, into a **fault-parallel** creep rate (red, + right-lateral) and a
+**vertical** one (blue, + block 2 up), assuming no motion across the fault:
+
+  `los_i = Δh (L_i · s) + Δu L_i,up`, fault-parallel = −Δh, vertical = Δu
+
+with `L_i` the LOS unit vector of file *i* (ground to satellite, the median
+over the profile's pixels) and `s` the line's direction there. Nominal angles
+from a name are not used for the split; the run says so.
+
+**Click a point of the creep rate**: its profile opens in a window of its own,
+as their Fig. S3 - the pixels, the BLUE lines (red) and the bootstrap lines
+(green), the fault location, and the PDFs of the creep rate from both, the
+numbers in the legend; the profile is outlined on the map.
+<kbd>←</kbd> / <kbd>→</kbd> step to the point before / after,
+<kbd>↑</kbd> / <kbd>↓</kbd> to the other files.
+
+**Mind the line.** It must lie on the fault trace: *x* = 0 is where the two
+sides are compared, and a line 1 km off the trace puts that km of one side
+into the other - the creep comes out low. Draw it over the `--fault` traces,
+or take the trace itself with `--line-file`. A profile is perpendicular to the
+line's direction over ±`--width` around its point, so a hand-digitised trace
+with small wiggles still gives steady profiles; where the line bends inside a
+profile, a pixel on its other side than its *x* says is left out (the run says
+how many; `trace_km` in `_creep.csv` is how far the line strays from the
+centre of the profile). Straight lines through ±5 km also see the curvature of
+the interseismic signal - small while the locking depth is well beyond 5 km; a
+shorter `--length` lessens it, with fewer pixels. Neighbouring profiles share
+pixels when `--spacing` is less than twice `--width`; the run notes it.
 
 "Left" and "right" are those of the ground, as the map shows it, also on
 radar-coded data, whose grid is a mirror image of the ground (that is why
@@ -482,64 +534,48 @@ view.py flips it): there, `geometryRadar.h5` gives the lat/lon of the line
 
 | input | action |
 |-------|--------|
-| left click | add a point to the line |
-| <kbd>Enter</kbd> | finish the line: points, circles on the map, violins |
+| left click (map) | add a point to the line |
+| <kbd>Enter</kbd> | finish the line: the profiles on the map, the creep rate |
 | <kbd>u</kbd> or <kbd>Backspace</kbd> | remove the last point |
 | <kbd>n</kbd> | start a new line (so does a click after <kbd>Enter</kbd>) |
+| left click (creep rate) | the profile of that point, in its own window |
+| <kbd>←</kbd> <kbd>→</kbd> / <kbd>↑</kbd> <kbd>↓</kbd> (profile window) | the point before / after; the other files |
 | <kbd>e</kbd> | export |
 
 | option | default | meaning |
 |--------|---------|---------|
-| `--spacing` | `5` | distance between the points along the line, km |
-| `--radius` | `2` | radius of the circles, km |
-| `--gap` | `1` | space between the line and every circle, km |
+| `--spacing` | `5` | distance between the points along the line, km - a profile at each |
+| `--length` | `5` | how far each profile reaches either side of the line, km |
+| `--width` | `2.5` | the pixels within this distance either side of a profile are projected onto it, km |
+| `--boot` / `--seed` | `2000` / `0` | bootstrap draws per profile, and their seed |
+| `--min-pixels` | `10` | fewer pixels on a side: no creep rate at that point |
+| `--geom` / `--los-inc` / `--los-az` | found beside the data | the LOS geometry of each file, for the split (as in `model`) |
 | `--line-yx` / `--line-lalo` | — | the line as row/col or lat/lon pairs, 2 points or more |
 | `--line-file` | — | the longest line of a vector file (any format / CRS `--fault` reads) |
 | `--names` / `--colors` | `Block 1` `Block 2` / blue, vermilion | the two blocks |
-| `--ylim` | auto | value range of the violin plot |
+| `--ylim` | auto | range of the creep-rate axes |
 | `--keep-zero` | off | keep exactly-zero pixels |
 | `--dem`, `--dem-source`, `--dem-zoom`, `--lookup`, `--fault` | — | as in `viewinsar swath` |
 | `--save` / `--nodisplay` / `--svg` / `--outfile` / `--outdir` | — | output control |
 
-Everything else goes to view.py, as for `swath`. The export (<kbd>e</kbd> or
-`--save`) is named after the line's first and last point and the parameters,
-e.g. `stat_Y3670X744_Y2967X696_sp5km_r2km`:
+The rates are in mm/yr whatever unit the data are read in (a file that is not
+a velocity keeps its own). Everything else goes to view.py, as for `swath`.
+The export (<kbd>e</kbd> or `--save`) is named after the line's first and last
+point and the parameters, e.g. `stat_Y3670X744_Y2967X696_sp5km_L5km_w2.5km`:
 
 | file | contents |
 |------|----------|
-| `….png` | the violins |
-| `…_map.png` | the map with the line, the points and the circles |
-| `…_stats.csv` | one row per point: `dist_km`, its row/col and lat/lon, `count` `median` `mean` `mode` `std` `q25` `q75` `min` `max` of each block (`_b1`, `_b2`), the circle offsets `offset_km_b1/_b2`, and `median_b1_minus_b2` |
-| `…_values.csv` | every pixel used: `point`, `block`, `value`, `row`, `col`, `dist_to_line_km`, lat/lon |
-| `…_info.txt` | the line's vertices, the parameters, which side is which block |
+| `….png` | the creep rate along the line (and the split) |
+| `…_map.png` | the map with the line, its points and their profiles |
+| `…_creep.csv` | a row per point and file: `dist_km`, row/col, lat/lon, `strike_deg` (the line's direction), `label`, `orbit`, `n_1` `n_2` (pixels a side), `creep` (the bootstrap mean) `creep_std` `creep_median` `creep_lo95` `creep_hi95` `creep_lo68` `creep_hi68`, `creep_blue` `creep_blue_std`, `slope_1` `slope_2` (per km) `intercept_1`, `sigma` (the scatter), `trace_km`, `dropped`, `clipped`; with the split, the LOS unit vector `los_east` `los_north` `los_up` |
+| `…_split.csv` | two LOS geometries or more: a row per point, `par` / `up` (from the least-squares rates) and `_mean` `_std` `_median` `_lo95` `_hi95` of the draws, the files used |
+| `…_values.csv` | every pixel used: `file`, `point`, `block`, `x_km` (from the line, + towards block 2), `y_km` (along it), `value`, `row`, `col`, lat/lon |
+| `…_profiles.png` | every profile of the first file - pixels and both lines, its creep rate (`_profiles_2.png` … for the others) |
+| `…_profile7.png` | the profile on screen (point 7), when its window is open |
+| `…_info.txt` | the line's vertices, the parameters, the method, which side is which block |
 
-When `--spacing` is smaller than `2r` neighbouring circles overlap and share pixels;
-the run notes it.
-
-### Several files, and the rate across the fault
-
-Several files - tracks, frames, or the east and up velocities of a
-decomposition - get the same circles, and a row of violins each.
-
-With **`--rate`** the violins give way to the **rate** across the fault: at
-every point, the median of block 1 minus the median of block 2, one series per
-file, with error bars - the slip (or creep) rate along the fault, as Hussain
-et al. (2016) measured the creep along the North Anatolian Fault. The east and
-up velocities together give the horizontal and the vertical rate:
-
-```bash
-viewinsar stat geo_ve.h5 geo_vu.h5 --labels East Up --rate --spacing 5 --radius 2 \
-    --line-file fault_trace.geojson
-```
-
-| `--rate-err` | the error bar |
-|---|---|
-| `iqr` (default) | `sqrt(s₁² + s₂²)`, with `s` = IQR / 1.349 of each circle: the robust spread of the pixels - conservative, since the pixels of a circle are correlated |
-| `sem` | the standard error of the two medians, `1.2533 sqrt(s₁²/n₁ + s₂²/n₂)`, as if the pixels were independent |
-
-`…_rate.csv` has one row per point: `dist_km`, its position, and `rate_k`,
-`rate_err_k` of every file. A second file's statistics go to `…_2_stats.csv`
-and `…_2_values.csv`.
+`model --creep-offset` measures the same offset, with the same code, on the
+profile of a model fit.
 
 ---
 
@@ -728,7 +764,7 @@ section, `A - A'`, white on black in the corner. The trade-off between *S* and
 *d₁* shows there.
 
 **Two views of the pixels.** By default they are points, as above. With
-`--cmap-prof CMAP` (alone: `viridis`) they are a **point density** instead,
+`--cmap-prof CMAP` (alone: `viridis`) they are a **pixel density** instead,
 drawn as `viewinsar swath` draws its own - log colour scale, the densest
 cells white, a colour bar, cells half a `--bin` wide - with the 95 % and 68 %
 ranges in **red** over it, the medians **bigger** (white, a colour per file
@@ -763,7 +799,8 @@ creep two ways, and `model` does both:
   through the pixels on each side of the fault, within KM (5) of it and WIDTH
   (2.5) km of the profile line, each with its own slope; their offset at the
   fault is the creep rate, its 95 % range from 2000 bootstrap draws that
-  resample each side on its own (Hussain et al. after Bekaert et al. 2015).
+  resample each side on its own (Hussain et al. after Bekaert et al. 2015) -
+  the method, and the code, of `viewinsar stat`, at one place.
   Drawn as two orange lines either side of the fault, and written in the box.
   With an **ascending and a descending track** the LOS offsets are also
   **split into fault-parallel and vertical**, by least squares and draw by
@@ -885,7 +922,7 @@ the fault type, *S*, *d₁*, the dip, *x₀* and both rates.
 | `--noise` | `auto` | `auto`: exponential, fitted to the residuals of a least-squares fit, for each file; `white`: each bin's own scatter; `SILL LENGTH`: given, in (mm/yr)² and km |
 | `--walkers`, `--steps`, `--burn`, `--seed` | 64, 5000, a third, 0 | the sampler |
 | `--gnss`, `--vel`, `--gnss-width`, `--gnss-nofit` | - | GNSS (`--vel perp` / `vu` for reverse and normal faults) |
-| `--cmap-prof [CMAP]` | off: points | the pixels as a point density in CMAP (above) |
+| `--cmap-prof [CMAP]` | off: points | the pixels as a pixel density in CMAP (above) |
 | `--legend [WHERE]` | `auto` | the legend: `auto` inside where it hides nothing, else outside on the right; `in`, `out`, `off` (<kbd>l</kbd> on the profile) |
 | `--bands OUTER INNER` | `95 68` | the two ranges of the model shaded, % |
 | `--nlook` | `1` | oversample the picture (points or density), not the fit |
@@ -1096,18 +1133,21 @@ faults = load_faults(['faults.shp'], atr)          # traces in the data's CRS
 dist_km, xy = profile_crossings(faults, atr, [300, 150], [300, 750], swath['length'])
 ```
 
-The block statistics too:
+The creep along a line too, and the two lines of Hussain et al.'s eq. 2:
 
 ```python
-from viewinsar import stat_line
+from viewinsar import creep_along_line, fit_two_lines
 
-res = stat_line(data, atr, box=(0, 0, width, length),
-                vertices_yx=[[3670, 744], [3300, 720], [2967, 696]],
-                spacing_km=5, radius_km=2, gap_km=1)
-res['dist_km']                  # the points along the line
-res['stats'][0][k]['median']    # block 1 (left), point k; [1] = block 2
-res['stats'][0][k]['mode']      # the peak of its kernel density (also 'mean', 'q25' ...)
-res['values'][1][k]             # the pixel values in block 2's circle at point k
+res = creep_along_line(data, atr, box=(0, 0, width, length),
+                       vertices_yx=[[3670, 744], [3300, 720], [2967, 696]],
+                       spacing_km=5, length_km=5, width_km=2.5, factor=10)  # cm/yr -> mm/yr
+res['dist_km']                          # the points along the line
+prof = res['profiles'][k]               # point k: its pixels, x_km, y_km, values ...
+prof['fit']['mean'], prof['fit']['std'] # the creep rate (block 2 - block 1), bootstrap
+prof['fit']['offset']                   # ... and least squares (the BLUE)
+prof['fit']['boot']                     # every draw: slope_1, slope_2, b1, creep
+
+fit = fit_two_lines(x_1, v_1, x_2, v_2, n_boot=2000)    # any two sides of a fault
 ```
 
 And the time series, from LiCSBAS or MintPy alike:

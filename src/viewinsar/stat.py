@@ -1,24 +1,29 @@
-"""Block statistics along a line - the core of `viewinsar stat`.
+"""Fault creep along a line - the core of `viewinsar stat`.
 
 Draw a line along a fault (as many vertices as needed). Every SPACING km along
-it a point is placed, and at each point two circles of RADIUS km: one on each
-side of the line, its edge GAP km (default 1) clear of the line. Block 1 is
-the LEFT side of the line, walking from its first vertex to its last; block 2
-the right. The values inside each circle describe that block at that point.
+it a short profile crosses it, as Hussain et al. (2016) measured the creep of
+the North Anatolian Fault: LENGTH km (default 5) either side of the line,
+the pixels within WIDTH km (default 2.5) either side of the profile projected
+onto it. Block 1 is the LEFT side of the line, walking from its first vertex
+to its last; block 2 the right. One straight line through the pixels of each
+side, and the creep rate is their offset at the line (their eq. 2):
 
-    the circle centre = point + / - (RADIUS + GAP) * the line's local normal
+    v = slope_1 x + b                (block 1, x < 0)
+    v = slope_2 x + b + creep        (block 2, x > 0)
 
-The normal is the line's direction over +/- RADIUS around the point, so a
-hand-digitised trace with small wiggles still gives steady circles. On the
-inside of a bend, the centre can come closer than RADIUS + GAP to ANOTHER part
-of the line; the circle is then pushed further out along the same normal until
-it clears every part of the line by GAP - or dropped if it cannot (or if the
-way out crosses the line). So no circle ever reaches across, or within GAP of,
-the line: every pixel used is at least GAP from it, on its own side.
+x the distance from the line along the profile, + towards block 2 - so the
+creep is block 2 minus block 1 at the fault. Solved by least squares (the
+BLUE) and by a percentile bootstrap that resamples each side on its own, n1
+of n1 and n2 of n2 (model.fit_two_lines); Hussain et al. use the bootstrap.
+
+A profile is perpendicular to the line's direction over +/- WIDTH around its
+point, so a hand-digitised trace with small wiggles still gives steady
+profiles. A pixel on the other side of the line than its x says - where the
+line bends inside the window - is left out.
 
 Everything is computed in a metric frame of the data grid (X along the
 columns, Y along -rows; MintPy's ground pixel size on a radar grid, a local
-equirectangular frame on a lat/lon one), so the radius is a true distance. A
+equirectangular frame on a lat/lon one), so the distances are true ones. A
 grid that is a mirror image of the map - every right-looking radar grid, which
 is why view.py flips it - gets X along -columns instead, so "left" and "right"
 are always those of the ground (and of the map as view.py shows it).
@@ -27,11 +32,13 @@ Numpy only: no MintPy, no matplotlib.
 
 import numpy as np
 
+from .model import fit_two_lines
 from .swath import get_pixel_size, is_projected
 
-__all__ = ['grid_mirrored', 'polyline_frame', 'from_yx', 'to_yx', 'sample_points', 'distance_to_polyline', 'side_of_polyline',
-           'ray_hits_polyline', 'place_circles', 'circle_pixels', 'circle_outline',
-           'stat_line', 'summarize', 'kde_mode']
+__all__ = ['grid_mirrored', 'polyline_frame', 'from_yx', 'to_yx', 'position_along',
+           'sample_points', 'distance_to_polyline', 'side_of_polyline', 'profile_axes',
+           'profile_outline', 'trace_offset', 'profile_pixels', 'creep_profile',
+           'creep_profiles', 'creep_along_line']
 
 CHUNK = 2_000_000          # points x segments handled at once (memory bound)
 
@@ -230,91 +237,93 @@ def side_of_polyline(frame, xy):
     return out
 
 
-def ray_hits_polyline(frame, start, direction):
-    """Distance along a ray from `start` to the first point of the line it meets.
-
-    `direction` is a unit vector; np.inf if the ray never meets the line.
-    """
-    a, ab = frame['P'][:-1], frame['seg']
-    d = np.asarray(direction, dtype=np.float64)
-    rel = a - np.asarray(start, dtype=np.float64)
-    denom = d[0] * ab[:, 1] - d[1] * ab[:, 0]
-    ok = np.abs(denom) > 1e-12 * np.maximum(np.hypot(ab[:, 0], ab[:, 1]), 1e-300)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        s = (rel[:, 0] * ab[:, 1] - rel[:, 1] * ab[:, 0]) / denom
-        u = (rel[:, 0] * d[1] - rel[:, 1] * d[0]) / denom
-    hit = ok & (s >= 0) & (u >= -1e-12) & (u <= 1 + 1e-12)
-    return float(s[hit].min()) if hit.any() else np.inf
-
-
-def place_circles(frame, points, normals, radius_km, gap_km=1.0, max_push=3.0):
-    """Circle centres on both sides of the line, each GAP clear of all of it.
-
-    A centre starts RADIUS + GAP out from its point along the normal - to the
-    left for block 1, to the right for block 2 - and moves out in steps of 2 %
-    until (1) no part of the line is closer than RADIUS + GAP, (2) it is on its
-    own side, and (3) the way out from the point does not cross the line. No
-    such spot within `max_push` x (RADIUS + GAP): NaN, the circle is left out.
-
-    Returns: centres   - (2, n, 2) array: [0] block 1 (left), [1] block 2
-                         (right); NaN where no clear spot was found
-             offset_km - (2, n) array, distance of each centre from its point
-    """
-    radius, gap = radius_km / frame['scale'], gap_km / frame['scale']
-    need = radius + gap
-    offs = need * np.linspace(1.0, max_push, int(round((max_push - 1.0) / 0.02)) + 1)
-    centres = np.full((2, len(points), 2), np.nan)
-    offsets = np.full((2, len(points)), np.nan)
-    for b, sign in enumerate((1, -1)):
-        for k in range(len(points)):
-            out = sign * normals[k]
-            start = points[k] + out * need * 1e-6
-            reach = ray_hits_polyline(frame, start, out)
-            cand = points[k] + offs[:, None] * out
-            good = offs < reach
-            if not good.any():
-                continue
-            good[good] &= distance_to_polyline(frame, cand[good]) >= need * (1 - 1e-9)
-            if good.any():
-                good[good] &= side_of_polyline(frame, cand[good]) == sign
-            if good.any():
-                i = int(np.argmax(good))
-                centres[b, k], offsets[b, k] = cand[i], offs[i] * frame['scale']
-    return centres, offsets
-
-
 ##############################################################################
-#                       the pixels in a circle                               #
+#                       the short profiles across the line                   #
 ##############################################################################
-def circle_pixels(data, box, frame, centre, radius_km, mask=None, keep_zero=False):
-    """Valid pixels whose centre lies within `radius_km` of `centre`.
+def profile_axes(normal):
+    """(across, along): unit vectors of a profile at a point whose LEFT
+    normal is `normal` - across the line towards block 2 (the right), and
+    along it (its direction, first vertex -> last)."""
+    n = np.asarray(normal, dtype=np.float64)
+    return -n, np.array([n[1], -n[0]])
+
+
+def profile_outline(frame, point, normal, length_km, width_km, x_from=None, x_to=None):
+    """(rows, cols) of the closed outline of a profile window: from x_from to
+    x_to km across the line (default -length .. +length, + towards block 2)
+    and +/- width_km along it - for drawing on the map."""
+    across, along = profile_axes(normal)
+    x0 = -length_km if x_from is None else x_from
+    x1 = length_km if x_to is None else x_to
+    w = width_km
+    corners = np.array([[x0, -w], [x1, -w], [x1, w], [x0, w], [x0, -w]]) / frame['scale']
+    xy = np.asarray(point, dtype=np.float64) + corners[:, :1] * across + corners[:, 1:] * along
+    return to_yx(frame, xy)
+
+
+def _dense_line(frame):
+    """The line sampled every quarter pixel (cached in the frame)."""
+    if 'dense' not in frame:
+        step = 0.25 * min(frame['x_step'], frame['y_step'])
+        num = int(np.ceil(frame['cum'][-1] / step)) + 1
+        frame['dense'] = position_along(frame, np.linspace(0.0, frame['cum'][-1], num))
+    return frame['dense']
+
+
+def trace_offset(frame, point, normal, length_km, width_km):
+    """How far the line strays from the centre of a profile window: the
+    largest |x| (km) of the line within +/- width_km of the profile - 0 on a
+    straight line, more where it bends, or where another stretch of it comes
+    back into the window."""
+    across, along = profile_axes(normal)
+    rel = _dense_line(frame) - np.asarray(point, dtype=np.float64)
+    x, y = (rel @ across) * frame['scale'], (rel @ along) * frame['scale']
+    inside = (np.abs(y) <= width_km) & (np.abs(x) <= length_km)
+    return float(np.abs(x[inside]).max()) if inside.any() else 0.0
+
+
+def profile_pixels(data, box, frame, point, normal, length_km, width_km, mask=None,
+                   keep_zero=False, same_side=True):
+    """Valid pixels of a profile window across the line at `point`: within
+    length_km of the line along the profile, either side, and within width_km
+    of the profile.
 
     Parameters: data   - 2D array, read within `box`
                 box    - (x0, y0, x1, y1) of that window, in full-file pixels
                 frame  - from polyline_frame()
-                centre - (2,) frame coordinates; NaN gives nothing
-    Returns:    values, rows, cols (full file) - 1D arrays; clipped - bool, the
-                circle reaches past the window that was read
+                point  - (2,) frame coordinates of the profile on the line
+                normal - (2,) unit normal to the LEFT of the line there
+                same_side - leave out a pixel on the other side of the line
+                         than its x says (where the line bends)
+    Returns:    dict - values, rows, cols (full file), x_km (along the
+                profile from the line, + towards block 2), y_km (along the
+                line), clipped (the window reaches past the data read),
+                dropped (pixels left out by same_side)
     """
-    empty = np.array([]), np.array([], dtype=np.int64), np.array([], dtype=np.int64)
-    if not np.all(np.isfinite(centre)):
-        return (*empty, False)
-    radius = radius_km / frame['scale']
-    row_c, col_c = to_yx(frame, centre)
-    d_row, d_col = radius / frame['y_step'], radius / frame['x_step']
+    empty = dict(values=np.array([]), rows=np.array([], dtype=np.int64),
+                 cols=np.array([], dtype=np.int64), x_km=np.array([]), y_km=np.array([]),
+                 clipped=False, dropped=0)
+    point = np.asarray(point, dtype=np.float64)
+    if not (np.all(np.isfinite(point)) and np.all(np.isfinite(normal))):
+        return empty
+    rows_c, cols_c = profile_outline(frame, point, normal, length_km, width_km)
     length, width = data.shape[-2:]
-    r0, r1 = int(np.floor(row_c - d_row)), int(np.ceil(row_c + d_row))
-    c0, c1 = int(np.floor(col_c - d_col)), int(np.ceil(col_c + d_col))
+    r0, r1 = int(np.floor(rows_c.min())), int(np.ceil(rows_c.max()))
+    c0, c1 = int(np.floor(cols_c.min())), int(np.ceil(cols_c.max()))
     rr0, rr1 = max(r0, box[1]), min(r1, box[1] + length - 1)
     cc0, cc1 = max(c0, box[0]), min(c1, box[0] + width - 1)
-    clipped = bool(rr0 > r0 or rr1 < r1 or cc0 > c0 or cc1 < c1)
+    empty['clipped'] = clipped = bool(rr0 > r0 or rr1 < r1 or cc0 > c0 or cc1 < c1)
     if rr1 < rr0 or cc1 < cc0:
-        return (*empty, clipped)
+        return empty
 
     rows, cols = np.arange(rr0, rr1 + 1), np.arange(cc0, cc1 + 1)
-    dx = frame['sx'] * cols * frame['x_step'] - centre[0]
-    dy = -rows * frame['y_step'] - centre[1]
-    inside = dy[:, None] ** 2 + dx[None, :] ** 2 <= radius ** 2
+    across, along = profile_axes(normal)
+    dx = frame['sx'] * cols * frame['x_step'] - point[0]
+    dy = -rows * frame['y_step'] - point[1]
+    x = (dx[None, :] * across[0] + dy[:, None] * across[1]) * frame['scale']
+    y = (dx[None, :] * along[0] + dy[:, None] * along[1]) * frame['scale']
+    eps = 1e-9 * max(length_km, width_km)
+    inside = (np.abs(x) <= length_km + eps) & (np.abs(y) <= width_km + eps) & (x != 0)
     idx = np.ix_(rows - box[1], cols - box[0])
     sub = data[idx]
     val = np.ma.getdata(sub).astype(np.float64)
@@ -326,86 +335,87 @@ def circle_pixels(data, box, frame, centre, radius_km, mask=None, keep_zero=Fals
     if not keep_zero:
         good &= val != 0
     ri, ci = np.nonzero(good)
-    return val[ri, ci], rows[ri], cols[ci], clipped
+    out = dict(values=val[ri, ci], rows=rows[ri], cols=cols[ci], x_km=x[ri, ci],
+               y_km=y[ri, ci], clipped=clipped, dropped=0)
+    if same_side and ri.size:
+        # only the pixels nearer the line than it strays can be on its other side
+        reach = trace_offset(frame, point, normal, length_km, width_km)
+        pixel = max(frame['x_step'], frame['y_step']) * frame['scale']
+        near = np.abs(out['x_km']) <= reach + 2.0 * pixel
+        if near.any():
+            xy = from_yx(frame, out['rows'][near], out['cols'][near])
+            wrong = np.zeros(ri.size, dtype=bool)
+            # block 1 (x < 0) is the left of the line (+1), block 2 the right (-1)
+            wrong[near] = side_of_polyline(frame, xy) != np.where(out['x_km'][near] < 0, 1, -1)
+            if wrong.any():
+                for key in ('values', 'rows', 'cols', 'x_km', 'y_km'):
+                    out[key] = out[key][~wrong]
+                out['dropped'] = int(wrong.sum())
+    return out
 
 
-def circle_outline(frame, centre, radius_km, num=73):
-    """(rows, cols) of a circle's outline, for drawing it on the map."""
-    ang = np.linspace(0, 2 * np.pi, num)
-    radius = radius_km / frame['scale']
-    xy = np.c_[centre[0] + radius * np.cos(ang), centre[1] + radius * np.sin(ang)]
-    return to_yx(frame, xy)
+def creep_profile(data, box, frame, point, normal, length_km=5.0, width_km=2.5, mask=None,
+                  keep_zero=False, factor=1.0, n_boot=2000, seed=0, min_points=10):
+    """The creep rate at one point of the line, as Hussain et al. (2016):
+    profile_pixels(), then a straight line through the pixels of each block
+    and their offset at the line (model.fit_two_lines) - block 2 minus block 1.
 
-
-def kde_mode(values, bins=2048):
-    """The mode of a sample: the peak of its kernel density - the widest point
-    of its violin.
-
-    A Gaussian kernel with Scott's bandwidth (std * n ** -0.2), as in
-    matplotlib's violinplot and scipy's gaussian_kde, evaluated on `bins`
-    steps between the smallest and the largest value. Fewer than 3 values, or
-    all equal: the median.
+    Returns: dict of profile_pixels() (the values multiplied by `factor`),
+             plus n_1, n_2 (pixels of block 1, block 2), trace_km (see
+             trace_offset), and fit - fit_two_lines() of block 1 (side a) and
+             block 2 (side b), or None with fewer than min_points a side.
     """
-    values = np.asarray(values, dtype=np.float64).ravel()
-    values = values[np.isfinite(values)]
-    if values.size == 0:
-        return np.nan
-    lo, hi = values.min(), values.max()
-    width = values.std(ddof=1) * values.size ** -0.2 if values.size > 1 else 0.0
-    if values.size < 3 or hi <= lo or not width > 0:
-        return float(np.median(values))
-    hist, edges = np.histogram(values, bins=bins, range=(lo, hi))
-    step = edges[1] - edges[0]
-    half = int(np.ceil(4.0 * width / step))
-    kernel = np.exp(-0.5 * (np.arange(-half, half + 1) * step / width) ** 2)
-    density = np.convolve(hist, kernel, mode='full')[half:half + bins]
-    return float((edges[:-1] + edges[1:])[np.argmax(density)] / 2.0)
+    out = profile_pixels(data, box, frame, point, normal, length_km, width_km, mask=mask,
+                         keep_zero=keep_zero)
+    out['values'] = out['values'] * factor
+    a, b = out['x_km'] < 0, out['x_km'] > 0
+    out.update(n_1=int(a.sum()), n_2=int(b.sum()), fit=None,
+               trace_km=(trace_offset(frame, point, normal, length_km, width_km)
+                         if np.all(np.isfinite(point)) else np.nan))
+    if min(out['n_1'], out['n_2']) >= max(int(min_points), 3):
+        out['fit'] = fit_two_lines(out['x_km'][a], out['values'][a], out['x_km'][b],
+                                   out['values'][b], n_boot=n_boot, seed=seed,
+                                   min_points=max(int(min_points), 3))
+    return out
 
 
-def summarize(values):
-    """count, median, mean, mode, std, q25, q75, min, max - NaN when empty."""
-    values = np.asarray(values, dtype=np.float64)
-    if values.size == 0:
-        return dict(count=0, median=np.nan, mean=np.nan, mode=np.nan, std=np.nan, q25=np.nan,
-                    q75=np.nan, min=np.nan, max=np.nan)
-    q25, med, q75 = np.percentile(values, [25, 50, 75])
-    return dict(count=int(values.size), median=float(med), mean=float(values.mean()),
-                mode=kde_mode(values), std=float(values.std()), q25=float(q25),
-                q75=float(q75), min=float(values.min()), max=float(values.max()))
+def creep_profiles(data, box, frame, points, normals, length_km=5.0, width_km=2.5, mask=None,
+                   keep_zero=False, factor=1.0, n_boot=2000, seed=0, min_points=10):
+    """creep_profile() at every point; the bootstrap of point k is seeded
+    with (seed, k) - reproducible, and independent of the others. `seed` may
+    be a tuple (seed, file index) for several files."""
+    seed = tuple(np.atleast_1d(seed).astype(int).tolist())
+    return [creep_profile(data, box, frame, points[k], normals[k], length_km, width_km,
+                          mask=mask, keep_zero=keep_zero, factor=factor, n_boot=n_boot,
+                          seed=[*seed, k], min_points=min_points)
+            for k in range(len(points))]
 
 
-##############################################################################
-def stat_line(data, atr, box, vertices_yx, spacing_km, radius_km, gap_km=1.0, mask=None,
-              keep_zero=False, smooth_km=None, mirrored=None):
-    """Everything `viewinsar stat` draws and writes, for one line.
+def creep_along_line(data, atr, box, vertices_yx, spacing_km, length_km=5.0, width_km=2.5,
+                     mask=None, keep_zero=False, factor=1.0, n_boot=2000, seed=0,
+                     min_points=10, smooth_km=None, mirrored=None):
+    """Everything `viewinsar stat` draws and writes, for one file.
+
+    Points every spacing_km along the line (sample_points: centred on it), a
+    profile across the line at each (creep_profile). smooth_km: the half
+    length of line the profiles are perpendicular to (default: width_km; 0 =
+    the local segment); mirrored: see polyline_frame.
 
     Returns: dict - frame, dist_km (n,), points (n, 2), normals (n, 2),
-             centres (2, n, 2), offset_km (2, n), and per block b and point k:
-             values[b][k], rows[b][k], cols[b][k] (1D arrays), stats[b][k]
-             (dict, see summarize), clipped[b][k] (bool); plus the inputs.
-             smooth_km: the half length of line the normals follow (default:
-             the radius; 0 = the local segment). mirrored: see polyline_frame.
+             profiles (a creep_profile() each), length_km (of the line), and
+             the parameters.
     """
-    if radius_km <= 0:
-        raise ValueError('the radius must be positive')
-    if gap_km < 0:
-        raise ValueError('the gap must not be negative')
+    if spacing_km <= 0:
+        raise ValueError('the spacing must be positive')
+    if length_km <= 0 or width_km <= 0:
+        raise ValueError('the profiles need a positive length and width')
     frame = polyline_frame(atr, vertices_yx, mirrored=mirrored)
-    smooth_km = radius_km if smooth_km is None else smooth_km
+    smooth_km = width_km if smooth_km is None else smooth_km
     dist, points, normals = sample_points(frame, spacing_km, smooth_km=smooth_km)
-    centres, offsets = place_circles(frame, points, normals, radius_km, gap_km)
-    out = dict(frame=frame, dist_km=dist, points=points, normals=normals, centres=centres,
-               offset_km=offsets, length_km=frame['cum'][-1] * frame['scale'],
-               spacing_km=spacing_km, radius_km=radius_km, gap_km=gap_km, smooth_km=smooth_km,
-               values=[[], []], rows=[[], []], cols=[[], []], stats=[[], []],
-               clipped=[[], []])
-    for b in range(2):
-        for k in range(len(dist)):
-            val, rows, cols, clipped = circle_pixels(data, box, frame, centres[b, k], radius_km,
-                                                     mask=mask, keep_zero=keep_zero)
-            out['values'][b].append(val)
-            out['rows'][b].append(rows)
-            out['cols'][b].append(cols)
-            out['stats'][b].append(summarize(val))
-            out['clipped'][b].append(clipped)
-    return out
+    profiles = creep_profiles(data, box, frame, points, normals, length_km, width_km,
+                              mask=mask, keep_zero=keep_zero, factor=factor, n_boot=n_boot,
+                              seed=seed, min_points=min_points)
+    return dict(frame=frame, dist_km=dist, points=points, normals=normals, profiles=profiles,
+                length_km=frame['cum'][-1] * frame['scale'], spacing_km=spacing_km,
+                profile_km=length_km, width_km=width_km, smooth_km=smooth_km, n_boot=n_boot,
+                min_points=min_points)

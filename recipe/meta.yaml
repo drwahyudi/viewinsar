@@ -1,5 +1,5 @@
 {% set name = "viewinsar" %}
-{% set version = "0.5.7" %}
+{% set version = "0.5.8" %}
 
 package:
   name: {{ name|lower }}
@@ -9,7 +9,7 @@ source:
   # For a conda-forge submission, point at the PyPI sdist and paste the sha256
   # printed by:  openssl dgst -sha256 dist/viewinsar-{{ version }}.tar.gz
   url: https://pypi.org/packages/source/{{ name[0] }}/{{ name }}/{{ name }}-{{ version }}.tar.gz
-  sha256: 7480cba1bf31654784e3a8cd2ce56f4f0f0aeedb87d4b7f4ac7c751b6eca3534
+  sha256: fe252a5636fd3acb055e152ab081dc69ceff9d4e9acf7bc9ec36a811fb0b4474
   # To build straight from a local checkout instead, comment the two lines above
   # and uncomment:
   # path: ..
@@ -61,17 +61,17 @@ test:
     - viewinsar stat --help
     - viewinsar tseries --help
     - viewinsar model --help
-    - python -c "from viewinsar import swath_extract, swath_density, load_faults, stat_line, fit_profile, read_gnss"
+    - python -c "from viewinsar import swath_extract, swath_density, load_faults, creep_along_line, fit_profile, fit_two_lines, read_gnss"
 
 about:
   home: https://github.com/drwahyudi/viewinsar
-  summary: Interactive swath profiles, fault block statistics, slip-rate models and time series of InSAR data (MintPy, LiCSBAS)
+  summary: Interactive swath profiles, fault creep along a line, slip-rate models and time series of InSAR data (MintPy, LiCSBAS)
   description: |
     viewinsar draws a swath profile instead of a single-line transect. You pick a
     line on the map with two clicks; the line is buffered by a given half width
     (flat caps), every valid pixel inside the corridor is linearly referenced onto
     the line - the equivalent of QGIS LRS / ArcGIS "Locate Features Along Routes" -
-    and the resulting cloud is shown as a log-scaled 2-D point-density profile with
+    and the resulting cloud is shown as a log-scaled 2-D pixel-density profile with
     the density-weighted median and quartiles. The map panel comes from MintPy's
     view.py when MintPy is installed (it is optional), else from a light map of
     its own; the interaction from plot_transection.py, and an optional third
@@ -79,9 +79,10 @@ about:
     the per-bin statistics can be exported to .csv. Several sections (A-A', B-B'
     ...) can be drawn, each in its own window, with an optional elevation panel
     from a DEM and fault traces from any vector file marked where they cross.
-    `viewinsar stat` compares the two sides of a fault: along a line drawn on
-    it, pairs of circles - one per side, kept clear of the line - are sampled
-    every few km and shown as violins, block 1 against block 2. `viewinsar
+    `viewinsar stat` measures fault creep along a line drawn on a fault, as
+    Hussain et al. (2016): short profiles across it every few km, a straight
+    line through each side and their offset at the fault, with a bootstrap -
+    per track, and split into fault-parallel and vertical. `viewinsar
     tseries` is LiCSBAS_plot_ts.py for LiCSBAS and MintPy time series, with the
     median and quartiles of a circle of pixels at every date. `viewinsar model`
     fits the slip rate and locking depth of an elastic dislocation (and shallow

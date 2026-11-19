@@ -538,7 +538,7 @@ class Section:
         self.ax_cbar.set_axis_on()
         cbar = self.fig.colorbar(pcm, cax=self.ax_cbar, extend='max')
         cell_unit = v.disp_unit.split('/')[0] + ' ' if unit_label(v.disp_unit) else ''
-        cbar.set_label(f"Point density\n[count / {den['bin_x']:g} km"
+        cbar.set_label(f"Pixel density\n[count / {den['bin_x']:g} km"
                        f" x {den['bin_y']:g} {cell_unit}cell]",
                        fontsize=max(v.font_size - 2, 6))
         cbar.ax.tick_params(labelsize=max(v.font_size - 2, 6))
@@ -929,6 +929,7 @@ class swathProfileViewer:
 
     COMMAND = 'swath'                # the sub-command: echoed command line, file names
     SECTION_CLASS = Section          # what a cross-section is (and draws)
+    MULTI_FILE_NOTE = 'one density for all of them, a median line for each'
 
     def __init__(self, inps, view_cmd):
         self.fig_map = self.ax_img = None
@@ -952,6 +953,7 @@ class swathProfileViewer:
         self.labels = None                       # names of the input files, for legends
         self.crs_list = []                       # the CRS of every input file
         self.gnss_file = self.geom_file = self.los_inc = self.los_az = None
+        self._los = {}                           # file index -> its LOSGeometry
         self.data_unit = None                    # --data-unit: for files without a unit
         self._unit_said = set()
         self._unit_guess = {}                    # file -> the unit guessed for it
@@ -1107,8 +1109,8 @@ class swathProfileViewer:
         self.file = kept
         self.labels = labels if given else file_labels(self.file)
         if len(self.file) > 1:
-            self.vprint(f'{len(self.file)} input files: {", ".join(self.labels)} - one '
-                        'density for all of them, a median line for each')
+            self.vprint(f'{len(self.file)} input files: {", ".join(self.labels)} - '
+                        + self.MULTI_FILE_NOTE)
 
         # the data's CRS, from the file itself where it carries one (GeoTIFF):
         # MintPy's attributes alone can misreport a projected GeoTIFF as EPSG:4326
@@ -1490,6 +1492,61 @@ class swathProfileViewer:
         rows_i = (np.asarray(ys) - float(atr_i['Y_FIRST'])) / float(atr_i['Y_STEP']) - 0.5
         cols_i = (np.asarray(xs) - float(atr_i['X_FIRST'])) / float(atr_i['X_STEP']) - 0.5
         return rows_i, cols_i
+
+    ##---------- lon/lat and the line of sight of every file
+    def pixel_lonlat(self, index, rows, cols):
+        """lon/lat of pixels of file `index` (its own grid); None for a
+        projected grid of unknown CRS."""
+        rows = np.asarray(rows, dtype=np.float64)
+        cols = np.asarray(cols, dtype=np.float64)
+        atr_i = self.atr_list[index]
+        if 'Y_FIRST' not in atr_i:
+            if self.lookup is None:
+                raise ValueError(NO_LOOKUP)
+            return self.lookup.to_lonlat(rows, cols)
+        xs = float(atr_i['X_FIRST']) + (cols + 0.5) * float(atr_i['X_STEP'])
+        ys = float(atr_i['Y_FIRST']) + (rows + 0.5) * float(atr_i['Y_STEP'])
+        crs = self.crs_list[index] if index < len(self.crs_list) else self.data_crs
+        if crs is None:
+            return None if is_projected(atr_i) else (xs, ys)
+        if same_crs(crs, 4326):
+            return xs, ys
+        from pyproj import Transformer
+        lon, lat = Transformer.from_crs(crs, 4326, always_xy=True).transform(xs, ys)
+        return np.asarray(lon), np.asarray(lat)
+
+    def _los_geometry(self, index):
+        from .gnss import LOSGeometry
+        if index not in self._los:
+            files = self.geom_file or []
+            files = [files] if isinstance(files, str) else list(files)
+            given = files[index] if index < len(files) else None
+            self._los[index] = LOSGeometry.for_file(self.file[index], self.atr_list[index],
+                                                    geom_file=given,
+                                                    inc=per_file(self.los_inc, index),
+                                                    az=per_file(self.los_az, index),
+                                                    verbose=self.print_msg)
+        return self._los[index]
+
+    def los_vectors(self, index, rows, cols, lon=None, lat=None):
+        """(east, north, up) of the LOS unit vector at pixels of file `index`."""
+        from .gnss import los_unit_vector
+        geom = self._los_geometry(index)
+        atr_i = self.atr_list[index]
+        same = geom.constant or (
+            geom.atr is not None and geom.inc.shape == (int(atr_i['LENGTH']), int(atr_i['WIDTH']))
+            and (('Y_FIRST' in atr_i) == ('Y_FIRST' in geom.atr))
+            and all(abs(float(geom.atr.get(k, 0)) - float(atr_i.get(k, 0)))
+                    <= 1e-6 * max(1.0, abs(float(atr_i.get(k, 0))))
+                    for k in ('X_FIRST', 'Y_FIRST', 'X_STEP', 'Y_STEP') if k in atr_i))
+        if same:
+            inc, az = geom.at_rowcol(rows, cols)
+        else:
+            if lon is None or not np.isfinite(lon).any():
+                raise ValueError(f'{self.labels[index]}: the LOS geometry is on another grid '
+                                 'and the pixels have no lon/lat')
+            inc, az = geom.at_lonlat(lon, lat)
+        return los_unit_vector(inc, az)
 
     def draw_other_files(self):
         """Every other geocoded file on the map too, in view.py's colours, under

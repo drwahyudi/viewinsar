@@ -1,10 +1,12 @@
-"""`viewinsar stat`: block statistics on both sides of a line along a fault.
+"""`viewinsar stat`: the creep rate along a line, as Hussain et al. (2016).
 
 The geometry is checked on a metric grid (100 m pixels): the points along the
-line, the circles - on their own side, every pixel at least the gap from the
-line, pushed out or dropped on the inside of a bend - and the pixels counted.
-Then the whole command on the synthetic products: the arctan interseismic
-field across the N-S fault at 130.45 E gives known medians on either side.
+line, the sides, the profile windows across it and the pixels in them. Then
+the two-line fit of their eq. 2 against separate fits, and the creep of a
+known step recovered along a line. Then the whole command on synthetic
+products: a creep step on the N-S fault at 130.45 E of the fixtures, the
+radar-coded product, and an ascending and a descending track over an E-W
+fault, split into fault-parallel and vertical.
 """
 
 import json
@@ -13,22 +15,31 @@ import os
 import numpy as np
 import pytest
 
-from conftest import DLAT, DLON, FAULT_LON, LAT0, LON0, _base_attrs, make_velocity
+from conftest import DLAT, DLON, FAULT_LON, KM_PER_DEG_LON, LAT0, LON0, _base_attrs
 from viewinsar import stat
+from viewinsar.model import fault_offset, fit_two_lines, two_line_matrix
 
 METRIC = {'Y_FIRST': '0', 'X_FIRST': '0', 'Y_STEP': '-100', 'X_STEP': '100',
           'Y_UNIT': 'meters', 'X_UNIT': 'meters', 'LENGTH': '800', 'WIDTH': '800'}
+BOX = (0, 0, 800, 800)
 
 
 def frame_km(points_km, atr=METRIC):
     """A frame from vertices given in km (east, north) on the metric grid."""
+    yx = yx_km(points_km)
+    return stat.polyline_frame(atr, yx)
+
+
+def yx_km(points_km):
+    """[row, col] of points given in km (east, north) on the metric grid."""
     xy = np.asarray(points_km, dtype=float) * 1000.0
-    return stat.polyline_frame(atr, np.c_[-xy[:, 1] / 100.0, xy[:, 0] / 100.0])
+    return np.c_[-xy[:, 1] / 100.0, xy[:, 0] / 100.0]
 
 
-def expected_median(km_east):
-    """The fixture's noise-free velocity, in cm/year, km east of the fault."""
-    return 100 * 0.30 * (2 / np.pi) * np.arctan(km_east / 8.0)
+def metric_field(fun):
+    """fun(east_km, north_km) on the metric grid."""
+    rows, cols = np.mgrid[0:800, 0:800].astype(float)
+    return fun(cols * 0.1, -rows * 0.1)
 
 
 ##############################################################################
@@ -89,159 +100,142 @@ def test_side_just_outside_a_sharp_bend():
     assert stat.side_of_polyline(frame, inside)[0] == 1
 
 
-def test_ray_hits_the_line():
-    frame = frame_km([[0, -40], [40, -40]])
-    assert stat.ray_hits_polyline(frame, [20000.0, -30000.0], [0, -1]) == pytest.approx(10000)
-    assert stat.ray_hits_polyline(frame, [20000.0, -30000.0], [0, 1]) == np.inf
-    assert stat.ray_hits_polyline(frame, [50000.0, -30000.0], [0, -1]) == np.inf
-
-
 ##############################################################################
-#                                circles                                     #
+#                       the profiles across the line                         #
 ##############################################################################
-def test_circles_sit_radius_plus_gap_out_on_either_side():
-    frame = frame_km([[0, -40], [40, -40]])
+def test_a_profile_window_and_its_pixels():
+    """5 km either side of an E-W line, 2.5 km either side of the profile."""
+    frame = frame_km([[0, -40], [40, -40]])                   # walking east: row 400
     dist, points, normals = stat.sample_points(frame, 5.0)
-    centres, offset = stat.place_circles(frame, points, normals, 2.0, 1.0)
-    assert offset == pytest.approx(np.full((2, len(dist)), 3.0))
-    assert centres[0, :, 1] == pytest.approx(-37000.0)       # block 1: north (left)
-    assert centres[1, :, 1] == pytest.approx(-43000.0)       # block 2: south (right)
-    assert centres[0, :, 0] == pytest.approx(points[:, 0])
-
-
-def kinked_case(gap=1.0, radius=2.0, spacing=2.5):
-    """The sketch: a kinked line, a pair of circles at every point."""
-    vertices = [[2, -10], [14, -22], [22, -24], [31, -38], [44, -44], [58, -47]]
-    frame = frame_km(vertices)
-    rng = np.random.default_rng(0)
-    data = rng.normal(0, 1, (800, 800)).astype(np.float32)
-    box = (0, 0, 800, 800)
-    yx = np.asarray(vertices, dtype=float) * 1000.0
-    yx = np.c_[-yx[:, 1] / 100.0, yx[:, 0] / 100.0]
-    res = stat.stat_line(data, METRIC, box, yx, spacing, radius, gap)
-    return frame, res
-
-
-@pytest.mark.parametrize('gap', [1.0, 0.5, 0.0])
-def test_every_pixel_is_on_its_side_and_clear_of_the_line(gap):
-    frame, res = kinked_case(gap=gap)
-    used = 0
-    for b, sign in enumerate((1, -1)):
-        for k in range(len(res['dist_km'])):
-            rows, cols = res['rows'][b][k], res['cols'][b][k]
-            if not rows.size:
-                continue
-            xy = stat.from_yx(frame, rows, cols)
-            assert stat.distance_to_polyline(frame, xy).min() / 1000.0 >= gap - 1e-9
-            assert np.all(stat.side_of_polyline(frame, xy) == sign)
-            # and the circle really is the circle: pixel centres within the radius
-            cen = res['centres'][b, k]
-            assert np.hypot(*(xy - cen).T).max() <= 2000.0 + 1e-6
-            used += rows.size
-    assert used > 0
-
-
-def test_inside_of_a_bend_is_pushed_out_or_dropped():
-    frame, res = kinked_case()
-    need = res['radius_km'] + res['gap_km']
-    off = res['offset_km']
-    assert np.isfinite(off).mean() > 0.8                     # most circles stay
-    assert np.nanmin(off) == pytest.approx(need)
-    assert np.nanmax(off) > need + 0.05                      # some were pushed
-    # a pushed centre still clears the whole line by radius + gap
-    good = np.isfinite(res['centres'][..., 0])
-    clear = stat.distance_to_polyline(frame, res['centres'][good]) / 1000.0
-    assert clear.min() >= need - 1e-9
-
-
-def test_a_hairpin_drops_the_inside_circles():
-    # east, then back west 1 km further south: a right-hand hairpin
-    frame = frame_km([[0, -40], [30, -40], [0, -41]])
-    dist, points, normals = stat.sample_points(frame, 5.0, smooth_km=2.0)
-    centres, offset = stat.place_circles(frame, points, normals, 2.0, 1.0)
-    # inside the hairpin (the right of both legs, block 2) there is no room at all
-    assert np.all(~np.isfinite(offset[1]))
-    # outside (block 1), every circle finds its spot
-    assert np.all(np.isfinite(offset[0]))
-    clear = stat.distance_to_polyline(frame, centres[0]) / 1000.0
-    assert clear.min() >= 3.0 - 1e-9
-
-
-def test_a_circle_never_jumps_over_the_line():
-    """A serpentine: south of the first strand, the line comes back twice.
-
-    Beyond the third strand there IS room, on the right of the line - but to
-    get there from the first strand a circle would cross the line twice.
-    """
-    frame = frame_km([[0, -40], [30, -40], [30, -42], [0, -42], [0, -44], [30, -44]])
-    dist, points, normals = stat.sample_points(frame, 5.0, smooth_km=2.0)
-    centres, offset = stat.place_circles(frame, points, normals, 2.0, 1.0)
-    first = (dist > 1) & (dist < 29)
-    assert first.sum() >= 4
-    assert np.all(~np.isfinite(offset[1, first]))
-    # block 1 of the first strand (north, open ground) is untouched
-    assert offset[0, first] == pytest.approx(3.0)
-
-
-def test_pixels_in_a_circle():
-    frame = frame_km([[0, -40], [40, -40]])
+    across, along = stat.profile_axes(normals[3])
+    assert across == pytest.approx([0, -1]) and along == pytest.approx([1, 0])
     data = np.ones((800, 800), dtype=np.float32)
-    centre = np.array([20000.0, -30000.0])
-    val, rows, cols, clipped = stat.circle_pixels(data, (0, 0, 800, 800), frame, centre, 2.0)
-    assert val.size == pytest.approx(np.pi * 20 ** 2, rel=0.02)
-    assert not clipped
+    out = stat.profile_pixels(data, BOX, frame, points[3], normals[3], 5.0, 2.5)
+    # rows 350 .. 450 but the line's own (x = 0), columns +/- 25 around the point
+    assert out['values'].size == 100 * 51
+    assert not out['clipped'] and out['dropped'] == 0
+    assert np.abs(out['x_km']).max() == pytest.approx(5.0)
+    assert np.abs(out['y_km']).max() <= 2.5 + 1e-9
+    assert out['x_km'][out['rows'] > 400].min() > 0          # south (block 2) is x > 0
+    assert out['x_km'][out['rows'] < 400].max() < 0
+    # the outline: 10 km across (north - south), 5 km along (east - west)
+    rows, cols = stat.profile_outline(frame, points[3], normals[3], 5.0, 2.5)
+    assert np.ptp(rows) == pytest.approx(100.0) and np.ptp(cols) == pytest.approx(50.0)
+    rows, _ = stat.profile_outline(frame, points[3], normals[3], 5.0, 2.5, 0.0, 5.0)
+    assert rows.min() == pytest.approx(400.0) and rows.max() == pytest.approx(450.0)
+
     # NaN, masked, zero: left out (zero only by default)
-    data[300, 200], data[301, 200], data[302, 200] = np.nan, 0.0, 5.0
+    r, c = 380, int(round(stat.to_yx(frame, points[3])[1]))
+    data[r, c], data[r + 1, c], data[r + 2, c] = np.nan, 0.0, 5.0
     mask = np.ones_like(data, dtype=bool)
-    mask[303, 200] = False
-    n_all = val.size
-    val = stat.circle_pixels(data, (0, 0, 800, 800), frame, centre, 2.0, mask=mask)[0]
-    assert val.size == n_all - 3
-    val = stat.circle_pixels(data, (0, 0, 800, 800), frame, centre, 2.0, mask=mask,
-                             keep_zero=True)[0]
-    assert val.size == n_all - 2
-    # a window that cuts the circle: only the part inside, and it says so
-    sub = data[:, :200]
-    val, rows, cols, clipped = stat.circle_pixels(sub, (0, 0, 200, 800), frame, centre, 2.0)
-    assert clipped and cols.max() == 199 and val.size < n_all * 0.6
-    # no centre (a dropped circle): nothing
-    assert stat.circle_pixels(data, (0, 0, 800, 800), frame, [np.nan, np.nan], 2.0)[0].size == 0
+    mask[r + 3, c] = False
+    n_all = out['values'].size
+    got = stat.profile_pixels(data, BOX, frame, points[3], normals[3], 5.0, 2.5, mask=mask)
+    assert got['values'].size == n_all - 3
+    got = stat.profile_pixels(data, BOX, frame, points[3], normals[3], 5.0, 2.5, mask=mask,
+                              keep_zero=True)
+    assert got['values'].size == n_all - 2
+    # a window cut by the data read: only the part inside, and it says so
+    sub = data[:420, :]
+    got = stat.profile_pixels(sub, (0, 0, 800, 420), frame, points[3], normals[3], 5.0, 2.5)
+    assert got['clipped'] and got['rows'].max() == 419
+    # no point (outside the other file): nothing
+    assert stat.profile_pixels(data, BOX, frame, [np.nan, np.nan], normals[3], 5.0,
+                               2.5)['values'].size == 0
 
 
-def test_summarize():
-    out = stat.summarize([1, 2, 3, 4, 100])
-    assert out['count'] == 5 and out['median'] == 3 and out['max'] == 100
-    assert out['q25'] == 2 and out['q75'] == 4 and out['mean'] == 22
-    assert np.isfinite(out['mode'])
-    empty = stat.summarize([])
-    assert empty['count'] == 0 and np.isnan(empty['median']) and np.isnan(empty['mode'])
+def test_pixels_beyond_a_bend_are_left_out():
+    """A right angle inside the window: the pixels across the line from where
+    their x says are dropped, every pixel kept is on its own side."""
+    frame = frame_km([[0, -40], [20, -40], [20, -60]])        # east, then south
+    point = np.array([18000.0, -40000.0])                     # 2 km before the corner
+    normal = np.array([0.0, 1.0])
+    data = np.ones((800, 800), dtype=np.float32)
+    out = stat.profile_pixels(data, BOX, frame, point, normal, 5.0, 2.5)
+    assert out['dropped'] > 0
+    assert stat.trace_offset(frame, point, normal, 5.0, 2.5) == pytest.approx(5.0)
+    xy = stat.from_yx(frame, out['rows'], out['cols'])
+    sides = stat.side_of_polyline(frame, xy)
+    assert np.all(sides == np.where(out['x_km'] < 0, 1, -1))
+    # a straight line: nothing to drop, the line at the centre
+    straight = frame_km([[0, -40], [40, -40]])
+    assert stat.profile_pixels(data, BOX, straight, point, normal, 5.0, 2.5)['dropped'] == 0
+    assert stat.trace_offset(straight, point, normal, 5.0, 2.5) == pytest.approx(0.0, abs=1e-9)
 
 
-def test_mode_is_the_peak_of_the_density():
-    rng = np.random.default_rng(0)
-    skewed = rng.gamma(3.0, 1.0, 20000)                      # the mode of Gamma(3, 1) is 2
-    assert stat.kde_mode(skewed) == pytest.approx(2.0, abs=0.15)
-    assert stat.kde_mode(skewed) < np.median(skewed) < skewed.mean()
-    assert stat.summarize(skewed)['mode'] == stat.kde_mode(skewed)     # what the csv gets
-    # two groups: the taller peak wins
-    two = np.r_[rng.normal(0, 1, 5000), rng.normal(5, 0.5, 2000)]
-    assert stat.kde_mode(two) == pytest.approx(0.0, abs=0.2)
-    # too few values, or all equal: the median; nothing: NaN
-    assert stat.kde_mode([1.0, 7.0]) == 4.0
-    assert stat.kde_mode([3.0, 3.0, 3.0, 3.0]) == 3.0
-    assert np.isnan(stat.kde_mode([]))
-    assert stat.kde_mode([np.nan, 1.0, 1.0, 2.0, np.inf]) == pytest.approx(1.0, abs=0.2)
+##############################################################################
+#                the two lines of Hussain et al. (2016, eq. 2)               #
+##############################################################################
+def test_the_matrix_of_eq2():
+    mat = two_line_matrix([-3.0, -1.0], [2.0, 4.0, 5.0])
+    assert mat.tolist() == [[-3, 0, 1, 0], [-1, 0, 1, 0], [0, 2, 1, 1], [0, 4, 1, 1],
+                            [0, 5, 1, 1]]
 
 
-def test_mode_sits_where_the_violin_is_widest():
-    """The same kernel and bandwidth as matplotlib's violins."""
-    mlab = pytest.importorskip('matplotlib.mlab')
-    rng = np.random.default_rng(4)
-    for values in (rng.gamma(2.0, 1.0, 400), rng.normal(1.0, 0.2, 60),
-                   np.r_[rng.normal(-1, 0.3, 300), rng.normal(1, 0.5, 200)]):
-        grid = np.linspace(values.min(), values.max(), 200)
-        widest = grid[np.argmax(mlab.GaussianKDE(values, 'scott').evaluate(grid))]
-        assert stat.kde_mode(values) == pytest.approx(widest, abs=1.5 * (grid[1] - grid[0]))
+def test_two_lines_as_one_system_or_two_fits():
+    rng = np.random.default_rng(8)
+    xa, xb = rng.uniform(-5, 0, 400), rng.uniform(0, 5, 300)
+    va = 1.0 + 0.4 * xa + rng.normal(0, 1, xa.size)
+    vb = 1.0 + 3.0 - 0.2 * xb + rng.normal(0, 1, xb.size)
+    fit = fit_two_lines(xa, va, xb, vb, n_boot=1500, seed=4)
+    slope_a, icpt_a = np.polyfit(xa, va, 1)
+    slope_b, icpt_b = np.polyfit(xb, vb, 1)
+    assert fit['params'] == pytest.approx([slope_a, slope_b, icpt_a, icpt_b - icpt_a])
+    assert fit['offset'] == pytest.approx(icpt_b - icpt_a)
+    assert fit['line_a'] == pytest.approx((slope_a, icpt_a))
+    assert fit['line_b'] == pytest.approx((slope_b, icpt_b))
+    assert fit['offset'] == pytest.approx(3.0, abs=4 * fit['std'])
+    # the BLUE's sigma: the scatter about both lines, through (G^T G)^-1
+    mat = two_line_matrix(xa, xb)
+    resid = np.r_[va, vb] - mat @ fit['params']
+    var = resid @ resid / (resid.size - 4)
+    assert fit['offset_std'] == pytest.approx(np.sqrt(var * np.linalg.inv(mat.T @ mat)[3, 3]))
+    # the bootstrap: every parameter per draw, reproducible, as model --creep-offset's
+    assert fit['boot'].shape == (1500, 4)
+    again = fit_two_lines(xa, va, xb, vb, n_boot=1500, seed=4)
+    assert np.array_equal(fit['boot'], again['boot'])
+    assert np.array_equal(fit['boot'][:, 3],
+                          fault_offset(xa, va, xb, vb, n_boot=1500, seed=4)['boot'])
+    assert fit['lo'] < fit['lo68'] < fit['median'] < fit['hi68'] < fit['hi']
+    assert fit['std'] == pytest.approx(fit['offset_std'], rel=0.25)   # independent errors
+    # too few points on a side: nothing
+    assert fit_two_lines(xa[:2], va[:2], xb, vb) is None
+
+
+def test_creep_along_a_line_recovers_a_step():
+    """A step that grows along the fault, on a tilted background."""
+    def field(east, north):
+        x = -(north + 40.0)                                   # + towards block 2 (south)
+        creep = 2.0 + 0.1 * east
+        return 0.3 * x + np.where(x > 0, creep / 2, -creep / 2)
+
+    rng = np.random.default_rng(2)
+    data = metric_field(field) + rng.normal(0, 0.5, (800, 800))
+    line = yx_km([[2, -40], [57, -40]])
+    res = stat.creep_along_line(data, METRIC, BOX, line, 10.0, n_boot=500)
+    assert res['length_km'] == pytest.approx(55.0)
+    assert res['dist_km'] == pytest.approx([2.5, 12.5, 22.5, 32.5, 42.5, 52.5])
+    for dist, prof in zip(res['dist_km'], res['profiles']):
+        fit = prof['fit']
+        want = 2.0 + 0.1 * (2.0 + dist)
+        assert fit['mean'] == pytest.approx(want, abs=max(4 * fit['std'], 0.05))
+        assert fit['offset'] == pytest.approx(want, abs=max(4 * fit['offset_std'], 0.05))
+        assert fit['line_a'][0] == pytest.approx(0.3, abs=0.03)       # the slopes
+        assert prof['n_1'] == prof['n_2'] == 50 * 51
+    # the line drawn the other way: the blocks swap, the creep changes sign
+    back = stat.creep_along_line(data, METRIC, BOX, line[::-1], 10.0, n_boot=200)
+    blue = [p['fit']['offset'] for p in res['profiles']]
+    assert [p['fit']['offset'] for p in back['profiles']] == pytest.approx(-np.array(blue[::-1]))
+    # every point its own bootstrap: reproducible, and not the same draws
+    again = stat.creep_along_line(data, METRIC, BOX, line, 10.0, n_boot=500)
+    assert np.array_equal(again['profiles'][2]['fit']['boot'], res['profiles'][2]['fit']['boot'])
+    assert res['profiles'][1]['fit']['std'] != res['profiles'][2]['fit']['std']
+    # too few pixels: no creep there
+    sparse = np.where(rng.random((800, 800)) < 0.0005, data, np.nan)
+    few = stat.creep_along_line(sparse, METRIC, BOX, line, 10.0, n_boot=100, min_points=10)
+    assert all(p['fit'] is None for p in few['profiles'])
+    with pytest.raises(ValueError):
+        stat.creep_along_line(data, METRIC, BOX, line, 10.0, width_km=0)
 
 
 ##############################################################################
@@ -262,40 +256,13 @@ def test_mirrored_grids():
     assert not stat.grid_mirrored({}, Lookup)
 
     # the same line on a mirrored grid: block 1 is still the left of the GROUND
-    atr = dict(METRIC)
-    frame = stat.polyline_frame(atr, [[400, 100], [400, 700]], mirrored=True)
+    frame = stat.polyline_frame(dict(METRIC), [[400, 100], [400, 700]], mirrored=True)
     # columns now run west: walking along +col is walking WEST, the left is south
     _, points, normals = stat.sample_points(frame, 10)
     assert normals[0] == pytest.approx([0, -1])
-    centres = stat.place_circles(frame, points, normals, 2, 1)[0]
-    rows, _ = stat.to_yx(frame, centres[0])
-    assert np.all(rows > 400)                                 # south = larger row
+    out = stat.profile_pixels(np.ones((800, 800)), BOX, frame, points[0], normals[0], 5, 2.5)
+    assert np.all(out['rows'][out['x_km'] < 0] > 400)        # block 1: south = larger row
     assert stat.to_yx(frame, stat.from_yx(frame, 12.0, 34.0)) == pytest.approx((12.0, 34.0))
-
-
-##############################################################################
-#                       the whole line, on the fixture field                 #
-##############################################################################
-def test_stat_line_recovers_the_block_velocities():
-    """A line up the fault: block 1 (west) moves -, block 2 (east) moves +."""
-    atr = _base_attrs()
-    vel = make_velocity()
-    col = (FAULT_LON - LON0) / DLON - 0.5
-    row = lambda lat: (lat - LAT0) / DLAT - 0.5               # noqa: E731
-    line = [[row(30.05), col], [row(30.52), col]]             # south -> north
-    res = stat.stat_line(vel, atr, (0, 0, vel.shape[1], vel.shape[0]), line, 5.0, 2.0, 1.0)
-    assert res['length_km'] == pytest.approx(0.47 * 111.19, rel=0.01)
-    assert len(res['dist_km']) == 11
-    med = np.array([[s['median'] for s in res['stats'][b]] for b in range(2)]) * 100
-    want = expected_median(3.0)                               # the circle centres: 3 km out
-    assert np.median(med[0]) == pytest.approx(-want, abs=0.6)
-    assert np.median(med[1]) == pytest.approx(want, abs=0.6)
-    assert np.all(med[0] < 0) and np.all(med[1] > 0)
-    # every pixel of block 1 is west of the fault, of block 2 east, by more than 1 km
-    for b, sign in enumerate((-1, 1)):
-        cols = np.concatenate(res['cols'][b])
-        km = ((cols + 0.5) * DLON + LON0 - FAULT_LON) * 111.32 * np.cos(np.radians(30.3))
-        assert np.all(sign * km > 1.0 - 0.01)
 
 
 ##############################################################################
@@ -307,106 +274,150 @@ matplotlib.use('Agg')
 from viewinsar import cli  # noqa: E402
 
 UP_THE_FAULT = ['--line-lalo', '30.05', str(FAULT_LON), '30.52', str(FAULT_LON)]
+CREEP_MM = 4.0                                   # the creep step of creep_file, mm/yr
+
+
+def _write_h5(path, data, **attrs):
+    h5py = pytest.importorskip('h5py')
+    with h5py.File(path, 'w') as fid:
+        fid.create_dataset('velocity', data=np.asarray(data, dtype=np.float32))
+        for key, val in {**_base_attrs(), **attrs}.items():
+            fid.attrs[key] = val
+    return str(path)
+
+
+def lonlat_grid():
+    lon = LON0 + (np.arange(450) + 0.5) * DLON
+    lat = LAT0 + (np.arange(300) + 0.5) * DLAT
+    return np.meshgrid(lon, lat)
+
+
+@pytest.fixture(scope='module')
+def creep_file(tmp_path_factory):
+    """The N-S fault of the fixtures, creeping: a step of CREEP_MM (east side
+    up the LOS) on a linear gradient, in m/year."""
+    lon2d, _ = lonlat_grid()
+    km_east = (lon2d - FAULT_LON) * KM_PER_DEG_LON
+    rng = np.random.default_rng(11)
+    vel = (0.4 * km_east + np.where(km_east > 0, CREEP_MM / 2, -CREEP_MM / 2)
+           + rng.normal(0, 1.0, km_east.shape)) / 1000.0
+    vel[:20, :] = np.nan                                      # a decorrelated strip
+    return _write_h5(tmp_path_factory.mktemp('creep') / 'geo_velocity.h5', vel)
+
+
+def _read_csv(path):
+    return np.genfromtxt(path, delimiter=',', names=True, dtype=None, encoding='utf-8')
 
 
 def test_stat_options(velocity_file):
     inps = cli.stat_cmd_line_parse([velocity_file, '--noverbose', *UP_THE_FAULT])
-    assert (inps.spacing, inps.radius, inps.gap) == (5.0, 2.0, 1.0)
+    assert (inps.spacing, inps.length_km, inps.width_km) == (5.0, 5.0, 2.5)
+    assert (inps.n_boot, inps.seed, inps.min_pixels) == (2000, 0, 10)
     assert inps.line_lalo == [[30.05, FAULT_LON], [30.52, FAULT_LON]]
     assert inps.block_names == ['Block 1', 'Block 2']
-    inps = cli.stat_cmd_line_parse([velocity_file, '--noverbose', '-sp', '2.5', '-r', '1',
-                                    '--gap', '0.5', '--line-yx', '10', '20', '30', '40',
-                                    '50', '60', '-c', 'RdBu_r', '--names', 'W', 'E'])
-    assert (inps.spacing, inps.radius, inps.gap) == (2.5, 1.0, 0.5)
+    inps = cli.stat_cmd_line_parse([velocity_file, '--noverbose', '-sp', '2.5', '--length', '4',
+                                    '--width', '1.5', '--boot', '500', '--seed', '7',
+                                    '--min-pixels', '20', '--line-yx', '10', '20', '30',
+                                    '40', '50', '60', '-c', 'RdBu_r', '--names', 'W', 'E'])
+    assert (inps.spacing, inps.length_km, inps.width_km) == (2.5, 4.0, 1.5)
+    assert (inps.n_boot, inps.seed, inps.min_pixels) == (500, 7, 20)
     assert inps.line_yx == [[10, 20], [30, 40], [50, 60]]
     assert inps.block_names == ['W', 'E']
     assert inps.view_extra == ['-c', 'RdBu_r']               # the rest goes to view.py
 
-    bad = [['-sp', '0'], ['-r', '-1'], ['--gap', '-0.1'], ['--line-yx', '1', '2', '3'],
-           ['--line-yx', '1', '2'], ['--colors', 'red', 'notacolour'],
-           ['--line-file', 'nowhere.shp'], ['--nodisplay'],
-           ['--line-yx', '1', '2', '3', '4', '--line-lalo', '30', '130', '30.1', '130']]
+    bad = [['-sp', '0'], ['--length', '-1'], ['--width', '0'], ['--boot', '50'],
+           ['--min-pixels', '2'], ['--line-yx', '1', '2', '3'], ['--line-yx', '1', '2'],
+           ['--colors', 'red', 'notacolour'], ['--line-file', 'nowhere.shp'], ['--nodisplay'],
+           ['--line-yx', '1', '2', '3', '4', '--line-lalo', '30', '130', '30.1', '130'],
+           ['--los-inc', '30'], ['--los-inc', '30', '31', '--los-az', '100', '-100'],
+           ['--geom', 'nowhere.h5']]
     for extra in bad:
         with pytest.raises(ValueError):
             cli.stat_cmd_line_parse([velocity_file, '--noverbose', *extra])
 
 
-def _read_csv(path):
-    return np.genfromtxt(path, delimiter=',', names=True)
+def test_the_circles_and_the_block_rate_are_gone(velocity_file, capsys):
+    """0.5.8: --radius, --gap, --rate and --rate-err (and -r, -rate) are left out,
+    with their values and a note, so the commands of before still run."""
+    argv = [velocity_file, '--radius', '2', '--gap=0.5', '-rate', '--rate-err', 'sem', '-r',
+            '3', '--rate', '--spacing', '5', '-v', '-1', '1']
+    assert cli.modern_options(argv, 'stat') == [velocity_file, '--spacing', '5', '-v', '-1',
+                                                 '1']
+    out = capsys.readouterr().out
+    for old in ('--radius', '--gap', '-rate', '--rate-err', '-r', '--rate'):
+        assert f'NOTE: {old} is not needed any more' in out
+    assert '--length, --width' in out and 'bootstrap' in out
+    known = set(cli.create_stat_parser()._option_string_actions)
+    assert not known & {'--radius', '--gap', '--rate', '--rate-err', '-r'}
+    inps = cli.stat_cmd_line_parse([velocity_file, '--noverbose', '--radius', '2', '--gap',
+                                    '1', *UP_THE_FAULT])
+    assert inps.view_extra == []
 
 
-def test_stat_end_to_end(velocity_file, tmp_path):
-    obj = cli.stat_main([velocity_file, '-sp', '10', '-r', '2', *UP_THE_FAULT,
-                         '--nodisplay', '--noverbose', '--outdir', str(tmp_path)])
+def test_stat_end_to_end(creep_file, tmp_path):
+    obj = cli.stat_main([creep_file, '-sp', '10', *UP_THE_FAULT, '--nodisplay', '--noverbose',
+                         '--outdir', str(tmp_path)])
     names = sorted(os.listdir(tmp_path))
     base = os.path.basename(obj.outfile_base)
-    assert names == sorted(f'{base}{tail}' for tail in
-                           ('.png', '_map.png', '_stats.csv', '_values.csv', '_info.txt'))
-    assert base.endswith('_sp10km_r2km')
+    assert names == sorted(f'{base}{tail}' for tail in (
+        '.png', '_map.png', '_creep.csv', '_values.csv', '_info.txt', '_profiles.png'))
+    assert base.endswith('_sp10km_L5km_w2.5km')
+    assert obj.rate_unit == 'mm/yr' and obj.factor == 10.0      # view.py's cm/year -> mm/yr
 
-    st = _read_csv(tmp_path / f'{base}_stats.csv')
-    assert len(st) == 6
-    want = expected_median(3.0)                               # cm/year, view.py's unit
-    assert np.median(st['median_b1']) == pytest.approx(-want, abs=0.8)
-    assert np.median(st['median_b2']) == pytest.approx(want, abs=0.8)
-    assert st['median_b1_minus_b2'] == pytest.approx(st['median_b1'] - st['median_b2'])
-    assert st['offset_km_b1'] == pytest.approx(3.0) and st['offset_km_b2'] == pytest.approx(3.0)
-    assert np.all(st['count_b1'] > 200) and np.all(st['count_b2'] > 200)
-    assert st['lon'] == pytest.approx(FAULT_LON, abs=0.002)
-    assert np.diff(st['dist_km']) == pytest.approx(10.0)
+    cr = _read_csv(tmp_path / f'{base}_creep.csv')
+    assert len(cr) == 6
+    assert np.all(cr['label'] == 'geo_velocity') and np.all(cr['orbit'] == 'asc')
+    # block 2 (east, the right of a line drawn north) - block 1, in mm/yr
+    assert cr['creep'] == pytest.approx(CREEP_MM, abs=0.6)
+    assert np.all(np.abs(cr['creep'] - CREEP_MM) < 4 * cr['creep_std'] + 0.05)
+    assert cr['creep_blue'] == pytest.approx(cr['creep'], abs=0.1)
+    assert np.all((cr['creep_lo95'] < cr['creep']) & (cr['creep'] < cr['creep_hi95']))
+    assert np.all((cr['creep_lo95'] < cr['creep_lo68']) & (cr['creep_hi68'] < cr['creep_hi95']))
+    assert cr['slope_1'] == pytest.approx(0.4, abs=0.08)     # mm/yr per km, east is +
+    assert cr['slope_2'] == pytest.approx(0.4, abs=0.08)
+    assert np.all(cr['n_1'] == 26 * 23) and np.all(cr['n_2'] == 26 * 23)   # 5 x 5 km a side
+    assert cr['lon'] == pytest.approx(FAULT_LON, abs=0.002)
+    assert cr['strike_deg'] == pytest.approx(0.0, abs=0.5)   # the line runs north
+    assert cr['trace_km'] == pytest.approx(0.0, abs=1e-6) and np.all(cr['dropped'] == 0)
+    assert np.diff(cr['dist_km']) == pytest.approx(10.0)
 
     val = _read_csv(tmp_path / f'{base}_values.csv')
-    assert len(val) == st['count_b1'].sum() + st['count_b2'].sum()
-    assert val['dist_to_line_km'].min() >= 1.0 - 1e-6
+    assert len(val) == cr['n_1'].sum() + cr['n_2'].sum()
     assert np.all(val['lon'][val['block'] == 1] < FAULT_LON)
     assert np.all(val['lon'][val['block'] == 2] > FAULT_LON)
+    assert np.abs(val['x_km']).max() <= 5.0 + 1e-6 and np.abs(val['y_km']).max() <= 2.5 + 1e-6
+    # x is the distance east of the line (on the pixel centres of the fault's), across
+    km_east = (val['lon'] - cr['lon'][0]) * KM_PER_DEG_LON
+    assert val['x_km'] == pytest.approx(km_east, abs=0.01)
 
     info = (tmp_path / f'{base}_info.txt').read_text()
-    assert 'LEFT of the line' in info and 'gap            : 1.0 km' in info
+    assert 'LEFT of the line' in info and 'Hussain et al. (2016), eq. 2' in info
+    assert 'creep rate = Block 2 - Block 1' in info
 
-    # the mode of each circle, next to its median and mean
-    for b in (1, 2):
-        assert np.all(np.isfinite(st[f'mode_b{b}']))
-        assert np.all(np.abs(st[f'mode_b{b}'] - st[f'median_b{b}']) < 3.0)
-
-    # the plot: two violins per point, two dashed median lines
-    ax = obj.ax_stat
-    dashed = [ln for ln in ax.get_lines() if ln.get_linestyle() == '--']
-    assert len(dashed) == 2
-    assert len(dashed[0].get_xdata()) == 6
-    assert dashed[0].get_color() != dashed[1].get_color()
-    # just the block names in the legend - which side is which is on the map
-    labels = [t.get_text() for t in ax.get_legend().get_texts()]
-    assert labels == ['Block 1', 'Block 2', 'Median', 'Mean', 'Mode']
-    # a strike per violin at its median, mean and mode
-    strikes = {c.get_gid(): c for c in ax.collections if c.get_gid()}
-    for b in (1, 2):
-        for key in ('median', 'mean', 'mode'):
-            ys = [seg[0][1] for seg in strikes[f'{key}_b{b}'].get_segments()]
-            assert ys == pytest.approx(st[f'{key}_b{b}'], abs=1e-5)
-    assert strikes['mode_b1'].get_linestyle() != strikes['mean_b1'].get_linestyle()
-
-    # the colours: a block's circles on the map are filled and edged as its violins
-    bodies = [c for c in ax.collections if not c.get_gid()]
-    assert len(bodies) == 12
-    circles = obj.ax_img.patches
-    assert len(circles) == 12
-    for body, circle in zip(bodies[::6], circles[::6]):
-        assert body.get_facecolor()[0][:3] == pytest.approx(circle.get_facecolor()[:3])
-        assert body.get_edgecolor()[0][:3] == pytest.approx(circle.get_edgecolor()[:3])
-        assert body.get_facecolor()[0][3] == 1.0              # not see-through
-    assert bodies[0].get_facecolor()[0][:3] != pytest.approx(bodies[6].get_facecolor()[0][:3])
-    # and the map has the key
+    # the plot: one series, its points the creep rates of the table
+    assert len(obj.axes_stat) == 1
+    line = [ln for ln in obj.ax_stat.get_lines() if ln.get_gid() == 'creep_1'][0]
+    assert np.asarray(line.get_ydata()) == pytest.approx(cr['creep'], abs=1e-6)
+    assert line.get_linestyle() == '--'                       # an ascending track
+    assert [t.get_text() for t in obj.ax_stat.get_legend().get_texts()] == ['geo_velocity']
+    assert obj.ax_stat.get_ylabel() == 'LOS creep rate (mm/yr)'
+    # the map: each profile as two halves, the points as black circles, the key
+    halves = [p for p in obj.ax_img.patches if str(p.get_gid()).startswith('profile_')]
+    assert len(halves) == 12
+    assert halves[0].get_edgecolor()[:3] != pytest.approx(halves[1].get_edgecolor()[:3])
+    points = [ln for ln in obj.ax_img.get_lines() if ln.get_gid() == 'points'][0]
+    assert len(points.get_xdata()) == 6
     keys = [a for a in obj.ax_img.get_children() if isinstance(a, matplotlib.legend.Legend)]
-    assert [t.get_text() for t in keys[0].get_texts()] == ['Block 1', 'Block 2']
+    assert [t.get_text() for t in keys[0].get_texts()] == ['Block 1', 'Block 2',
+                                                           'Profile point']
 
 
-def test_stat_interactive(velocity_file, tmp_path):
+def test_stat_interactive(creep_file, tmp_path):
     from matplotlib.backend_bases import KeyEvent, MouseButton, MouseEvent
 
     from viewinsar.statview import StatViewer
 
-    inps = cli.stat_cmd_line_parse([velocity_file, '-sp', '10', '--noverbose',
+    inps = cli.stat_cmd_line_parse([creep_file, '-sp', '10', '--boot', '300', '--noverbose',
                                     '--outdir', str(tmp_path)])
     inps.disp_fig = False                     # draw on Agg, without plt.show()
     obj = StatViewer(inps, cli.get_view_cmd(inps))
@@ -419,12 +430,13 @@ def test_stat_interactive(velocity_file, tmp_path):
         obj.select_point(MouseEvent('button_release_event', obj.fig_map.canvas, x, y,
                                     button=button))
 
-    def key(name):
-        obj.on_key(KeyEvent('key_press_event', obj.fig_map.canvas, key=name))
+    def key(name, fig=None):
+        event = KeyEvent('key_press_event', (fig or obj.fig_map).canvas, key=name)
+        (obj.on_profile_key if fig is not None and fig is obj.fig_prof else obj.on_key)(event)
 
     click(FAULT_LON, 30.05)
-    click(FAULT_LON + 0.01, 30.30)
-    click(FAULT_LON, 30.45)
+    click(FAULT_LON, 30.30)                    # on the fault: x = 0 is where it creeps
+    click(FAULT_LON + 0.05, 30.45)
     assert len(obj.vertices) == 3
     key('u')                                   # undo the last point
     assert len(obj.vertices) == 2
@@ -433,24 +445,52 @@ def test_stat_interactive(velocity_file, tmp_path):
     assert len(obj.vertices) == 3
     key('enter')
     assert obj.finished and obj.result is not None
-    med = [np.nanmedian([s['median'] for s in obj.result['stats'][b]]) for b in range(2)]
-    assert med[0] < -3 and med[1] > 3
-    # the map shows the circles: one patch per circle
-    n_circles = int(np.isfinite(obj.result['offset_km']).sum())
-    assert len(obj.ax_img.patches) >= n_circles
+    creep, std, _ = obj.creep_of(0)
+    assert np.nanmedian(creep) == pytest.approx(CREEP_MM, abs=1.0)
+
+    # a click on a point of the creep rate: its profile, in its own window
+    obj.fig_stat.canvas.draw()
+    ax = obj.axes_stat[0]
+    x, y = ax.transData.transform((obj.line['dist_km'][2], creep[2]))
+    obj.on_stat_click(MouseEvent('button_release_event', obj.fig_stat.canvas, x + 3, y - 3,
+                                 button=MouseButton.LEFT))
+    assert obj.selected == (0, 2) and obj.fig_prof is not None
+    ax1, ax2 = obj.fig_prof.axes[:2]
+    pixels = [ln for ln in ax1.get_lines() if ln.get_gid() == 'pixels'][0]
+    prof = obj.result['profiles'][2]
+    assert len(pixels.get_xdata()) == prof['n_1'] + prof['n_2']
+    labels = [t.get_text() for t in ax1.get_legend().get_texts()]
+    assert labels == ['BLUE', 'Bootstrap']
+    labels = [t.get_text() for t in ax2.get_legend().get_texts()]
+    assert labels[0] == 'Bootstrap draws' and labels[1].startswith('Bootstrap: ')
+    assert labels[2].startswith('BLUE: ') and '95%' in labels[1]
+    assert ax2.get_ylabel() == 'Normalised PDF'
+    assert any(ln.get_gid() == 'selected' for ln in obj.ax_img.get_lines())  # on the map
+    # far from any point: nothing
+    obj.on_stat_click(MouseEvent('button_release_event', obj.fig_stat.canvas, x, y + 200,
+                                 button=MouseButton.LEFT))
+    assert obj.selected == (0, 2)
+    # the arrows: the point after / before (and never past the ends)
+    key('right', obj.fig_prof)
+    assert obj.selected == (0, 3)
+    for _ in range(5):
+        key('left', obj.fig_prof)
+    assert obj.selected == (0, 0)
 
     key('e')
-    assert any(p.name.endswith('_stats.csv') for p in tmp_path.iterdir())
+    written = {p.name for p in tmp_path.iterdir()}
+    assert any(n.endswith('_creep.csv') for n in written)
+    assert any(n.endswith('_profile1.png') for n in written)      # the one on screen
 
     # a click after Enter starts a new line
     click(FAULT_LON, 30.10)
     assert not obj.finished and len(obj.vertices) == 1
     key('n')
-    assert obj.vertices == [] and obj.result is None
+    assert obj.vertices == [] and obj.result is None and obj.selected is None
     obj.close()
 
 
-def test_stat_line_file_takes_the_longest_line(velocity_file, tmp_path):
+def test_stat_line_file_takes_the_longest_line(creep_file, tmp_path):
     obj = {'type': 'FeatureCollection', 'features': [
         {'type': 'Feature', 'properties': {},
          'geometry': {'type': 'LineString', 'coordinates': [[130.2, 30.2], [130.25, 30.22]]}},
@@ -460,108 +500,149 @@ def test_stat_line_file_takes_the_longest_line(velocity_file, tmp_path):
                                       [FAULT_LON, 30.52]]}}]}
     path = tmp_path / 'trace.geojson'
     path.write_text(json.dumps(obj))
-    viewer = cli.stat_main([velocity_file, '-sp', '10', '--line-file', str(path), '--nodisplay',
-                            '--noverbose', '--outdir', str(tmp_path / 'out')])
-    assert viewer.result['length_km'] == pytest.approx(0.47 * 111.19, rel=0.01)
-    med = [np.nanmedian([s['median'] for s in viewer.result['stats'][b]]) for b in range(2)]
-    assert med[0] < -3 and med[1] > 3
+    viewer = cli.stat_main([creep_file, '-sp', '10', '--boot', '300', '--line-file', str(path),
+                            '--nodisplay', '--noverbose', '--outdir', str(tmp_path / 'out')])
+    assert viewer.line['length_km'] == pytest.approx(0.47 * 111.19, rel=0.01)
+    assert np.nanmedian(viewer.creep_of(0)[0]) == pytest.approx(CREEP_MM, abs=1.0)
 
 
 def test_stat_on_radar_coded_data(tmp_path):
-    """Descending: the grid is a mirror image of the ground; west must stay block 1."""
+    """Descending: the grid is a mirror image of the ground; west must stay
+    block 1 - and the two lines through an arctan are what its pixels give."""
     from test_radar import make_radar_product
 
     vfile, _ = make_radar_product(str(tmp_path / 'proc'))
-    obj = cli.stat_main([vfile, '-sp', '5', '-r', '2', '--line-lalo', '30.30',
+    obj = cli.stat_main([vfile, '-sp', '5', '--boot', '300', '--line-lalo', '30.30',
                          str(FAULT_LON), '30.50', str(FAULT_LON), '--nodisplay',
                          '--noverbose', '--outdir', str(tmp_path / 'out')])
     assert obj.mirrored is True
-    st = _read_csv(next((tmp_path / 'out').glob('*_stats.csv')))
-    assert np.all(st['median_b1'] < 0) and np.all(st['median_b2'] > 0)
-    assert np.median(st['median_b2']) == pytest.approx(expected_median(3.0), abs=1.5)
+    cr = _read_csv(next((tmp_path / 'out').glob('*_creep.csv')))
     val = _read_csv(next((tmp_path / 'out').glob('*_values.csv')))
-    assert np.all(val['lon'][val['block'] == 1] < FAULT_LON)
-    assert np.all(val['lon'][val['block'] == 2] > FAULT_LON)
+    # (a pixel centre ON the fault - within a metre - may go either way)
+    assert np.all(val['lon'][val['block'] == 1] < FAULT_LON + 1e-5)
+    assert np.all(val['lon'][val['block'] == 2] > FAULT_LON - 1e-5)
+    assert np.all(cr['slope_1'] > 0) and np.all(cr['slope_2'] > 0)   # faster to the east
+    # the creep of the noise-free arctan at the same pixels
+    for point in cr['point']:
+        one = val[val['point'] == point]
+        km_east = (one['lon'] - FAULT_LON) * 111.32 * np.cos(np.radians(30.4))
+        true = 300 * (2 / np.pi) * np.arctan(km_east / 8.0)          # mm/yr
+        a, b = one['block'] == 1, one['block'] == 2
+        want = fit_two_lines(one['x_km'][a], true[a], one['x_km'][b], true[b], n_boot=10)
+        row = cr[cr['point'] == point]
+        assert row['creep'][0] == pytest.approx(want['offset'], abs=4 * row['creep_std'][0] + 0.3)
+
+
+##############################################################################
+#                ascending and descending: the split                         #
+##############################################################################
+FAULT_LAT = 30.30                     # an E-W fault on the pixel edge of rows 149 | 150
+PAR_MM, UP_MM = 6.0, 2.0              # right-lateral creep; the south side up
+
+
+def los_vector(inc, az):
+    i, a = np.radians(inc), np.radians(az)
+    return -np.sin(i) * np.sin(a), np.sin(i) * np.cos(a), np.cos(i)
+
+
+@pytest.fixture(scope='module')
+def asc_desc(tmp_path_factory):
+    """A descending and an ascending track over an E-W fault that creeps: the
+    north side east by PAR_MM (right-lateral), the south side up by UP_MM."""
+    folder = tmp_path_factory.mktemp('asc_desc')
+    lon2d, lat2d = lonlat_grid()
+    north = lat2d > FAULT_LAT
+    ve = np.where(north, PAR_MM / 2, -PAR_MM / 2) + 0.2 * (lat2d - FAULT_LAT) * 111.19
+    vu = np.where(north, -UP_MM / 2, UP_MM / 2)
+    rng = np.random.default_rng(21)
+    files = []
+    for name, inc, az, orbit in (('T036D', 39.0, -100.0, 'DESCENDING'),
+                                 ('T131A', 34.0, 100.0, 'ASCENDING')):
+        e, n, u = los_vector(inc, az)
+        vel = (ve * e + vu * u + rng.normal(0, 0.8, ve.shape)) / 1000.0
+        files.append(_write_h5(folder / f'{name}.h5', vel, ORBIT_DIRECTION=orbit))
+    return files
+
+
+ALONG_THE_FAULT = ['--line-lalo', str(FAULT_LAT), '130.10', str(FAULT_LAT), '130.80']
+
+
+def test_stat_split_into_fault_parallel_and_vertical(asc_desc, tmp_path):
+    obj = cli.stat_main([*asc_desc, '--labels', 'T036D', 'T131A', '--los-inc', '39', '34',
+                         '--los-az', '-100', '100', '-sp', '10', '--boot', '500',
+                         *ALONG_THE_FAULT, '--names', 'North', 'South', '--nodisplay',
+                         '--noverbose', '--outdir', str(tmp_path)])
+    assert obj.orbits == ['desc', 'asc'] and obj.split_files == [0, 1]
+    base = os.path.basename(obj.outfile_base)
+    names = set(os.listdir(tmp_path))
+    for tail in ('_creep.csv', '_split.csv', '_values.csv', '_info.txt', '.png', '_map.png',
+                 '_profiles.png', '_profiles_2.png'):
+        assert f'{base}{tail}' in names, tail
+
+    # the LOS creep of each track: block 2 (south) - block 1 (north)
+    cr = _read_csv(tmp_path / f'{base}_creep.csv')
+    for label, inc, az in (('T036D', 39.0, -100.0), ('T131A', 34.0, 100.0)):
+        e, _, u = los_vector(inc, az)
+        rows = cr[cr['label'] == label]
+        want = -PAR_MM * e + UP_MM * u
+        assert rows['creep'] == pytest.approx(want, abs=0.5)
+        assert rows['los_east'] == pytest.approx(e, abs=1e-6)
+        assert rows['los_up'] == pytest.approx(u, abs=1e-6)
+    assert cr['strike_deg'] == pytest.approx(90.0, abs=0.5)  # walking east
+
+    sp = _read_csv(tmp_path / f'{base}_split.csv')
+    assert len(sp) == len(cr) // 2
+    assert sp['par_mean'] == pytest.approx(PAR_MM, abs=0.6)      # + right-lateral
+    assert sp['up_mean'] == pytest.approx(UP_MM, abs=0.4)        # + South up
+    assert sp['par'] == pytest.approx(sp['par_mean'], abs=0.15)
+    assert np.all(sp['par_std'] > 0) and np.all(sp['files'] == 'T036D+T131A')
+    info = (tmp_path / f'{base}_info.txt').read_text()
+    assert 'fault-parallel creep (+ right-lateral)' in info and 'South up' in info
+
+    # two panels: the LOS of each track, and the split in red and blue
+    assert len(obj.axes_stat) == 2
+    lines = {ln.get_gid(): ln for ax in obj.axes_stat for ln in ax.get_lines() if ln.get_gid()}
+    assert lines['creep_1'].get_linestyle() == '-' and lines['creep_2'].get_linestyle() == '--'
+    assert np.asarray(lines['split_par'].get_ydata()) == pytest.approx(sp['par_mean'])
+    assert matplotlib.colors.to_hex(lines['split_par'].get_color()) == '#d62728'
+    assert matplotlib.colors.to_hex(lines['split_up'].get_color()) == '#1f77b4'
+    texts = [t.get_text() for t in obj.axes_stat[1].get_legend().get_texts()]
+    assert texts == ['Fault-parallel (+ right-lateral)', 'Vertical (+ South up)']
+    texts = [t.get_text() for t in obj.axes_stat[0].get_legend().get_texts()]
+    assert texts == ['T036D', 'T131A', 'descending', 'ascending']
+
+    # the line drawn the other way: the same right-lateral creep, the other side up
+    back = cli.stat_main([*asc_desc, '--los-inc', '39', '34', '--los-az', '-100', '100',
+                          '-sp', '10', '--boot', '300', '--line-lalo', str(FAULT_LAT), '130.80',
+                          str(FAULT_LAT), '130.10', '--nodisplay', '--noverbose',
+                          '--outdir', str(tmp_path / 'back')])
+    assert np.nanmedian(back.split['par_mean']) == pytest.approx(PAR_MM, abs=0.6)
+    assert np.nanmedian(back.split['up_mean']) == pytest.approx(-UP_MM, abs=0.4)
+
+
+def test_stat_split_needs_real_geometries(asc_desc, tmp_path, capsys):
+    """Nominal angles (of ORBIT_DIRECTION, of a name) are not used for the
+    split: one panel, and a note that says how to give the geometry."""
+    obj = cli.stat_main([*asc_desc, '-sp', '10', '--boot', '200', *ALONG_THE_FAULT,
+                         '--nodisplay', '--outdir', str(tmp_path)])
+    out = capsys.readouterr().out
+    assert obj.split_files == [] and obj.split is None and len(obj.axes_stat) == 1
+    assert 'only nominal angles' in out and '--los-inc / --los-az' in out
+    assert not any(p.name.endswith('_split.csv') for p in tmp_path.iterdir())
+    assert 'the same profiles across the line on each' in out
 
 
 def test_help_mentions_stat(capsys):
     cli.main(['--help'])
     out = capsys.readouterr().out
-    assert 'stat' in out and 'violins' in out
+    assert 'stat - fault creep along a line' in out and 'violins' not in out
     with pytest.raises(SystemExit):
         cli.main(['stat', '--help'])
     out = capsys.readouterr().out
-    for needle in ('-sp', '--radius', '--gap', 'LEFT side of the line', '--line-file',
-                   '_values.csv', 'median_b1_minus_b2', 'Backspace'):
+    for needle in ('-sp', '--length', '--width', '--boot', '--min-pixels', '--geom',
+                   'LEFT side of', 'Hussain et al. (2016)', 'eq. 2', 'BLUE', 'bootstrap',
+                   '--line-file', '_creep.csv', '_split.csv', '_values.csv', '_profiles.png',
+                   'Backspace', 'fault-parallel', 'right-lateral', 'arrow'):
         assert needle in out, needle
-
-
-##############################################################################
-#                       several files, and the rate                          #
-##############################################################################
-@pytest.fixture(scope='module')
-def east_up(tmp_path_factory):
-    """The fixture velocity as an east velocity, and a flat up velocity."""
-    h5py = pytest.importorskip('h5py')
-    folder = tmp_path_factory.mktemp('east_up')
-    rng = np.random.default_rng(9)
-    vel = make_velocity()
-    files = []
-    for name, data in (('ve.h5', vel), ('vu.h5', rng.normal(0, 0.02, vel.shape))):
-        with h5py.File(folder / name, 'w') as fid:
-            fid.create_dataset('velocity', data=np.asarray(data, dtype=np.float32))
-            for key, val in _base_attrs().items():
-                fid.attrs[key] = val
-        files.append(str(folder / name))
-    return files
-
-
-def test_stat_rate_of_two_files(east_up, tmp_path):
-    obj = cli.stat_main([*east_up, '--labels', 'East', 'Up', '-rate', '-sp', '10', '-r', '2',
-                         *UP_THE_FAULT, '--nodisplay', '--noverbose', '--outdir', str(tmp_path)])
-    base = os.path.basename(obj.outfile_base)
-    names = set(os.listdir(tmp_path))
-    for tail in ('_rate.csv', '_stats.csv', '_2_stats.csv', '_values.csv', '_2_values.csv',
-                 '.png', '_map.png', '_info.txt'):
-        assert f'{base}{tail}' in names, tail
-
-    rate = _read_csv(tmp_path / f'{base}_rate.csv')
-    assert rate.dtype.names[:4] == ('point', 'dist_km', 'row', 'col')
-    for col in ('rate_1', 'rate_err_1', 'rate_2', 'rate_err_2'):
-        assert col in rate.dtype.names
-    st1 = _read_csv(tmp_path / f'{base}_stats.csv')
-    st2 = _read_csv(tmp_path / f'{base}_2_stats.csv')
-    # the rate is block 1 - block 2, the slip across the fault
-    assert rate['rate_1'] == pytest.approx(st1['median_b1'] - st1['median_b2'], abs=1e-5)
-    assert rate['rate_2'] == pytest.approx(st2['median_b1'] - st2['median_b2'], abs=1e-5)
-    assert np.median(rate['rate_1']) == pytest.approx(-2 * expected_median(3.0), abs=1.5)
-    assert np.all(np.abs(rate['rate_2']) < 0.5)
-    # iqr errors: the robust spread of the two circles
-    s1 = (st1['q75_b1'] - st1['q25_b1']) / 1.349
-    s2 = (st1['q75_b2'] - st1['q25_b2']) / 1.349
-    assert rate['rate_err_1'] == pytest.approx(np.hypot(s1, s2), rel=1e-4)
-
-    # one panel, a series per file, a line at zero
-    ax = obj.ax_stat
-    assert len(obj.axes_stat) == 1
-    labels = [t.get_text() for t in ax.get_legend().get_texts()]
-    assert labels == ['East', 'Up']
-    assert 'rate = Block 1' in ax.get_title()
-
-    # the standard error of the medians is much smaller
-    sem = cli.stat_main([*east_up, '-rate', '--rate-err', 'sem', '-sp', '10', '-r', '2',
-                         *UP_THE_FAULT, '--nodisplay', '--noverbose',
-                         '--outdir', str(tmp_path / 'sem')])
-    rate_sem = _read_csv(next((tmp_path / 'sem').glob('*_rate.csv')))
-    assert np.all(rate_sem['rate_err_1'] < rate['rate_err_1'] / 5)
-    assert sem.rate_err == 'sem'
-
-
-def test_stat_violins_of_two_files(east_up, tmp_path):
-    obj = cli.stat_main([*east_up, '-sp', '10', '-r', '2', *UP_THE_FAULT, '--nodisplay',
-                         '--noverbose', '--outdir', str(tmp_path)])
-    assert len(obj.axes_stat) == 2 and obj.labels == ['ve', 'vu']
-    assert not any(p.name.endswith('_rate.csv') for p in tmp_path.iterdir())
-    for ax in obj.axes_stat:
-        assert len([c for c in ax.collections if not c.get_gid()]) == 12   # 6 points x 2
-    assert 'labels         :' in next(tmp_path.glob('*_info.txt')).read_text()
+    for gone in ('--radius', '--gap', '--rate', 'violin'):
+        assert gone not in out, gone

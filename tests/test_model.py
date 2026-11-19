@@ -727,7 +727,7 @@ def test_model_creep_offset(tmp_path):
 
 
 def test_model_density_view(products, tmp_path):
-    """--cmap-prof: the pixels as a point density, as swath draws it - no points,
+    """--cmap-prof: the pixels as a pixel density, as swath draws it - no points,
     the 95 % range red, bigger medians, a colour bar; --nlook fills the density
     in but the fit takes the real pixels, exactly as without it."""
     from matplotlib.collections import PathCollection, PolyCollection, QuadMesh
@@ -777,7 +777,7 @@ def test_model_density_view(products, tmp_path):
     assert median_size(ax) > 1.8 * median_size(sp.ax_swath)
     # the GNSS: red on a density, blue on the points - outlined in white either way
     assert gnss_face(ax) == {'#d62728'} and gnss_face(sp.ax_swath) == {'#1f77b4'}
-    assert sd.ax_cbar.get_ylabel().startswith('Point density')
+    assert sd.ax_cbar.get_ylabel().startswith('Pixel density')
     # the legend: the files first, the GNSS red in it too
     labels = [t.get_text() for t in ax.get_legend().get_texts()]
     assert labels[:3] == ['T1A', 'T2D', 'Median per 1 km (±1σ)'] and 'GNSS' in labels
@@ -969,6 +969,6 @@ def test_help_mentions_model(capsys):
     out = capsys.readouterr().out
     for needle in ('--comp', '--creep', '--free-x0', '--d1-prior', '--noise', '--walkers',
                    '-gnss', '_posterior.png', '_samples.csv', 'Goodman & Weare',
-                   'Hussain et al.', '--cmap-prof', 'point DENSITY', '--creep-offset',
+                   'Hussain et al.', '--cmap-prof', 'pixel DENSITY', '--creep-offset',
                    'bootstrap', '--legend', '--bands'):
         assert needle in out, needle

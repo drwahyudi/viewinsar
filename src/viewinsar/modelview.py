@@ -6,7 +6,7 @@ against the distance from the fault - their binned medians, the GNSS, and the
 maximum a posteriori (MAP) model with its 95 % and 68 % ranges and the
 parameters written on the figure, after Hussain et al. (2016, 2018) and Ou et
 al. (2022); and a second window with the posterior distributions of the
-parameters. With --cmap-prof the pixels are a point density instead, as in
+parameters. With --cmap-prof the pixels are a pixel density instead, as in
 swath, under red ranges and bigger medians. A reverse or normal fault
 (`viewinsar model reverse|normal`) gets a panel per component of its data.
 
@@ -44,7 +44,6 @@ from .radar import PIXEL_ATR
 from .raster import same_crs
 from .swath import (
     EARTH_RADIUS,
-    is_projected,
     line_geometry,
     nice_step,
     project_points,
@@ -53,11 +52,9 @@ from .swath import (
 )
 from .viewer import (
     GNSS_EDGE,
-    NO_LOOKUP,
     Section,
     _new_figure,
     export_dir,
-    per_file,
     swathProfileViewer,
     velocity_factor,
     white_halo,
@@ -1041,7 +1038,7 @@ class ModelSection(Section):
         cax.set_axis_on()
         cbar = self.fig.colorbar(pcm, cax=cax, extend='max')
         unit = v.model_unit.split('/')[0] if _unit_text(v.model_unit).strip() else ''
-        cbar.set_label(f"Point density\n[count / {den['bin_x']:g} km x {den['bin_y']:.3g}"
+        cbar.set_label(f"Pixel density\n[count / {den['bin_x']:g} km x {den['bin_y']:.3g}"
                        f"{' ' + unit if unit else ''} cell]", fontsize=max(v.font_size - 2, 6))
         cbar.ax.tick_params(labelsize=max(v.font_size - 2, 6))
         return pcm
@@ -2150,27 +2147,6 @@ class ModelViewer(swathProfileViewer):
         return gnss.component(comp)
 
     ##---------- geometry
-    def pixel_lonlat(self, index, rows, cols):
-        """lon/lat of pixels of file `index` (its own grid); None for a
-        projected grid of unknown CRS."""
-        rows = np.asarray(rows, dtype=np.float64)
-        cols = np.asarray(cols, dtype=np.float64)
-        atr_i = self.atr_list[index]
-        if 'Y_FIRST' not in atr_i:
-            if self.lookup is None:
-                raise ValueError(NO_LOOKUP)
-            return self.lookup.to_lonlat(rows, cols)
-        xs = float(atr_i['X_FIRST']) + (cols + 0.5) * float(atr_i['X_STEP'])
-        ys = float(atr_i['Y_FIRST']) + (rows + 0.5) * float(atr_i['Y_STEP'])
-        crs = self.crs_list[index] if index < len(self.crs_list) else self.data_crs
-        if crs is None:
-            return None if is_projected(atr_i) else (xs, ys)
-        if same_crs(crs, 4326):
-            return xs, ys
-        from pyproj import Transformer
-        lon, lat = Transformer.from_crs(crs, 4326, always_xy=True).transform(xs, ys)
-        return np.asarray(lon), np.asarray(lat)
-
     def make_frame(self, row, col):
         """The local east / north frame (km) at a pixel of the first file."""
         lonlat = self.pixel_lonlat(0, [row], [col])
@@ -2238,38 +2214,6 @@ class ModelViewer(swathProfileViewer):
         near = np.all(np.isfinite(pts), axis=1) & (np.hypot(*pts.T) <= radius_km)
         sel = pts[near] if near.sum() >= 2 else pts[k:k + 2]
         return strike_of_points(sel[:, 0], sel[:, 1])
-
-    def _los_geometry(self, index):
-        from .gnss import LOSGeometry
-        if index not in self._los:
-            files = self.geom_file or []
-            given = files[index] if index < len(files) else None
-            self._los[index] = LOSGeometry.for_file(self.file[index], self.atr_list[index],
-                                                    geom_file=given,
-                                                    inc=per_file(self.los_inc, index),
-                                                    az=per_file(self.los_az, index),
-                                                    verbose=self.print_msg)
-        return self._los[index]
-
-    def los_vectors(self, index, rows, cols, lon=None, lat=None):
-        """(east, north, up) of the LOS unit vector at pixels of file `index`."""
-        from .gnss import los_unit_vector
-        geom = self._los_geometry(index)
-        atr_i = self.atr_list[index]
-        same = geom.constant or (
-            geom.atr is not None and geom.inc.shape == (int(atr_i['LENGTH']), int(atr_i['WIDTH']))
-            and (('Y_FIRST' in atr_i) == ('Y_FIRST' in geom.atr))
-            and all(abs(float(geom.atr.get(k, 0)) - float(atr_i.get(k, 0)))
-                    <= 1e-6 * max(1.0, abs(float(atr_i.get(k, 0))))
-                    for k in ('X_FIRST', 'Y_FIRST', 'X_STEP', 'Y_STEP') if k in atr_i))
-        if same:
-            inc, az = geom.at_rowcol(rows, cols)
-        else:
-            if lon is None or not np.isfinite(lon).any():
-                raise ValueError(f'{self.labels[index]}: the LOS geometry is on another grid '
-                                 'and the pixels have no lon/lat')
-            inc, az = geom.at_lonlat(lon, lat)
-        return los_unit_vector(inc, az)
 
     ##---------- windows
     def help_msg(self):

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "viewinsar"
 dynamic = ["version"]
-description = "Interactive swath (buffered) profiles, fault block statistics, slip-rate models and time series of InSAR velocity and time-series products (MintPy, LiCSBAS)"
+description = "Interactive swath (buffered) profiles, fault creep along a line, slip-rate models and time series of InSAR velocity and time-series products (MintPy, LiCSBAS)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "GPL-3.0-or-later" }
@@ -17,7 +17,7 @@ maintainers = [
 ]
 keywords = [
     "InSAR", "swath profile", "transect", "linear referencing", "MintPy",
-    "fault", "violin plot", "block statistics", "LiCSBAS", "time series viewer",
+    "fault", "fault creep", "bootstrap", "LiCSBAS", "time series viewer",
     "velocity", "time-series", "deformation", "tectonics", "geodesy", "GNSS",
     "slip rate", "locking depth", "MCMC", "elastic dislocation",
     "remote-sensing",
